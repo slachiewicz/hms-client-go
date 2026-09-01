@@ -306,14 +306,3 @@ func TestSaslPlain_FlushEmptyDoesNotWriteFrame(t *testing.T) {
 
 	require.NoError(t, <-errs)
 }
-
-// isNetTimeout checks if an error is a net.Error with Timeout() == true.
-func isNetTimeout(err error) bool {
-	type timeout interface {
-		Timeout() bool
-	}
-	if te, ok := err.(timeout); ok {
-		return te.Timeout()
-	}
-	return false
-}
