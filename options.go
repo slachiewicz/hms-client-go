@@ -1,0 +1,122 @@
+package hms
+
+import (
+	"net/http"
+	"time"
+)
+
+// Default configuration values applied by New before any Option runs.
+const (
+	defaultCatalog    = "hive"
+	defaultTimeout    = 30 * time.Second
+	defaultMaxRetries = 3
+	defaultPoolSize   = 4
+)
+
+// config accumulates the effect of every Option passed to New.
+type config struct {
+	catalog     string
+	timeout     time.Duration
+	maxRetries  int
+	randomOrder bool
+	poolSize    int
+
+	httpClient  *http.Client
+	httpHeaders map[string]string
+	bearerToken string
+	user        string
+
+	plainUser     string
+	plainPassword string
+}
+
+// newConfig returns a config seeded with the library defaults.
+func newConfig() *config {
+	return &config{
+		catalog:    defaultCatalog,
+		timeout:    defaultTimeout,
+		maxRetries: defaultMaxRetries,
+		poolSize:   defaultPoolSize,
+	}
+}
+
+// Option configures a Client constructed by New.
+type Option func(*config)
+
+// WithCatalog sets the default catalog used by every call that does not
+// override it with a CatalogOption. The default is "hive".
+func WithCatalog(name string) Option {
+	return func(c *config) { c.catalog = name }
+}
+
+// WithTimeout sets the socket / per-request timeout applied when a call's
+// context carries no deadline of its own. The default is 30 seconds.
+func WithTimeout(d time.Duration) Option {
+	return func(c *config) { c.timeout = d }
+}
+
+// WithMaxRetries sets the maximum number of attempts per RPC across
+// endpoints. The default is 3.
+func WithMaxRetries(n int) Option {
+	return func(c *config) { c.maxRetries = n }
+}
+
+// WithRandomEndpointOrder randomizes the order in which endpoints are tried,
+// instead of the default list order.
+func WithRandomEndpointOrder() Option {
+	return func(c *config) { c.randomOrder = true }
+}
+
+// WithPoolSize sets the maximum number of pooled connections per endpoint.
+// The default is 4.
+func WithPoolSize(n int) Option {
+	return func(c *config) { c.poolSize = n }
+}
+
+// WithHTTPClient sets the *http.Client used for the "http://" and "https://"
+// transports. If unset, a default client is constructed.
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *config) { c.httpClient = hc }
+}
+
+// WithHTTPHeaders sets additional headers sent on every HTTP request, for
+// example to satisfy a Knox or other reverse proxy. These take precedence
+// over the library's own default headers.
+func WithHTTPHeaders(h map[string]string) Option {
+	return func(c *config) { c.httpHeaders = h }
+}
+
+// WithBearerToken selects HTTP JWT authentication, sending the token as an
+// "Authorization: Bearer <token>" header.
+func WithBearerToken(token string) Option {
+	return func(c *config) { c.bearerToken = token }
+}
+
+// WithUser sets the principal name sent as "x-actor-username" over HTTP, or
+// as the SASL PLAIN user over binary TCP when WithPlainAuth is not used.
+func WithUser(name string) Option {
+	return func(c *config) { c.user = name }
+}
+
+// WithPlainAuth selects SASL PLAIN authentication over the binary TCP
+// transport.
+func WithPlainAuth(user, password string) Option {
+	return func(c *config) {
+		c.plainUser = user
+		c.plainPassword = password
+	}
+}
+
+// catalogOpts accumulates the effect of every CatalogOption passed to a
+// per-call method.
+type catalogOpts struct {
+	catalog string
+}
+
+// CatalogOption overrides the catalog used by a single call.
+type CatalogOption func(*catalogOpts)
+
+// InCatalog overrides the client's default catalog for a single call.
+func InCatalog(name string) CatalogOption {
+	return func(o *catalogOpts) { o.catalog = name }
+}

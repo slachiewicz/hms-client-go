@@ -80,6 +80,22 @@ func classify(err error) error {
 		errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
 		errors.As(err, &transport), errors.As(err, &netErr):
 		return ErrUnavailable
+	// The remaining cases pass an error through unchanged when it already
+	// is (or wraps) one of this package's own sentinels, e.g. ErrNotSupported
+	// returned directly by resolveCat's catalog probe, so re-wrapping via
+	// wrapError does not misclassify it as ErrMeta.
+	case errors.Is(err, ErrNotFound):
+		return ErrNotFound
+	case errors.Is(err, ErrAlreadyExists):
+		return ErrAlreadyExists
+	case errors.Is(err, ErrInvalidOperation):
+		return ErrInvalidOperation
+	case errors.Is(err, ErrNotSupported):
+		return ErrNotSupported
+	case errors.Is(err, ErrUnavailable):
+		return ErrUnavailable
+	case errors.Is(err, ErrMeta):
+		return ErrMeta
 	}
 	return ErrMeta
 }

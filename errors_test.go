@@ -3,6 +3,7 @@ package hms_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"syscall"
@@ -37,6 +38,11 @@ func TestWrapError(t *testing.T) {
 		{"deadline", context.DeadlineExceeded, hms.ErrUnavailable},
 		{"canceled", context.Canceled, hms.ErrUnavailable},
 		{"thrift transport exception", thrift.NewTTransportException(thrift.END_OF_FILE, "eof"), hms.ErrUnavailable},
+		// classify must pass through an error that already wraps one of
+		// this package's own sentinels (e.g. ErrNotSupported returned
+		// directly by resolveCat's catalog probe) unchanged, rather than
+		// falling through to the ErrMeta default.
+		{"wrapped ErrNotSupported stays ErrNotSupported", fmt.Errorf("resolveCat: %w", hms.ErrNotSupported), hms.ErrNotSupported},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

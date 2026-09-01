@@ -4,3 +4,14 @@ var (
 	WrapError       = wrapError
 	IsUnknownMethod = isUnknownMethod
 )
+
+// NewTestConn returns a zero-value conn suitable for exercising the
+// fallback-cache contract (ConnUseLegacy / ConnMarkLegacy) from a
+// black-box test, without dialing a real transport.
+func NewTestConn() *conn { return &conn{} }
+
+// ConnUseLegacy and ConnMarkLegacy expose conn.useLegacy and
+// conn.markLegacy to hms_test, since Task 11's retry/failover loop is the
+// first in-package caller of the fallback cache they read and write.
+func ConnUseLegacy(cn *conn, method string) bool { return cn.useLegacy(method) }
+func ConnMarkLegacy(cn *conn, method string)     { cn.markLegacy(method) }
