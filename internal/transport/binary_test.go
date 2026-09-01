@@ -2,7 +2,10 @@ package transport_test
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
+	"net"
 	"syscall"
 	"testing"
 	"time"
@@ -125,4 +128,83 @@ func TestDialBinary_FallbackTimeoutFires(t *testing.T) {
 	_, err = fb303.NewFacebookServiceClient(conn.Client).GetStatus(context.Background())
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), time.Second)
+}
+
+// startSaslNegotiator listens on a loopback port and, for each accepted
+// connection, plays the server side of the SASL PLAIN handshake: it reads a
+// START then OK negotiation frame and replies with reply. It proves
+// DialBinary actually drives NewSaslPlain's Open over the wire, rather than
+// exercising saslPlain in isolation as sasl_test.go does.
+func startSaslNegotiator(t *testing.T, replyStatus byte, replyPayload []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		for range 2 {
+			var hdr [5]byte
+			if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+				return
+			}
+			n := binary.BigEndian.Uint32(hdr[1:])
+			if _, err := io.ReadFull(conn, make([]byte, n)); err != nil {
+				return
+			}
+		}
+
+		n := len(replyPayload)
+		if n < 0 || n > 64<<20 {
+			return
+		}
+		out := make([]byte, 5+n)
+		out[0] = replyStatus
+		binary.BigEndian.PutUint32(out[1:5], uint32(n))
+		copy(out[5:], replyPayload)
+		_, _ = conn.Write(out)
+	}()
+
+	return ln.Addr().String()
+}
+
+// TestDialBinary_SaslPlainHandshakeSucceeds proves that setting
+// BinaryConfig.PlainUser drives DialBinary to perform the SASL PLAIN
+// handshake over the real TCP connection before returning.
+func TestDialBinary_SaslPlainHandshakeSucceeds(t *testing.T) {
+	t.Parallel()
+	addr := startSaslNegotiator(t, 5, nil) // saslComplete
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout:       5 * time.Second,
+		PlainUser:     "alice",
+		PlainPassword: "s3cret",
+	})
+	require.NoError(t, err)
+	assert.NoError(t, conn.Close())
+}
+
+// TestDialBinary_SaslPlainRejectedFailsDial proves a SASL rejection during
+// DialBinary surfaces as a dial error rather than being deferred to the
+// first RPC.
+func TestDialBinary_SaslPlainRejectedFailsDial(t *testing.T) {
+	t.Parallel()
+	addr := startSaslNegotiator(t, 3, []byte("denied")) // saslBad
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout:       5 * time.Second,
+		PlainUser:     "alice",
+		PlainPassword: "wrong",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "denied")
 }

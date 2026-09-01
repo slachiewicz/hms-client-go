@@ -15,8 +15,8 @@ type BinaryConfig struct {
 	// Timeout bounds both connect and per-call socket I/O.
 	Timeout time.Duration
 	// PlainUser and PlainPassword select SASL PLAIN authentication when
-	// both are non-empty. Ignored until SASL support lands; when unset the
-	// connection uses NOSASL. See DialBinary.
+	// PlainUser is non-empty; when empty the connection uses NOSASL. See
+	// DialBinary.
 	PlainUser     string
 	PlainPassword string
 }
@@ -58,8 +58,10 @@ func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
 // is the sole owner of the connection's read/write deadlines (see
 // deadlineShield); TSocket is never allowed to set them.
 //
-// PlainUser is currently ignored; Task 4 adds SASL PLAIN support keyed on
-// cfg.PlainUser being non-empty.
+// When cfg.PlainUser is non-empty, DialBinary performs a SASL PLAIN
+// handshake (see NewSaslPlain) before wrapping the transport for buffered
+// I/O; on handshake failure the raw connection is closed and the error is
+// returned unwrapped.
 func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, error) {
 	d := net.Dialer{Timeout: cfg.Timeout}
 	raw, err := d.DialContext(ctx, "tcp", hostPort)
@@ -72,7 +74,13 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 	// connected conn).
 	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.Timeout}
 	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{raw}, tcfg)
-	// Task 4 inserts SASL PLAIN here when cfg.PlainUser != "".
+	if cfg.PlainUser != "" {
+		trans = NewSaslPlain(trans, cfg.PlainUser, cfg.PlainPassword)
+		if err := trans.Open(); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+	}
 	trans = thrift.NewTBufferedTransport(trans, bufferSize)
 	proto := thrift.NewTBinaryProtocolConf(trans, tcfg)
 	std := thrift.NewTStandardClient(proto, proto)
