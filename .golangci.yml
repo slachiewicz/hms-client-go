@@ -1,0 +1,49 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+linters:
+  # "standard" is errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    revive:
+      rules:
+        # Doc comments on exported symbols are enforced. Stuttering is not:
+        # the package is `hms`, so names like hms.Client do not stutter, and
+        # the check adds noise on generated-adjacent names.
+        - name: exported
+          disabled: false
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+          disabled: true
+    gosec:
+      excludes:
+        - G104 # unchecked error in deferred cleanup or test asserts
+        - G304 # file path inclusion in local readers
+  exclusions:
+    paths:
+      - gen/
+
+formatters:
+  exclusions:
+    paths:
+      - gen/
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

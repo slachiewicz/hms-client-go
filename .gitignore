@@ -1,0 +1,12 @@
+# Build and test artifacts
+*.test
+*.out
+*.prof
+coverage.*
+/bin/
+/dist/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
