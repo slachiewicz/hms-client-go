@@ -42,11 +42,11 @@ hms-client-go/
 │   └── hive_metastore/
 ├── internal/
 │   ├── transport/
-│   │   ├── ctxsocket.go           # net.Conn-backed TTransport with per-RPC context binding
-│   │   ├── ctxprotocol.go         # TProtocol wrapper that hands each call's ctx to the socket
-│   │   ├── http.go                # THttpClient wrapper: default path, headers, auth
-│   │   ├── sasl_plain.go          # SASL PLAIN client framing over the binary socket
-│   │   └── factory.go             # URI scheme -> transport
+│   │   ├── uri.go                 # Endpoint list parsing (thrift:// and http(s)://)
+│   │   ├── ctxclient.go           # thrift.TClient wrapper binding ctx deadlines/cancel to the socket
+│   │   ├── binary.go              # TCP dial + optional SASL PLAIN + buffered binary protocol
+│   │   ├── sasl.go                # SASL PLAIN client framing
+│   │   └── http.go                # THttpClient wrapper: default path, headers, auth
 │   ├── pool/
 │   │   └── pool.go                # Connection pool, idle health checks
 │   └── ha/
@@ -90,10 +90,8 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 ### 3.2. Dual Transport Architecture
 
 #### Binary TCP Socket (`thrift://`)
-* `internal/transport/ctxsocket.go` implements `thrift.TTransport` over `net.Conn` and exposes `SetContext(ctx)`.
-* `internal/transport/ctxprotocol.go` wraps `TBinaryProtocol`. Every `TProtocol` method already receives a `context.Context`; the wrapper forwards it to the socket, which sets read/write deadlines from `ctx.Deadline()` (fallback: configured socket timeout) and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })` for cancellation. The `AfterFunc` stop handle is released when the RPC returns.
-* `thrift.TTransport.Read(p []byte)` has no context parameter, so the earlier design of a `Read(ctx, buf)` method is not implementable against the Thrift interface. The protocol-layer binding above is the replacement.
-* SASL PLAIN (`sasl_plain.go`) wraps the socket when `WithPlainAuth` is set: Thrift SASL handshake (START / OK / COMPLETE status bytes, 4-byte big-endian length prefix), then length-prefixed frames for payload.
+* `internal/transport/ctxclient.go` wraps `thrift.TClient`. Its single method `Call(ctx, ...)` receives the request context, so it is the natural binding point: before delegating it sets `net.Conn` read/write deadlines from `ctx.Deadline()` (fallback: configured socket timeout) and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })`, releasing the stop handle on return. Wrapping `TProtocol` would need the same logic repeated across ~40 methods; wrapping `TClient` needs it once.
+* SASL PLAIN (`sasl.go`) wraps the socket when `WithPlainAuth` is set: Thrift SASL handshake (START / OK / COMPLETE status bytes, 4-byte big-endian length prefix), then length-prefixed frames for payload.
 
 #### Thrift-over-HTTP/HTTPS (`http://` / `https://`)
 * `internal/transport/http.go` wraps Thrift's `THttpClient`, which already implements `TTransport` and honours the context passed to `Flush(ctx)`.
