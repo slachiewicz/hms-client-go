@@ -11,17 +11,27 @@ import (
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
 )
 
-// Sentinel errors. Every error returned by Client matches exactly one of
-// these with errors.Is; the original Thrift exception stays reachable via
-// errors.Unwrap / errors.As.
-var (
-	ErrNotFound         = errors.New("hms: object not found")
-	ErrAlreadyExists    = errors.New("hms: object already exists")
-	ErrInvalidOperation = errors.New("hms: invalid operation")
-	ErrMeta             = errors.New("hms: metastore error")
-	ErrUnavailable      = errors.New("hms: metastore unavailable")
-	ErrNotSupported     = errors.New("hms: not supported by this metastore")
-)
+// ErrNotFound is returned when NoSuchObjectException is received from the metastore.
+var ErrNotFound = errors.New("hms: object not found")
+
+// ErrAlreadyExists is returned when AlreadyExistsException is received from the metastore.
+var ErrAlreadyExists = errors.New("hms: object already exists")
+
+// ErrInvalidOperation is returned when InvalidOperationException, InvalidObjectException,
+// or InvalidInputException is received from the metastore.
+var ErrInvalidOperation = errors.New("hms: invalid operation")
+
+// ErrMeta is returned when MetaException or any other server-side failure is received
+// from the metastore, or as a defensive default for unmapped error types.
+var ErrMeta = errors.New("hms: metastore error")
+
+// ErrUnavailable is returned when the metastore connection fails, an I/O error occurs,
+// or a context is cancelled or exceeds its deadline.
+var ErrUnavailable = errors.New("hms: metastore unavailable")
+
+// ErrNotSupported is returned when an RPC method or feature is not supported by the
+// connected metastore (e.g., UNKNOWN_METHOD from the server).
+var ErrNotSupported = errors.New("hms: not supported by this metastore")
 
 type hmsError struct {
 	op       string
@@ -32,6 +42,7 @@ type hmsError struct {
 func (e *hmsError) Error() string   { return e.op + ": " + e.cause.Error() }
 func (e *hmsError) Unwrap() []error { return []error{e.sentinel, e.cause} }
 
+// wrapError wraps an error with operation context and maps it to a sentinel error.
 func wrapError(op string, err error) error {
 	if err == nil {
 		return nil
@@ -39,6 +50,7 @@ func wrapError(op string, err error) error {
 	return &hmsError{op: op, sentinel: classify(err), cause: err}
 }
 
+// classify maps Thrift exceptions and transport errors to sentinel error types.
 func classify(err error) error {
 	var (
 		noSuch    *hive_metastore.NoSuchObjectException
@@ -67,10 +79,6 @@ func classify(err error) error {
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
 		errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
 		errors.As(err, &transport), errors.As(err, &netErr):
-		return ErrUnavailable
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
 		return ErrUnavailable
 	}
 	return ErrMeta
