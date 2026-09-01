@@ -11,10 +11,11 @@ import (
 
 // HTTPConfig configures a Thrift-over-HTTP connection.
 type HTTPConfig struct {
-	// Client is the underlying HTTP client. If nil, a client with Timeout
-	// applied is used in its place.
+	// Client is the underlying HTTP client. If nil, a fresh *http.Client
+	// with Timeout applied is used in its place.
 	Client *http.Client
-	// Timeout bounds each request when Client is nil.
+	// Timeout bounds each request when Client is nil. Zero means no
+	// client-side timeout; the call's context deadline still governs.
 	Timeout time.Duration
 	// BearerToken, when non-empty, selects JWT auth: it is sent as
 	// "Authorization: Bearer <token>" and User is ignored.
@@ -24,7 +25,10 @@ type HTTPConfig struct {
 	// "hms-client-go" when that cannot be determined.
 	User string
 	// Headers carries extra headers to send on every request, e.g. for a
-	// Knox gateway.
+	// Knox gateway. Entries here take precedence over the library's
+	// defaults (Content-Type, Accept, User-Agent, Authorization,
+	// x-actor-username): a colliding key replaces the default rather than
+	// being sent alongside it.
 	Headers map[string]string
 	// UserAgent sets the "User-Agent" header.
 	UserAgent string
@@ -47,22 +51,33 @@ func NewHTTP(_ context.Context, rawURL string, cfg HTTPConfig) (*Conn, error) {
 	if !ok {
 		return nil, thrift.NewTTransportException(thrift.NOT_IMPLEMENTED, "thrift: unexpected TTransport implementation for HTTP client")
 	}
-	h.SetHeader("Content-Type", "application/x-thrift")
-	h.SetHeader("Accept", "application/x-thrift")
+	setHeader(h, "Content-Type", "application/x-thrift")
+	setHeader(h, "Accept", "application/x-thrift")
 	if cfg.UserAgent != "" {
-		h.SetHeader("User-Agent", cfg.UserAgent)
+		setHeader(h, "User-Agent", cfg.UserAgent)
 	}
 	if cfg.BearerToken != "" {
-		h.SetHeader("Authorization", "Bearer "+cfg.BearerToken)
+		setHeader(h, "Authorization", "Bearer "+cfg.BearerToken)
 	} else {
-		h.SetHeader("x-actor-username", userOrDefault(cfg.User))
+		setHeader(h, "x-actor-username", userOrDefault(cfg.User))
 	}
+	// Caller-supplied headers are applied last so they override the
+	// defaults above instead of being appended alongside them.
 	for k, v := range cfg.Headers {
-		h.SetHeader(k, v)
+		setHeader(h, k, v)
 	}
 	tcfg := &thrift.TConfiguration{}
 	proto := thrift.NewTBinaryProtocolConf(t, tcfg)
 	return &Conn{Client: thrift.NewTStandardClient(proto, proto), Close: t.Close}, nil
+}
+
+// setHeader replaces any existing values of k on h with the single value v.
+// THttpClient.SetHeader appends (http.Header.Add semantics), so without
+// this a repeated or colliding key would be sent multiple times on the
+// wire; DelHeader first ensures exactly one value is sent.
+func setHeader(h *thrift.THttpClient, k, v string) {
+	h.DelHeader(k)
+	h.SetHeader(k, v)
 }
 
 // userOrDefault returns u if non-empty, else the current OS username, else

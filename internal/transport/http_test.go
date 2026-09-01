@@ -116,6 +116,30 @@ func TestNewHTTP_Headers(t *testing.T) {
 			},
 		},
 		{
+			name: "Content-Type is sent exactly once",
+			cfg:  transport.HTTPConfig{UserAgent: "test-agent"},
+			check: func(t *testing.T, h http.Header) {
+				t.Helper()
+				assert.Len(t, h.Values("Content-Type"), 1)
+			},
+		},
+		{
+			name: "caller header overrides a default",
+			cfg:  transport.HTTPConfig{UserAgent: "test-agent", Headers: map[string]string{"Accept": "text/plain"}},
+			check: func(t *testing.T, h http.Header) {
+				t.Helper()
+				assert.Equal(t, []string{"text/plain"}, h.Values("Accept"))
+			},
+		},
+		{
+			name: "caller header overrides x-actor-username derived from User",
+			cfg:  transport.HTTPConfig{UserAgent: "test-agent", User: "alice", Headers: map[string]string{"x-actor-username": "svc"}},
+			check: func(t *testing.T, h http.Header) {
+				t.Helper()
+				assert.Equal(t, []string{"svc"}, h.Values("x-actor-username"))
+			},
+		},
+		{
 			name: "user agent set from config",
 			cfg:  transport.HTTPConfig{UserAgent: "hms-client-go/test"},
 			check: func(t *testing.T, h http.Header) {
