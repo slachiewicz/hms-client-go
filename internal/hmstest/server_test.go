@@ -114,6 +114,62 @@ func TestServer_Hive23_GetTableReq(t *testing.T) {
 	})
 }
 
+// TestServer_ConnectionSurvivesUnknownMethod proves handleConn keeps a
+// client connection open after replying UNKNOWN_METHOD to an RPC absent
+// from the emulated version's processor map: on Hive23, get_catalogs (not
+// in the Hive23 processor map, see removedRPCs) is immediately followed by
+// get_all_databases on the very same connection, and that second call must
+// still succeed. Before the handleConn fix, any non-nil Process error
+// (including the UNKNOWN_METHOD exception it had just written correctly)
+// ended the connection, so this second call would see an EOF.
+func TestServer_ConnectionSurvivesUnknownMethod(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive23)
+	client := dial(t, srv.Addr())
+	ctx := context.Background()
+
+	_, err := client.GetCatalogs(ctx)
+	require.Error(t, err)
+	var appErr thrift.TApplicationException
+	require.True(t, errors.As(err, &appErr), "expected a TApplicationException, got %T: %v", err, err)
+	assert.Equal(t, int32(thrift.UNKNOWN_METHOD), appErr.TypeId())
+
+	names, err := client.GetAllDatabases(ctx)
+	require.NoError(t, err, "expected the connection to survive the UNKNOWN_METHOD reply")
+	assert.Empty(t, names)
+}
+
+// TestServer_ConnectionSurvivesDeclaredException proves handleConn keeps a
+// client connection open after a generated Process function reports a
+// declared/checked Thrift exception (e.g. AlreadyExistsException): the
+// generated create_catalog Process returns (ok=true, err=<the exception>)
+// once it has successfully written that exception into the RPC reply,
+// exactly mirroring thrift's own TSimpleServer (lib/go/thrift v0.24.0,
+// simple_server.go processRequests), which only ends the connection on
+// !ok, ErrAbandonRequest, or a real TTransportException — never merely
+// because Process returned a non-nil err. A duplicate create_catalog is
+// immediately followed here by get_catalogs on the same connection, and
+// that second call must still succeed.
+func TestServer_ConnectionSurvivesDeclaredException(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	client := dial(t, srv.Addr())
+	ctx := context.Background()
+
+	srv.Store().Catalogs["spark"] = &hive_metastore.Catalog{Name: "spark"}
+
+	err := client.CreateCatalog(ctx, &hive_metastore.CreateCatalogRequest{
+		Catalog: &hive_metastore.Catalog{Name: "spark"},
+	})
+	require.Error(t, err)
+	var existsErr *hive_metastore.AlreadyExistsException
+	require.True(t, errors.As(err, &existsErr), "expected *AlreadyExistsException, got %T: %v", err, err)
+
+	resp, err := client.GetCatalogs(ctx)
+	require.NoError(t, err, "expected the connection to survive the declared exception reply")
+	assert.Contains(t, resp.Names, "spark")
+}
+
 func TestServer_CallsAndLastArgs(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

@@ -2,6 +2,7 @@ package hmstest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -274,7 +275,42 @@ func (s *Server) handleConn(conn net.Conn, proc thrift.TProcessor) {
 	ctx := context.Background()
 	for {
 		ok, err := proc.Process(ctx, proto, proto)
-		if !ok || err != nil {
+		// Mirror thrift's own TSimpleServer.processRequests (lib/go/thrift
+		// v0.24.0, simple_server.go): a generated Process function returns
+		// (ok=true, err=<declared exception>) whenever it successfully
+		// writes a checked/declared Thrift exception (e.g.
+		// NoSuchObjectException, AlreadyExistsException) into the RPC
+		// reply — that is a normal, successful round trip, not a
+		// connection failure, and the connection remains good for further
+		// calls. Treating a non-nil err as fatal here (as an earlier
+		// version of this loop did) closed the connection right after
+		// correctly replying to, say, a duplicate create_catalog, so the
+		// next call on that (still-pooled) client connection saw an EOF
+		// even though nothing had actually gone wrong.
+		//
+		// Only three conditions end the connection, exactly as upstream
+		// does: the handler abandoning the request, a real transport
+		// (I/O) failure, and Process itself reporting !ok. A
+		// TApplicationException of type UNKNOWN_METHOD is also not fatal:
+		// it means the generated dispatcher wrote a valid exception reply
+		// for an RPC absent from this version's processor map (see
+		// removedRPCs / WithoutRPC) — real Hive Metastore server
+		// connections survive a probe for an RPC they don't support
+		// (SPEC §2.3), so the fake server must too, or every client-side
+		// fallback/catalog probe would kill the connection it just proved
+		// it needed to keep using.
+		if errors.Is(err, thrift.ErrAbandonRequest) {
+			return
+		}
+		var transErr thrift.TTransportException
+		if errors.As(err, &transErr) {
+			return
+		}
+		var appErr thrift.TApplicationException
+		if errors.As(err, &appErr) && appErr.TypeId() == thrift.UNKNOWN_METHOD {
+			continue
+		}
+		if !ok {
 			return
 		}
 	}
