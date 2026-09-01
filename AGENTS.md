@@ -5,7 +5,7 @@
 
 ## What this is
 
-A pure-Go client library for **Apache Hive Metastore (HMS)** supporting **Hive 2.x, 3.x, and 4.x** with dual Binary TCP / Thrift-over-HTTP transports, Multi-Catalog support, High Availability (HA) failover, and zero Cgo dependencies.
+A pure-Go client library for **Apache Hive Metastore (HMS)** supporting **Hive 2.3, 3.x, and 4.x** with dual Binary TCP / Thrift-over-HTTP transports, Multi-Catalog support, High Availability (HA) failover, and zero Cgo dependencies.
 
 Module path: `github.com/slachiewicz/hms-client-go`. Public package: `hms` at the module root.
 

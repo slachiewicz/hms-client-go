@@ -1,6 +1,6 @@
 # hms-client-go
 
-A modern, pure-Go client library for **Apache Hive Metastore (HMS)** supporting **Hive 2.x, 3.x, and 4.x** with dual Binary TCP / Thrift-over-HTTP transports, Multi-Catalog support, High Availability (HA) failover, and zero Cgo dependencies.
+A modern, pure-Go client library for **Apache Hive Metastore (HMS)** supporting **Hive 2.3, 3.x, and 4.x** with dual Binary TCP / Thrift-over-HTTP transports, Multi-Catalog support, High Availability (HA) failover, and zero Cgo dependencies.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](go.mod)
@@ -9,7 +9,7 @@ A modern, pure-Go client library for **Apache Hive Metastore (HMS)** supporting 
 
 ## Features
 
-* **Multi-Version Interoperability**: Seamlessly communicates with **Apache Hive 2.2+, 3.1+, and 4.0+** standalone or clustered metastores.
+* **Multi-Version Interoperability**: Seamlessly communicates with **Apache Hive 2.3+, 3.1+, and 4.0+** standalone or clustered metastores.
 * **Dual Transports**:
   * **Binary TCP Thrift (`thrift://host:port`)**: Low latency, high throughput binary protocol with dynamic context deadline bindings.
   * **Thrift-over-HTTP/HTTPS (`http://` / `https://`, Hive 4.0+)**: Standard HTTP POST tunneling compatible with cloud reverse proxies (Envoy, NGINX, Knox) and JWT bearer-token authentication.

@@ -1,7 +1,7 @@
 # `hms-client-go` Implementation Plan
 
 > **Implementation Blueprint for `github.com/slachiewicz/hms-client-go`**  
-> A pure-Go client library for Apache Hive Metastore (HMS) supporting **Hive 2.x, 3.x, and 4.x** with dual Binary TCP / Thrift-over-HTTP transports, Multi-Catalog support, High Availability (HA) failover, and zero Cgo dependencies.
+> A pure-Go client library for Apache Hive Metastore (HMS) supporting **Hive 2.3, 3.x, and 4.x** with dual Binary TCP / Thrift-over-HTTP transports, Multi-Catalog support, High Availability (HA) failover, and zero Cgo dependencies.
 
 The public API, compatibility matrix and fallback rules are defined once in [`SPEC.md`](SPEC.md). This plan references those sections and does not restate them.
 
@@ -12,7 +12,7 @@ The public API, compatibility matrix and fallback rules are defined once in [`SP
 ### Key Design Constraints & Goals
 1. **Language Floor**: Pure **Go 1.26.0+** (`go 1.26.0` in `go.mod`). Zero Cgo dependencies.
 2. **License**: **Apache-2.0**.
-3. **Hive Compatibility**: Apache Hive 2.2.x – 2.3.x, 3.1.x, 4.0.x – 4.2.x. See SPEC §2 for the per-version RPC and transport matrix.
+3. **Hive Compatibility**: Apache Hive 2.3.x, 3.1.x, 4.0.x – 4.2.x. See SPEC §2 for the per-version RPC and transport matrix.
 4. **Dual Transport Support**: Binary TCP Thrift (`thrift://`) on every version; Thrift-over-HTTP/HTTPS (`http://`, `https://`) on Hive 4.0+. See SPEC §3.
 5. **High Availability & Fault Tolerance**: sticky active endpoint with failover across multiple HMS endpoints, exponential backoff, connection pooling. See SPEC §4.
 6. **Small Binaries**: the generated Thrift client (roughly 280 RPCs) must never be stored in an interface-reachable field, directly or through a struct that is stored in an interface. Bind the handful of methods the wrapper uses into `func` fields instead. In a downstream project the interface-reachable form cost roughly 6.5 MiB of stripped binary; the `func`-field form cost under 1 MiB. Verify with `go tool nm -size` and `-ldflags=-dumpdep` (look for `<UsedInIface>`).

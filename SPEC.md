@@ -14,13 +14,14 @@ restate signatures or version claims.
 ## 1. Scope and Mission
 
 `hms-client-go` is a pure-Go client library for interacting with Apache Hive Metastore (HMS) servers. It provides:
-1. Universal interoperability across **Apache Hive 2.2+, 3.1+, and 4.0+** standalone and cluster metastores.
+1. Universal interoperability across **Apache Hive 2.3+, 3.1+, and 4.0+** standalone and cluster metastores.
 2. Dual transport support: **Raw Binary TCP Thrift (`thrift://`)** and **Thrift-over-HTTP/HTTPS (`http://` / `https://`)**, the latter for Hive 4.0+ servers.
 3. First-class support for **Hive 3+ Multi-Catalog namespaces** (`catName`).
 4. Native **High Availability (HA)**, connection pooling, automatic failover, and dynamic `context.Context` deadline propagation.
 5. First-class primitives for managing **Open Table Formats** (Apache Iceberg, Delta Lake, Apache Hudi) registered in Hive Metastore.
 
 ### 1.1. Out of scope for 1.0
+* **Hive 2.2 and earlier**. Hive 2.2 lacks `get_table_req`, and the Hive 4 IDL this client is generated from no longer declares the legacy `get_table` / `get_table_objects_by_name` RPCs, so no fallback can be generated. Hive 2.2 is end of life; Spark 4 still defaults its metastore client to 2.3.10, which makes 2.3 the practical floor.
 * **Kerberos / GSSAPI**. Native C Kerberos is forbidden by the zero-Cgo invariant. A pure-Go implementation (for example `gokrb5`) is acceptable in a later release but is not part of 1.0.
 * **Compact protocol** (`metastore.thrift.compact.protocol.enabled=true`) and **framed transport** (`metastore.thrift.framed.transport.enabled=true`). Both are off by default on every supported server version.
 * **`SkewedInfo.skewedColValueLocationMaps`**. Its Thrift type is `map<list<string>, string>`, which Go cannot express and the Thrift Go generator rejects (THRIFT-2063). The field is removed from the IDL before generation. Reads are unaffected: the generated code skips the unknown field with Thrift's generic `Skip`, which handles list-typed keys. The client never writes it. Skewed column names and values (fields 1 and 2) are fully supported.
@@ -31,23 +32,23 @@ restate signatures or version claims.
 
 ### 2.1. RPC availability by HMS version
 
-Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.2.0`, `rel/release-2.3.9`, `rel/release-3.1.3` and `rel/release-4.0.1`.
+Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `rel/release-3.1.3` and `rel/release-4.0.1`. The client is generated from the 4.0.1 IDL, so an RPC must exist there to be callable at all.
 
-| RPC | 2.2.x | 2.3.x | 3.x | 4.x |
+| RPC | 2.3.x | 3.x | 4.x | In 4.0.1 IDL |
 | :--- | :-: | :-: | :-: | :-: |
-| `get_table`, `get_table_objects_by_name`, `get_partitions`, `alter_partitions`, `add_partitions` | Y | Y | Y | Y |
-| `add_partitions_req` | Y | Y | Y | Y |
-| `get_table_req`, `get_table_objects_by_name_req` | - | Y | Y | Y |
-| `get_catalogs`, `get_catalog`, `create_catalog`, `drop_catalog` | - | - | Y | Y |
-| `catName` fields on `Database`, `Table`, `Partition` and `*Request` structs | - | - | Y | Y |
-| `alter_partitions_req`, `get_partitions_req`, `get_partitions_ps_with_auth_req` | - | - | - | Y |
-| Thrift-over-HTTP transport (`metastore.server.thrift.transport.mode=http`) | - | - | - | Y |
+| `get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req` | Y | Y | Y | Y |
+| `get_database`, `get_all_databases`, `create_database`, `drop_database`, `get_all_tables`, `create_table`, `alter_table`, `drop_table`, `get_partitions`, `get_partition_names`, `alter_partitions`, `drop_partition`, `get_config_value` | Y | Y | Y | Y |
+| `get_table`, `get_table_objects_by_name` (legacy) | Y | Y | - | **no** |
+| `get_catalogs`, `get_catalog`, `create_catalog`, `drop_catalog` | - | Y | Y | Y |
+| `catName` fields on `Database`, `Table`, `Partition` and `*Request` structs | - | Y | Y | Y |
+| `alter_partitions_req`, `get_partitions_req` | - | - | Y | Y |
+| Thrift-over-HTTP transport (`metastore.server.thrift.transport.mode=http`) | - | - | Y | n/a |
 
 ### 2.2. Transport availability
 
 | HMS Version Range | Binary TCP | HTTP / HTTPS |
 | :--- | :-: | :-: |
-| Apache Hive 2.2.0 – 2.3.9 | Y | - |
+| Apache Hive 2.3.0 – 2.3.10 | Y | - |
 | Apache Hive 3.0.0 – 3.1.3 | Y | - |
 | Apache Hive 4.0.0 – 4.2.x | Y | Y |
 
@@ -55,11 +56,11 @@ Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.2.0`, `r
 
 The client is generated from the Hive 4 IDL. Fields that older servers do not know are skipped by the server on read; fields that older servers do not send are left at their zero value on the client. Method-level differences are handled by the rules below. A "legacy fallback" is triggered by a `TApplicationException` of type `UNKNOWN_METHOD`; the result is cached per connection so each RPC pays the probe at most once.
 
-* **Rule 1 (Catalog)**: A non-default catalog against a server without `get_catalogs` (Hive 2.x) returns `ErrNotSupported`. The default catalog `hive` is always accepted and is simply not written on the wire for those servers.
-* **Rule 2 (`get_table_req`)**: On `UNKNOWN_METHOD` (Hive 2.2 only) the client degrades to `get_table(dbName, tblName)`. The same applies to `get_table_objects_by_name_req` → `get_table_objects_by_name`.
-* **Rule 3 (`alter_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.x and 3.x) the client degrades to `alter_partitions(dbName, tblName, parts)`.
-* **Rule 4 (`get_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.x and 3.x) the client degrades to `get_partitions(dbName, tblName, maxParts)`.
-* **Rule 5 (`add_partitions_req`)**: No fallback. The request variant exists on every supported version. The client chunks large batches (default 1000 partitions per request) on every version to bound request size.
+* **Rule 1 (Catalog)**: A non-default catalog against a server without `get_catalogs` (Hive 2.3) returns `ErrNotSupported`. The default catalog `hive` is always accepted and is simply not written on the wire for those servers. Catalog support is probed once per connection with `get_catalogs`; `UNKNOWN_METHOD` means unsupported.
+* **Rule 2 (`get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req`)**: No fallback. All three exist on every supported version and the legacy forms are absent from the Hive 4 IDL.
+* **Rule 3 (`alter_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `alter_partitions(dbName, tblName, parts)`.
+* **Rule 4 (`get_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partitions(dbName, tblName, maxParts)`.
+* **Rule 5 (batching)**: `add_partitions_req` and `get_table_objects_by_name_req` are chunked (default 1000 items per request) on every version to bound request size.
 
 ---
 
