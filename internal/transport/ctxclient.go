@@ -9,8 +9,15 @@ import (
 )
 
 // ContextClient is a thrift.TClient that binds each call's context to the
-// underlying net.Conn: the deadline is copied to the socket and cancellation
-// closes the in-flight read/write by moving the deadline to now.
+// underlying net.Conn. It is the sole owner of that conn's read/write
+// deadlines: callers must ensure nothing else (in particular thrift's
+// TSocket, which recomputes a deadline on every Read/Write from its own
+// TConfiguration.SocketTimeout) also calls SetDeadline/SetReadDeadline/
+// SetWriteDeadline on it, or that ownership is lost. Precisely, for each
+// call: the deadline set on conn is ctx's deadline if it has one, else
+// time.Now().Add(timeout) if timeout > 0, else no deadline. Independently,
+// ctx cancellation (including deadline expiry) unblocks any in-flight read
+// or write by moving the conn's deadline to now, via context.AfterFunc.
 type ContextClient struct {
 	inner   thrift.TClient
 	conn    net.Conn

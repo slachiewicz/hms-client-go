@@ -30,9 +30,33 @@ type Conn struct {
 	Close func() error
 }
 
+// deadlineShield wraps a net.Conn and turns its deadline setters into no-ops.
+//
+// thrift's TSocket.Read/Write (lib/go/thrift v0.24.0, socket.go pushDeadline)
+// call SetDeadline/SetReadDeadline/SetWriteDeadline on every I/O operation,
+// recomputing the deadline from TConfiguration.SocketTimeout (or clearing it
+// when SocketTimeout is 0). Left unchecked, that overwrites the ctx-derived
+// deadline ContextClient sets on the same conn before delegating the call,
+// so the total-call deadline would only survive until the first Read/Write.
+// TSocket is given a deadlineShield instead of the raw conn so its deadline
+// calls have no effect; ContextClient holds the real conn and is the sole
+// owner of its read/write deadlines.
+type deadlineShield struct{ net.Conn }
+
+// SetDeadline is a no-op: deadlines are owned by ContextClient, not TSocket.
+func (deadlineShield) SetDeadline(time.Time) error { return nil }
+
+// SetReadDeadline is a no-op: deadlines are owned by ContextClient, not TSocket.
+func (deadlineShield) SetReadDeadline(time.Time) error { return nil }
+
+// SetWriteDeadline is a no-op: deadlines are owned by ContextClient, not TSocket.
+func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
+
 // DialBinary opens a binary Thrift-over-TCP connection to hostPort. The
 // returned Conn's Client applies cfg.Timeout as a per-call fallback and
-// binds each call's context deadline to the socket via ContextClient.
+// binds each call's context deadline to the socket via ContextClient, which
+// is the sole owner of the connection's read/write deadlines (see
+// deadlineShield); TSocket is never allowed to set them.
 //
 // PlainUser is currently ignored; Task 4 adds SASL PLAIN support keyed on
 // cfg.PlainUser being non-empty.
@@ -42,8 +66,12 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 	if err != nil {
 		return nil, err
 	}
-	tcfg := &thrift.TConfiguration{SocketTimeout: cfg.Timeout, ConnectTimeout: cfg.Timeout}
-	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(raw, tcfg)
+	// SocketTimeout is intentionally 0: TSocket must not manage deadlines
+	// itself (see deadlineShield). ConnectTimeout still applies since Open()
+	// is never called on this TSocket (it is constructed from an already
+	// connected conn).
+	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.Timeout}
+	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{raw}, tcfg)
 	// Task 4 inserts SASL PLAIN here when cfg.PlainUser != "".
 	trans = thrift.NewTBufferedTransport(trans, bufferSize)
 	proto := thrift.NewTBinaryProtocolConf(trans, tcfg)
