@@ -2,8 +2,10 @@ package hmstest
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,10 +91,16 @@ type Server struct {
 	rec      *recorder
 	store    *Store
 	failNext int32
+	tb       testing.TB // for reporting a handler panic from handleConn
 
-	conns     sync.Map // net.Conn -> struct{}
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	conns sync.Map // net.Conn -> struct{}
+	wg    sync.WaitGroup
+
+	mu      sync.Mutex // guards stopped; serializes it against serve's accept path
+	stopped bool
+
+	panicsMu sync.Mutex
+	panics   []string
 }
 
 // Start launches a fake Hive Metastore server emulating version v and
@@ -127,7 +135,7 @@ func Start(t testing.TB, v Version, opts ...Option) *Server {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	s := &Server{ln: ln, rec: rec, store: store, failNext: clampInt32(cfg.failNext)}
+	s := &Server{ln: ln, rec: rec, store: store, failNext: clampInt32(cfg.failNext), tb: t}
 	go s.serve(proc)
 	t.Cleanup(s.Stop)
 	return s
@@ -144,16 +152,29 @@ func (s *Server) URI() string {
 }
 
 // Stop closes the listener and every accepted connection, then waits for
-// their handler goroutines to exit. It is idempotent.
+// their handler goroutines to exit. It is idempotent: a second (or
+// concurrent) call returns immediately.
+//
+// Setting the stopped flag happens under the same mutex that serve locks
+// around accepting a connection, so a connection accepted concurrently
+// with Stop is either seen (and thus closed and waited for below) or
+// rejected by serve itself before Stop returns; no accepted connection can
+// be missed by both.
 func (s *Server) Stop() {
-	s.closeOnce.Do(func() {
-		_ = s.ln.Close()
-		s.conns.Range(func(key, _ any) bool {
-			_ = key.(net.Conn).Close()
-			return true
-		})
-		s.wg.Wait()
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
+	s.stopped = true
+	s.mu.Unlock()
+
+	_ = s.ln.Close()
+	s.conns.Range(func(key, _ any) bool {
+		_ = key.(net.Conn).Close()
+		return true
 	})
+	s.wg.Wait()
 }
 
 // Calls returns, in call order, the Thrift wire method names of every RPC
@@ -177,24 +198,73 @@ func (s *Server) Store() *Store {
 	return s.store
 }
 
-// serve accepts connections until the listener is closed by Stop.
+// Panics returns, in the order they occurred, the messages recorded by
+// handleConn's recover for a panic in an unimplemented (nil embedded
+// ThriftHiveMetastore) or misbehaving handler method. The returned slice
+// is a fresh copy. Tests use this to confirm a panic was caught rather
+// than crashing the test binary.
+func (s *Server) Panics() []string {
+	s.panicsMu.Lock()
+	defer s.panicsMu.Unlock()
+	out := make([]string, len(s.panics))
+	copy(out, s.panics)
+	return out
+}
+
+func (s *Server) recordPanic(msg string) {
+	s.panicsMu.Lock()
+	s.panics = append(s.panics, msg)
+	s.panicsMu.Unlock()
+}
+
+// serve accepts connections until the listener is closed by Stop. Every
+// accepted connection is either registered for handling (under s.mu, so
+// Stop cannot be running concurrently with a use of the registration
+// state below) or, once Stop has flipped s.stopped, closed immediately
+// without ever being handled — closing the accept-time race described on
+// Stop.
 func (s *Server) serve(proc thrift.TProcessor) {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
 			return
 		}
+
+		s.mu.Lock()
+		if s.stopped {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		s.conns.Store(conn, struct{}{})
 		s.wg.Add(1)
+		s.mu.Unlock()
+
 		go s.handleConn(conn, proc)
 	}
 }
 
 // handleConn services one client connection until it errs out or closes.
+// A panic in a handler method (most commonly: an RPC that is routable in
+// the Thrift processor map but not overridden by handler, so it
+// dispatches to the embedded nil ThriftHiveMetastore) is recovered here
+// rather than allowed to crash the whole test binary: it is recorded on
+// the Server (see Panics) and reported to the testing.TB passed to Start
+// via Errorf, then the connection is closed as usual by the deferred
+// close below.
 func (s *Server) handleConn(conn net.Conn, proc thrift.TProcessor) {
 	defer s.wg.Done()
 	defer s.conns.Delete(conn)
 	defer func() { _ = conn.Close() }()
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("%v\n%s", r, debug.Stack())
+			s.recordPanic(msg)
+			if s.tb != nil {
+				s.tb.Errorf("hmstest: handler panic: %s", msg)
+			}
+		}
+	}()
 
 	tcfg := &thrift.TConfiguration{}
 	trans := thrift.NewTBufferedTransport(thrift.NewTSocketFromConnConf(conn, tcfg), bufferSize)

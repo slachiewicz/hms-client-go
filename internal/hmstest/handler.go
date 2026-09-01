@@ -627,12 +627,21 @@ func (h *handler) applyAlterPartitions(catName, db, tbl string, parts []*hive_me
 		return &hive_metastore.MetaException{Message: "table " + db + "." + tbl + " not found"}
 	}
 	existing := h.store.Partitions[key]
-	for _, np := range parts {
+
+	// Resolve every target index before mutating anything, so a batch
+	// that fails partway through (one Values tuple not found) leaves the
+	// store's existing partitions completely untouched rather than
+	// partially altered.
+	idxs := make([]int, len(parts))
+	for i, np := range parts {
 		idx := findPartition(existing, np.Values)
 		if idx < 0 {
 			return &hive_metastore.InvalidOperationException{Message: "partition not found"}
 		}
-		existing[idx] = np
+		idxs[i] = idx
+	}
+	for i, np := range parts {
+		existing[idxs[i]] = np
 	}
 	h.store.Partitions[key] = existing
 	return nil
