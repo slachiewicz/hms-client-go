@@ -82,6 +82,7 @@ func (s *saslPlain) Open() error {
 // the inner transport and flushes it.
 func (s *saslPlain) sendNegotiate(status byte, payload []byte) error {
 	n := len(payload)
+	// gosec G115: len() never returns < 0, but the check is defensive.
 	if n < 0 || n > saslMaxFrame {
 		return errors.New("hms: sasl frame too large")
 	}
@@ -125,9 +126,13 @@ func (s *saslPlain) Close() error {
 }
 
 // Read fills p from the current data frame, reading a new frame from the
-// inner transport when the current one is exhausted.
+// inner transport when the current one is exhausted. Zero-length frames are
+// skipped without being reported as EOF.
 func (s *saslPlain) Read(p []byte) (int, error) {
-	if s.rbuf.Len() == 0 {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for s.rbuf.Len() == 0 {
 		var hdr [4]byte
 		if _, err := io.ReadFull(s.inner, hdr[:]); err != nil {
 			return 0, err
@@ -141,6 +146,10 @@ func (s *saslPlain) Read(p []byte) (int, error) {
 			return 0, err
 		}
 		s.rbuf.Reset(frame)
+		// Continue looping if this is a zero-length frame to read the next one.
+		if n > 0 {
+			break
+		}
 	}
 	return s.rbuf.Read(p)
 }
@@ -149,11 +158,17 @@ func (s *saslPlain) Read(p []byte) (int, error) {
 func (s *saslPlain) Write(p []byte) (int, error) { return s.wbuf.Write(p) }
 
 // Flush sends the buffered write as one length-prefixed data frame and
-// flushes the inner transport.
+// flushes the inner transport. Empty frames are never emitted; if the write
+// buffer is empty, Flush just calls inner.Flush.
 func (s *saslPlain) Flush(ctx context.Context) error {
 	n := s.wbuf.Len()
+	// gosec G115: Len() never returns < 0, but the check is defensive.
 	if n < 0 || n > saslMaxFrame {
 		return errors.New("hms: sasl frame too large")
+	}
+	if n == 0 {
+		// Empty frames are never emitted.
+		return s.inner.Flush(ctx)
 	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(n))

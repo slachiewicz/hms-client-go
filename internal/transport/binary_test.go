@@ -132,18 +132,23 @@ func TestDialBinary_FallbackTimeoutFires(t *testing.T) {
 
 // startSaslNegotiator listens on a loopback port and, for each accepted
 // connection, plays the server side of the SASL PLAIN handshake: it reads a
-// START then OK negotiation frame and replies with reply. It proves
-// DialBinary actually drives NewSaslPlain's Open over the wire, rather than
-// exercising saslPlain in isolation as sasl_test.go does.
-func startSaslNegotiator(t *testing.T, replyStatus byte, replyPayload []byte) string {
+// START then OK negotiation frame and replies with reply. It returns an error
+// channel that must be drained by the caller to detect any server-side errors.
+// It proves DialBinary actually drives NewSaslPlain's Open over the wire,
+// rather than exercising saslPlain in isolation as sasl_test.go does.
+func startSaslNegotiator(t *testing.T, replyStatus byte, replyPayload []byte) (string, <-chan error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
+	errs := make(chan error, 1)
+
 	go func() {
+		defer close(errs)
 		conn, err := ln.Accept()
 		if err != nil {
+			errs <- err
 			return
 		}
 		defer func() { _ = conn.Close() }()
@@ -151,26 +156,32 @@ func startSaslNegotiator(t *testing.T, replyStatus byte, replyPayload []byte) st
 		for range 2 {
 			var hdr [5]byte
 			if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+				errs <- err
 				return
 			}
 			n := binary.BigEndian.Uint32(hdr[1:])
 			if _, err := io.ReadFull(conn, make([]byte, n)); err != nil {
+				errs <- err
 				return
 			}
 		}
 
 		n := len(replyPayload)
 		if n < 0 || n > 64<<20 {
+			errs <- errors.New("reply payload too large")
 			return
 		}
 		out := make([]byte, 5+n)
 		out[0] = replyStatus
 		binary.BigEndian.PutUint32(out[1:5], uint32(n))
 		copy(out[5:], replyPayload)
-		_, _ = conn.Write(out)
+		if _, err := conn.Write(out); err != nil {
+			errs <- err
+			return
+		}
 	}()
 
-	return ln.Addr().String()
+	return ln.Addr().String(), errs
 }
 
 // TestDialBinary_SaslPlainHandshakeSucceeds proves that setting
@@ -178,7 +189,7 @@ func startSaslNegotiator(t *testing.T, replyStatus byte, replyPayload []byte) st
 // handshake over the real TCP connection before returning.
 func TestDialBinary_SaslPlainHandshakeSucceeds(t *testing.T) {
 	t.Parallel()
-	addr := startSaslNegotiator(t, 5, nil) // saslComplete
+	addr, errs := startSaslNegotiator(t, 5, nil) // saslComplete
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -189,6 +200,7 @@ func TestDialBinary_SaslPlainHandshakeSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NoError(t, conn.Close())
+	require.NoError(t, <-errs)
 }
 
 // TestDialBinary_SaslPlainRejectedFailsDial proves a SASL rejection during
@@ -196,7 +208,7 @@ func TestDialBinary_SaslPlainHandshakeSucceeds(t *testing.T) {
 // first RPC.
 func TestDialBinary_SaslPlainRejectedFailsDial(t *testing.T) {
 	t.Parallel()
-	addr := startSaslNegotiator(t, 3, []byte("denied")) // saslBad
+	addr, errs := startSaslNegotiator(t, 3, []byte("denied")) // saslBad
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,4 +219,5 @@ func TestDialBinary_SaslPlainRejectedFailsDial(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "denied")
+	require.NoError(t, <-errs)
 }

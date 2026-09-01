@@ -201,3 +201,119 @@ func TestSaslPlain_OpenPropagatesInnerOpenFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "inner open failed")
 }
+
+func TestSaslPlain_ReadSkipsEmptyFrames(t *testing.T) {
+	t.Parallel()
+	clientPipeEnd, serverPipeEnd := net.Pipe()
+	errs := make(chan error, 1)
+
+	go func() {
+		defer close(errs)
+		// Handshake.
+		if _, _, err := readNegotiate(serverPipeEnd); err != nil {
+			errs <- err
+			return
+		}
+		if _, _, err := readNegotiate(serverPipeEnd); err != nil {
+			errs <- err
+			return
+		}
+		if err := writeNegotiate(serverPipeEnd, 5, nil); err != nil {
+			errs <- err
+			return
+		}
+
+		// Write a zero-length frame, then a "world" frame.
+		if err := writeDataFrame(serverPipeEnd, []byte{}); err != nil {
+			errs <- err
+			return
+		}
+		if err := writeDataFrame(serverPipeEnd, []byte("world")); err != nil {
+			errs <- err
+			return
+		}
+	}()
+
+	inner := thrift.NewTSocketFromConnConf(clientPipeEnd, &thrift.TConfiguration{})
+	sasl := transport.NewSaslPlain(inner, "alice", "s3cret")
+
+	require.NoError(t, sasl.Open())
+	defer func() { _ = sasl.Close() }()
+
+	buf := make([]byte, 5)
+	n, err := io.ReadFull(sasl, buf)
+	require.NoError(t, err, "Read should skip empty frame and return world")
+	assert.Equal(t, 5, n)
+	assert.Equal(t, "world", string(buf))
+
+	require.NoError(t, <-errs)
+}
+
+func TestSaslPlain_FlushEmptyDoesNotWriteFrame(t *testing.T) {
+	t.Parallel()
+	clientPipeEnd, serverPipeEnd := net.Pipe()
+	errs := make(chan error, 1)
+
+	go func() {
+		defer close(errs)
+		// Handshake.
+		if _, _, err := readNegotiate(serverPipeEnd); err != nil {
+			errs <- err
+			return
+		}
+		if _, _, err := readNegotiate(serverPipeEnd); err != nil {
+			errs <- err
+			return
+		}
+		if err := writeNegotiate(serverPipeEnd, 5, nil); err != nil {
+			errs <- err
+			return
+		}
+
+		// Read the first frame sent by the client after handshake.
+		// If Flush on an empty buffer incorrectly writes a frame, it will be
+		// an empty frame (length 0). The real data frame (from the second write
+		// and flush) will contain "data". So if we see an empty frame first,
+		// that's an error.
+		frame, err := readDataFrame(serverPipeEnd)
+		if err != nil {
+			errs <- err
+			return
+		}
+		if len(frame) == 0 {
+			errs <- errors.New("received empty frame (empty Flush should not send anything)")
+			return
+		}
+		if string(frame) != "data" {
+			errs <- errors.New("expected first frame to be 'data', got " + string(frame))
+			return
+		}
+	}()
+
+	inner := thrift.NewTSocketFromConnConf(clientPipeEnd, &thrift.TConfiguration{})
+	sasl := transport.NewSaslPlain(inner, "alice", "s3cret")
+
+	require.NoError(t, sasl.Open())
+	defer func() { _ = sasl.Close() }()
+
+	// Flush with nothing written; should not send a frame.
+	require.NoError(t, sasl.Flush(context.Background()))
+
+	// Write and flush something real.
+	_, err := sasl.Write([]byte("data"))
+	require.NoError(t, err)
+	require.NoError(t, sasl.Flush(context.Background()))
+
+	require.NoError(t, <-errs)
+}
+
+// isNetTimeout checks if an error is a net.Error with Timeout() == true.
+func isNetTimeout(err error) bool {
+	type timeout interface {
+		Timeout() bool
+	}
+	if te, ok := err.(timeout); ok {
+		return te.Timeout()
+	}
+	return false
+}
