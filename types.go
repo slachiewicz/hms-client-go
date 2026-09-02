@@ -140,9 +140,10 @@ type Order struct {
 // ColumnValueLocationMaps, the wire's third SkewedInfo field mapping each
 // skewed value combination to its own storage location, has no field here:
 // it is gated behind THRIFT-2063 (SPEC §1.1) and is dropped from the
-// generated Thrift bindings before this package ever sees it. A value
-// already on the wire is not lost across GetTable -> AlterTable even so;
-// see "Round-trip fidelity" below.
+// generated Thrift bindings before this package ever sees it. Because the
+// generated reader skips the field, a value already on the wire is lost on
+// read and therefore not written back by AlterTable; the raw snapshot
+// ("Round-trip fidelity" below) preserves only fields the bindings carry.
 type SkewedInfo struct {
 	// ColumnNames lists the columns Hive considers skewed, in
 	// ColumnValues' column order.
