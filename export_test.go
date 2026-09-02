@@ -48,6 +48,22 @@ func ClientLiveConns(c *Client, idx int) int32   { return c.pools[idx].live.Load
 func ClientMarkFailed(c *Client, idx int) { c.cluster.MarkFailed(idx) }
 func ClientPick(c *Client) (int, bool)    { return c.cluster.Pick() }
 
+// ConfigWantsSetUgi exposes config.wantsSetUgi to hms_test: whether opts
+// would make newConn issue set_ugi on a binary NOSASL dial. hmstest's fake
+// server does not implement the SASL PLAIN handshake (see
+// internal/transport/sasl.go), so the WithPlainAuth/WithUser gating this
+// exercises cannot be driven end-to-end through a live New() call; this
+// applies opts to a fresh config exactly as New does (including clamp) and
+// reports the resulting decision directly.
+func ConfigWantsSetUgi(opts ...Option) bool {
+	cfg := newConfig()
+	for _, o := range opts {
+		o(cfg)
+	}
+	cfg.clamp()
+	return cfg.wantsSetUgi()
+}
+
 // WithProbeIntervalForTest overrides the recovery probe's tick interval
 // (default 30s), so ha_test.go can bound its waits to well under a second.
 func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval(d) }

@@ -24,18 +24,22 @@ jobs:
             build: true
             expect_version: "2.3"
             uris: "thrift://127.0.0.1:9083"
+            user: ci
           - name: hive-3.1.3
             image: apache/hive:3.1.3
             expect_version: "3.1"
             uris: "thrift://127.0.0.1:9083"
+            user: ci
           - name: hive-4.0.1
             image: apache/hive:4.0.1
             expect_version: "4.0"
             uris: "thrift://127.0.0.1:9083"
+            user: ci
           - name: hive-4.2.1-binary
             image: apache/hive:4.2.1
             expect_version: "4.2"
             uris: "thrift://127.0.0.1:9083"
+            user: ci
           - name: hive-4.2.1-http
             image: apache/hive:4.2.1
             expect_version: "4.2"

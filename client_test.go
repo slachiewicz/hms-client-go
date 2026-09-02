@@ -196,6 +196,90 @@ func TestClient_ContextExpiredMidRPCDiscardsConn(t *testing.T) {
 	assert.Equal(t, int32(1), hms.ClientLiveConns(c, 0))
 }
 
+// TestNew_SetUgi_FirstCallOnConnection covers SPEC §3.1: over binary NOSASL,
+// a configured WithUser (and WithUserGroups) makes newConn issue set_ugi
+// once a connection dials, before any caller-initiated RPC on it.
+func TestNew_SetUgi_FirstCallOnConnection(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	mustNew(t, srv.URI(), hms.WithUser("alice"), hms.WithUserGroups("eng"))
+
+	// New's own eager dial is the only thing that has run on this
+	// connection so far, so set_ugi must be both present and first.
+	calls := srv.Calls()
+	require.NotEmpty(t, calls)
+	assert.Equal(t, "set_ugi", calls[0])
+	assert.Equal(t, hmstest.SetUgiArgs{User: "alice", Groups: []string{"eng"}}, srv.LastArgs("set_ugi"))
+}
+
+// TestNew_SetUgi_OnePerConnection covers the fix's per-conn scope: each
+// newly dialed connection issues its own set_ugi, not just the first one in
+// the pool. WithPoolSize(2) lets a second conn dial without waiting for the
+// first (already on loan) to be released, so two sequential acquires
+// deterministically produce two dials and thus two set_ugi calls, without
+// needing an actual goroutine race to force it.
+func TestNew_SetUgi_OnePerConnection(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c, err := hms.New(context.Background(), srv.URI(), hms.WithUser("alice"), hms.WithPoolSize(2))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	cn0, err := hms.ClientAcquire(c, context.Background(), 0)
+	require.NoError(t, err)
+	cn1, err := hms.ClientAcquire(c, context.Background(), 0)
+	require.NoError(t, err)
+	hms.ClientRelease(c, 0, cn0)
+	hms.ClientRelease(c, 0, cn1)
+
+	count := 0
+	for _, m := range srv.Calls() {
+		if m == "set_ugi" {
+			count++
+		}
+	}
+	assert.Equal(t, 2, count, "each of the pool's two dialed connections must issue its own set_ugi")
+}
+
+// TestNew_SetUgi_NotCalledWithoutUser covers the fix's default behavior:
+// with no WithUser configured, newConn never issues set_ugi.
+func TestNew_SetUgi_NotCalledWithoutUser(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+
+	_, err := c.GetAllDatabases(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, srv.Calls(), "set_ugi")
+}
+
+// TestConfigWantsSetUgi covers config.wantsSetUgi's gating (SPEC §3.1):
+// set_ugi is wanted only with a configured WithUser and no WithPlainAuth.
+// This is exercised directly, via export_test.go's ConfigWantsSetUgi,
+// rather than through a live New() call: hmstest's fake server does not
+// implement the SASL PLAIN handshake (see internal/transport/sasl.go), so
+// WithPlainAuth against it fails at dial, before ever reaching the point
+// this gate lives at -- that would prove nothing about the gate itself.
+func TestConfigWantsSetUgi(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts []hms.Option
+		want bool
+	}{
+		{"WithUser alone wants set_ugi", []hms.Option{hms.WithUser("alice")}, true},
+		{"no WithUser does not want set_ugi", nil, false},
+		{"WithPlainAuth suppresses set_ugi even with WithUser", []hms.Option{hms.WithUser("alice"), hms.WithPlainAuth("bob", "pw")}, false},
+		{"WithPlainAuth alone does not want set_ugi", []hms.Option{hms.WithPlainAuth("bob", "pw")}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, hms.ConfigWantsSetUgi(tt.opts...))
+		})
+	}
+}
+
 func TestClient_GetConfigValue(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

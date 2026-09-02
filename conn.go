@@ -72,6 +72,11 @@ type conn struct {
 	getConfigValue func(ctx context.Context, name, defaultValue string) (string, error)
 	getStatus      func(ctx context.Context) (fb303.FbStatus, error)
 	getVersion     func(ctx context.Context) (string, error)
+
+	// setUgi is bound on every conn (binary and HTTP alike, per AGENTS.md
+	// invariant #5), but newConn only ever calls it for a binary NOSASL
+	// dial with a configured user (config.wantsSetUgi); see newConn.
+	setUgi func(ctx context.Context, userName string, groupNames []string) ([]string, error)
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
@@ -105,7 +110,7 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 	g := hive_metastore.NewThriftHiveMetastoreClient(tc.Client)
 	fb := fb303.NewFacebookServiceClient(tc.Client)
 
-	return &conn{
+	cn := &conn{
 		close: tc.Close,
 
 		getCatalogs:   g.GetCatalogs,
@@ -137,7 +142,27 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 		getConfigValue: g.GetConfigValue,
 		getStatus:      fb.GetStatus,
 		getVersion:     fb.GetVersion,
-	}, nil
+
+		setUgi: g.SetUgi,
+	}
+
+	// set_ugi establishes the caller's identity over binary NOSASL (SPEC
+	// §3.1): issued once, right here, so it is unconditionally the first
+	// call any caller ever observes on this conn. It is never issued over
+	// HTTP (identity there is the "x-actor-username" header, set per
+	// request) nor when SASL PLAIN auth is configured (WithPlainAuth
+	// already establishes identity during the handshake DialBinary just
+	// completed). A failure closes cn and surfaces as newConn's own error,
+	// so the caller's dial-failure path -- including HA failover -- applies
+	// exactly as it would for the dial itself.
+	if ep.Scheme == transport.SchemeThrift && cfg.wantsSetUgi() {
+		if _, err := cn.setUgi(ctx, cfg.user, cfg.userGroups); err != nil {
+			_ = cn.close()
+			return nil, err
+		}
+	}
+
+	return cn, nil
 }
 
 // useLegacy reports whether method previously observed UNKNOWN_METHOD on

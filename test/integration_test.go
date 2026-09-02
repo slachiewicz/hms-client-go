@@ -342,6 +342,35 @@ func TestCatalogs(t *testing.T) {
 	assert.Contains(t, dbNames, dbName)
 }
 
+// TestIdentity covers SPEC.md §3.1's set_ugi identity over binary NOSASL:
+// dial's own hms.WithUser("ci") (see the dial helper and HMS_USER) must not
+// break CreateDatabase/DropDatabase against any supported server version. A
+// server that fills a created database's owner from the connection's UGI
+// (observed on Hive 4.x) additionally reports OwnerName as HMS_USER; a
+// server that does not (observed on Hive 2.3/3.1, which leave it unset)
+// only has the success of the round trip asserted, since there is nothing
+// else here for those versions to prove set_ugi actually ran.
+func TestIdentity(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	_, expectVersion := requireHMSEnv(t)
+	ctx := context.Background()
+
+	user := os.Getenv(envUser)
+	require.NotEmpty(t, user, "%s must be set for TestIdentity", envUser)
+
+	name := uniqueName("it_identity_db_")
+	createDB(t, c, ctx, name, "")
+
+	got, err := c.GetDatabase(ctx, name)
+	require.NoError(t, err)
+	assert.Equal(t, name, got.Name)
+
+	if expectVersion == "4.0" || expectVersion == "4.2" {
+		assert.Equal(t, user, got.OwnerName, "Hive 4.x fills a created database's owner from the set_ugi identity")
+	}
+}
+
 // TestFallbacks covers SPEC.md §2.3 Rules 3-4: on a server lacking
 // get_partitions_req (Hive 2.3, 3.1), GetPartitions degrades to the legacy
 // get_partitions RPC on UNKNOWN_METHOD, and the degraded probe result is

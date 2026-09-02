@@ -34,9 +34,19 @@ type config struct {
 	httpHeaders map[string]string
 	bearerToken string
 	user        string
+	userGroups  []string
 
 	plainUser     string
 	plainPassword string
+}
+
+// wantsSetUgi reports whether newConn should issue set_ugi once a binary
+// NOSASL connection is dialed (SPEC §3.1): only when a user is configured
+// (WithUser) and no SASL auth is configured (WithPlainAuth), since SASL
+// PLAIN establishes the caller's identity during the handshake itself and
+// must never be followed by a second, contradicting identity claim.
+func (cfg *config) wantsSetUgi() bool {
+	return cfg.plainUser == "" && cfg.user != ""
 }
 
 // newConfig returns a config seeded with the library defaults.
@@ -145,12 +155,24 @@ func WithBearerToken(token string) Option {
 	return func(c *config) { c.bearerToken = token }
 }
 
-// WithUser sets the principal name sent as the "x-actor-username" HTTP
-// header (SPEC.md §5.1); it has no effect over the binary TCP transport.
-// SASL PLAIN's identity over binary TCP comes solely from WithPlainAuth,
-// never from WithUser.
+// WithUser sets the caller's identity. Over the HTTP transport it is sent
+// as the "x-actor-username" header (SPEC.md §5.1). Over the binary TCP
+// transport under NOSASL (the default; no WithPlainAuth configured), it
+// makes newConn issue set_ugi(name, groups) once per newly dialed
+// connection, mirroring the Java HiveMetaStoreClient's behavior under
+// hive.metastore.execute.setugi; see WithUserGroups for the groups. SASL
+// PLAIN's identity over binary TCP comes solely from WithPlainAuth, never
+// from WithUser: when WithPlainAuth is also set, WithUser has no effect.
 func WithUser(name string) Option {
 	return func(c *config) { c.user = name }
+}
+
+// WithUserGroups sets the group names sent alongside WithUser's principal
+// name in the binary NOSASL set_ugi call (SPEC §3.1, §5.1). Repeated calls
+// append rather than replace. It has no effect over the HTTP transport, nor
+// over binary TCP when WithPlainAuth (or no WithUser) is configured.
+func WithUserGroups(groups ...string) Option {
+	return func(c *config) { c.userGroups = append(c.userGroups, groups...) }
 }
 
 // WithPlainAuth selects SASL PLAIN authentication over the binary TCP

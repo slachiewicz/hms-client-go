@@ -254,6 +254,19 @@ type DropPartitionArgs struct {
 	DeleteData bool
 }
 
+// SetUgiArgs is the recorded LastArgs value for SetUgi.
+type SetUgiArgs struct {
+	User   string
+	Groups []string
+}
+
+// SetUgi records the caller's identity and echoes groupNames back, the way
+// a real metastore's set_ugi RPC does.
+func (h *handler) SetUgi(_ context.Context, userName string, groupNames []string) ([]string, error) {
+	h.rec.record("set_ugi", SetUgiArgs{User: userName, Groups: groupNames})
+	return groupNames, nil
+}
+
 // GetStatus reports the fb303 service as always alive.
 func (h *handler) GetStatus(_ context.Context) (fb303.FbStatus, error) {
 	h.rec.record("getStatus", nil)
