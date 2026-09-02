@@ -145,8 +145,10 @@ func WithBearerToken(token string) Option {
 	return func(c *config) { c.bearerToken = token }
 }
 
-// WithUser sets the principal name sent as "x-actor-username" over HTTP, or
-// as the SASL PLAIN user over binary TCP when WithPlainAuth is not used.
+// WithUser sets the principal name sent as the "x-actor-username" HTTP
+// header (SPEC.md §5.1); it has no effect over the binary TCP transport.
+// SASL PLAIN's identity over binary TCP comes solely from WithPlainAuth,
+// never from WithUser.
 func WithUser(name string) Option {
 	return func(c *config) { c.user = name }
 }
