@@ -268,25 +268,64 @@ func TestNew_SetUgi_OnePerConnection(t *testing.T) {
 	assert.Equal(t, 2, count, "each of the pool's two dialed connections must issue its own set_ugi")
 }
 
-// TestNew_SetUgi_NotCalledWithoutUser covers the fix's default behavior:
-// with no WithUser configured, newConn never issues set_ugi.
-func TestNew_SetUgi_NotCalledWithoutUser(t *testing.T) {
+// TestNew_SetUgi_DefaultsToOSUser covers SPEC §3.1's default: with no
+// WithUser configured, newConn still issues set_ugi, carrying the current
+// OS user rather than an empty string, mirroring the Java
+// HiveMetaStoreClient and this package's own HTTP x-actor-username
+// default. hms.ConfigUgiUser resolves the same default New itself would,
+// so the assertion doesn't hardcode a value that would break in a
+// differently-named CI environment.
+func TestNew_SetUgi_DefaultsToOSUser(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)
 	c := mustNew(t, srv.URI())
 
 	_, err := c.GetAllDatabases(context.Background())
 	require.NoError(t, err)
+	assert.Contains(t, srv.Calls(), "set_ugi")
+
+	args, ok := srv.LastArgs("set_ugi").(hmstest.SetUgiArgs)
+	require.True(t, ok)
+	assert.NotEmpty(t, args.User)
+	assert.Equal(t, hms.ConfigUgiUser(), args.User)
+}
+
+// TestNew_WithoutUGI_SuppressesSetUgi covers SPEC §3.1/§5.1's WithoutUGI:
+// even with the new default-on set_ugi, WithoutUGI disables it entirely.
+func TestNew_WithoutUGI_SuppressesSetUgi(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI(), hms.WithoutUGI())
+
+	_, err := c.GetAllDatabases(context.Background())
+	require.NoError(t, err)
 	assert.NotContains(t, srv.Calls(), "set_ugi")
 }
 
+// TestNew_SetUgi_WithUserStillWins covers SPEC §3.1/§5.1: a configured
+// WithUser still overrides the default OS user set_ugi otherwise sends.
+func TestNew_SetUgi_WithUserStillWins(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI(), hms.WithUser("alice"))
+
+	_, err := c.GetAllDatabases(context.Background())
+	require.NoError(t, err)
+
+	args, ok := srv.LastArgs("set_ugi").(hmstest.SetUgiArgs)
+	require.True(t, ok)
+	assert.Equal(t, "alice", args.User)
+}
+
 // TestConfigWantsSetUgi covers config.wantsSetUgi's gating (SPEC §3.1):
-// set_ugi is wanted only with a configured WithUser and no WithPlainAuth.
-// This is exercised directly, via export_test.go's ConfigWantsSetUgi,
-// rather than through a live New() call: hmstest's fake server does not
-// implement the SASL PLAIN handshake (see internal/transport/sasl.go), so
-// WithPlainAuth against it fails at dial, before ever reaching the point
-// this gate lives at -- that would prove nothing about the gate itself.
+// set_ugi is wanted by default (WithUser is not required, since it now
+// falls back to the OS user), unless WithoutUGI or SASL auth
+// (WithPlainAuth/WithKerberos) is configured. This is exercised directly,
+// via export_test.go's ConfigWantsSetUgi, rather than through a live New()
+// call: hmstest's fake server does not implement the SASL PLAIN handshake
+// (see internal/transport/sasl.go), so WithPlainAuth against it fails at
+// dial, before ever reaching the point this gate lives at -- that would
+// prove nothing about the gate itself.
 func TestConfigWantsSetUgi(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -295,7 +334,8 @@ func TestConfigWantsSetUgi(t *testing.T) {
 		want bool
 	}{
 		{"WithUser alone wants set_ugi", []hms.Option{hms.WithUser("alice")}, true},
-		{"no WithUser does not want set_ugi", nil, false},
+		{"no WithUser also wants set_ugi, with the default OS user", nil, true},
+		{"WithoutUGI suppresses set_ugi even with no other auth configured", []hms.Option{hms.WithoutUGI()}, false},
 		{"WithPlainAuth suppresses set_ugi even with WithUser", []hms.Option{hms.WithUser("alice"), hms.WithPlainAuth("bob", "pw")}, false},
 		{"WithPlainAuth alone does not want set_ugi", []hms.Option{hms.WithPlainAuth("bob", "pw")}, false},
 	}

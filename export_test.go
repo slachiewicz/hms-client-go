@@ -71,6 +71,21 @@ func ConfigWantsSetUgi(opts ...Option) bool {
 	return cfg.wantsSetUgi()
 }
 
+// ConfigUgiUser exposes config.ugiUser, as New itself resolves it (see
+// resolveUgiUser), to hms_test: WithUser's value if set, else the current
+// OS user. It lets a test assert the default set_ugi identity a live dial
+// records is exactly what New would have resolved, without duplicating
+// os/user.Current's fallback logic in the test itself.
+func ConfigUgiUser(opts ...Option) string {
+	cfg := newConfig()
+	for _, o := range opts {
+		o(cfg)
+	}
+	cfg.clamp()
+	cfg.resolveUgiUser()
+	return cfg.ugiUser
+}
+
 // WithProbeIntervalForTest overrides the recovery probe's tick interval
 // (default 30s), so ha_test.go can bound its waits to well under a second.
 func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval(d) }

@@ -26,6 +26,8 @@ a release, so everything below is unreleased.
   (SPEC §5.1, §5.4, §5.5).
 - `WithPartitionBatchSize` to control `AddPartitions`' batch size independently of
   `WithChunkSize` (SPEC §5.1, §5.5, §2.3 Rule 5).
+- `WithoutUGI` to disable the binary NOSASL `set_ugi` call entirely, for a server that rejects
+  it or for deliberate anonymous use (SPEC §3.1, §5.1).
 - Partition lookups by name, filter, and partial values: `GetPartitionsByNames`,
   `GetPartitionsByFilter`, `GetPartitionNamesByValues` (SPEC §5.5).
 - `AlterDatabase` (SPEC §5.3).
@@ -65,6 +67,11 @@ a release, so everything below is unreleased.
   `Client` per catalog name, instead of re-resolving it (`get_catalog`/`get_config_value`) on
   every call (SPEC §5.3). A warehouse directory changed on the server after that is not picked
   up by a running `Client` -- construct a new one.
+- Binary NOSASL connections now send `set_ugi` by default, with the current OS user, matching
+  the Java `HiveMetaStoreClient` and this package's own HTTP `x-actor-username` default; `WithUser`
+  still overrides the identity sent, and `WithoutUGI` (new, above) disables the call entirely.
+  Previously `set_ugi` was sent only when `WithUser` was configured -- a client relying on that to
+  skip `set_ugi` (e.g. against a server that rejects it) must now call `WithoutUGI` explicitly.
 
 ### Known issues
 

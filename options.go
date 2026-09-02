@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"log/slog"
 	"net/http"
+	"os/user"
 	"strings"
 	"time"
 
@@ -46,6 +47,17 @@ type config struct {
 	bearerToken string
 	user        string
 	userGroups  []string
+	// withoutUGI, set by WithoutUGI, suppresses set_ugi on binary NOSASL
+	// entirely regardless of user/plainUser/kerberos (SPEC §3.1): for a
+	// server that rejects it, or for deliberate anonymous use.
+	withoutUGI bool
+	// ugiUser is the identity newConn sends via set_ugi on a binary NOSASL
+	// connection (SPEC §3.1): user's value when WithUser was called, else
+	// the current OS user (defaultOSUser). New resolves it once, via
+	// resolveUgiUser, after every Option has run -- not per dial -- so
+	// newConn never re-resolves the OS user itself. Meaningless (and left
+	// at its zero value) when wantsSetUgi is false.
+	ugiUser string
 
 	plainUser     string
 	plainPassword string
@@ -74,14 +86,41 @@ type config struct {
 }
 
 // wantsSetUgi reports whether newConn should issue set_ugi once a binary
-// NOSASL connection is dialed (SPEC §3.1): only when a user is configured
-// (WithUser) and no SASL auth is configured (WithPlainAuth or
-// WithKerberos), since SASL establishes the caller's identity during the
-// handshake itself -- from the credentials for PLAIN, from the ticket for
-// GSSAPI -- and must never be followed by a second, contradicting identity
-// claim.
+// NOSASL connection is dialed (SPEC §3.1): whenever WithoutUGI was not
+// called and no SASL auth is configured (WithPlainAuth or WithKerberos),
+// since SASL establishes the caller's identity during the handshake itself
+// -- from the credentials for PLAIN, from the ticket for GSSAPI -- and must
+// never be followed by a second, contradicting identity claim. A configured
+// WithUser is not required: by default newConn sends the current OS user
+// (see resolveUgiUser), mirroring the Java HiveMetaStoreClient's
+// hive.metastore.execute.setugi behavior and this package's own HTTP
+// x-actor-username default (internal/transport/http.go's userOrDefault).
 func (cfg *config) wantsSetUgi() bool {
-	return cfg.plainUser == "" && !cfg.kerberos && cfg.user != ""
+	return !cfg.withoutUGI && cfg.plainUser == "" && !cfg.kerberos
+}
+
+// defaultOSUser returns the current OS username, or the literal fallback
+// "hms-client-go" when it cannot be determined -- the same fallback
+// internal/transport/http.go's userOrDefault uses for the HTTP transport's
+// "x-actor-username" default.
+func defaultOSUser() string {
+	if cur, err := user.Current(); err == nil && cur.Username != "" {
+		return cur.Username
+	}
+	return "hms-client-go"
+}
+
+// resolveUgiUser fills cfg.ugiUser from cfg.user, falling back to
+// defaultOSUser when WithUser was never called. New calls it once, after
+// every Option has run, so newConn's binary NOSASL dial reads an
+// already-resolved value instead of re-resolving the OS user on every
+// dial.
+func (cfg *config) resolveUgiUser() {
+	if cfg.user != "" {
+		cfg.ugiUser = cfg.user
+		return
+	}
+	cfg.ugiUser = defaultOSUser()
 }
 
 // newConfig returns a config seeded with the library defaults.
@@ -225,15 +264,33 @@ func WithBearerToken(token string) Option {
 }
 
 // WithUser sets the caller's identity. Over the HTTP transport it is sent
-// as the "x-actor-username" header (SPEC.md §5.1). Over the binary TCP
-// transport under NOSASL (the default; no WithPlainAuth configured), it
-// makes newConn issue set_ugi(name, groups) once per newly dialed
-// connection, mirroring the Java HiveMetaStoreClient's behavior under
-// hive.metastore.execute.setugi; see WithUserGroups for the groups. SASL
-// PLAIN's identity over binary TCP comes solely from WithPlainAuth, never
-// from WithUser: when WithPlainAuth is also set, WithUser has no effect.
+// as the "x-actor-username" header (SPEC.md §5.1), defaulting to the
+// current OS user when unset (internal/transport/http.go's userOrDefault).
+// Over the binary TCP transport under NOSASL (the default; no
+// WithPlainAuth or WithKerberos configured), it makes newConn issue
+// set_ugi(name, groups) once per newly dialed connection, mirroring the
+// Java HiveMetaStoreClient's behavior under hive.metastore.execute.setugi;
+// see WithUserGroups for the groups. Unset, set_ugi is still sent by
+// default, with the current OS user in name's place -- the same default
+// the HTTP transport already applies -- so WithoutUGI is what disables it,
+// not simply leaving WithUser unset. SASL PLAIN's identity over binary TCP
+// comes solely from WithPlainAuth, never from WithUser: when WithPlainAuth
+// (or WithKerberos) is also set, WithUser has no effect on set_ugi (it
+// still governs the HTTP header, over a transport where SASL is moot).
 func WithUser(name string) Option {
 	return func(c *config) { c.user = name }
+}
+
+// WithoutUGI disables the set_ugi call newConn otherwise issues on every
+// binary NOSASL connection (SPEC §3.1), whether the identity it would
+// carry comes from WithUser or, by default, the current OS user. Use it
+// against a server that rejects set_ugi, or for deliberate anonymous
+// access. It has no effect over the HTTP transport, nor when WithPlainAuth
+// or WithKerberos is configured: SASL already establishes identity during
+// the handshake in that case, so set_ugi is never sent regardless of
+// WithoutUGI.
+func WithoutUGI() Option {
+	return func(c *config) { c.withoutUGI = true }
 }
 
 // WithUserGroups sets the group names sent alongside WithUser's principal

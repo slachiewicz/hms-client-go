@@ -85,7 +85,7 @@ func TestWantsSetUgi(t *testing.T) {
 		opts []Option
 		want bool
 	}{
-		{name: "no user at all", want: false},
+		{name: "no user at all wants set_ugi with the default OS user", want: true},
 		{name: "user alone", opts: []Option{WithUser("alice")}, want: true},
 		{
 			name: "SASL PLAIN establishes the identity instead",
@@ -95,6 +95,16 @@ func TestWantsSetUgi(t *testing.T) {
 		{
 			name: "Kerberos establishes the identity instead",
 			opts: []Option{WithUser("alice"), WithKerberos("alice@EXAMPLE.COM")},
+			want: false,
+		},
+		{
+			name: "WithoutUGI suppresses set_ugi even with no other auth configured",
+			opts: []Option{WithoutUGI()},
+			want: false,
+		},
+		{
+			name: "WithoutUGI suppresses set_ugi even with WithUser",
+			opts: []Option{WithUser("alice"), WithoutUGI()},
 			want: false,
 		},
 	}
@@ -109,6 +119,29 @@ func TestWantsSetUgi(t *testing.T) {
 			assert.Equal(t, tc.want, cfg.wantsSetUgi())
 		})
 	}
+}
+
+// TestResolveUgiUser covers config.resolveUgiUser (SPEC §3.1): WithUser's
+// value wins when set; otherwise the default is the current OS user
+// (defaultOSUser), never empty.
+func TestResolveUgiUser(t *testing.T) {
+	t.Parallel()
+
+	t.Run("WithUser wins", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig()
+		WithUser("alice")(cfg)
+		cfg.resolveUgiUser()
+		assert.Equal(t, "alice", cfg.ugiUser)
+	})
+
+	t.Run("no WithUser resolves to the OS user", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig()
+		cfg.resolveUgiUser()
+		assert.Equal(t, defaultOSUser(), cfg.ugiUser)
+		assert.NotEmpty(t, cfg.ugiUser)
+	})
 }
 
 func TestKrbConfigNilWithoutWithKerberos(t *testing.T) {

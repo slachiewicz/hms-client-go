@@ -195,6 +195,12 @@ func TestACID_NegativeIDsRejected(t *testing.T) {
 	c := mustNew(t, srv.URI())
 	ctx := context.Background()
 
+	// New's own eager dial already issued set_ugi (SPEC §3.1's now
+	// default-on binary NOSASL identity) before any of the rejected-id
+	// calls below run; the cleanup assertion must only see no *new* RPC
+	// beyond that baseline, not an empty log altogether.
+	baseline := len(srv.Calls())
+
 	tests := []struct {
 		name string
 		call func() error
@@ -226,7 +232,7 @@ func TestACID_NegativeIDsRejected(t *testing.T) {
 	// Registered as cleanup, not asserted inline: the parallel subtests
 	// above only run once this function has returned.
 	t.Cleanup(func() {
-		assert.Empty(t, srv.Calls(), "a rejected id must never reach the server")
+		assert.Len(t, srv.Calls(), baseline, "a rejected id must never reach the server")
 	})
 }
 

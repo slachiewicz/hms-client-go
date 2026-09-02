@@ -70,7 +70,9 @@ func TestObserver_SingleCall_OneAttempt(t *testing.T) {
 // idempotent RPC that fails after being sent on srv1 (WithFailNext(1))
 // retries on srv2 and succeeds there. The observer must see exactly two
 // RPCInfo values: attempt 1 against srv1 with a non-nil Err, attempt 2
-// against srv2 with a nil Err.
+// against srv2 with a nil Err. WithoutUGI keeps mustNew's own eager dial
+// from consuming srv1's WithFailNext budget with its default set_ugi call
+// (SPEC §3.1) instead of the observed get_all_databases attempt.
 func TestObserver_Failover_OnePerAttempt(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40, hmstest.WithFailNext(1))
@@ -78,7 +80,7 @@ func TestObserver_Failover_OnePerAttempt(t *testing.T) {
 
 	var mu sync.Mutex
 	var got []hms.RPCInfo
-	c := mustNew(t, srv1.URI()+","+srv2.URI(), hms.WithRPCObserver(func(info hms.RPCInfo) {
+	c := mustNew(t, srv1.URI()+","+srv2.URI(), hms.WithoutUGI(), hms.WithRPCObserver(func(info hms.RPCInfo) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, info)

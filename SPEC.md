@@ -82,7 +82,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
   * `ContextClient` does not exist yet during the SASL handshake (§3.1 Authentication), since it wraps the client built on top of the fully assembled transport. `DialBinary` gives the handshake the same deadline/cancel treatment directly against the raw `net.Conn` for its duration, then clears the deadline before `ContextClient` takes over.
   * A cancelled RPC returns `ctx.Err()` wrapped in `ErrUnavailable`; the connection is discarded and a new one is provisioned for the next call.
 * **Authentication**:
-  * `NOSASL` / `NONE`: raw binary protocol, the default. When `WithUser` (and optionally `WithUserGroups`) is set and no SASL auth is configured, the client calls `set_ugi(user, groups)` once per newly dialed connection, mirroring the Java `HiveMetaStoreClient`'s behavior under `hive.metastore.execute.setugi` (§5.1).
+  * `NOSASL` / `NONE`: raw binary protocol, the default. Unless `WithoutUGI` is set or SASL auth is configured (`WithPlainAuth`/`WithKerberos`), the client calls `set_ugi(user, groups)` once per newly dialed connection, mirroring the Java `HiveMetaStoreClient`'s behavior under `hive.metastore.execute.setugi`: `user` is `WithUser`'s value when set, else the current OS user (the same default the HTTP transport's `x-actor-username` already uses), resolved once by `New` rather than per dial; `groups` comes from `WithUserGroups` (§5.1).
   * `LDAP` / `CUSTOM`: SASL `PLAIN` framing (RFC 4616 initial response `\0user\0password`), 1-byte-status/4-byte-length-prefixed negotiation frames followed by 4-byte-length-prefixed data frames (the Java `TSaslTransport` wire format). The client implements the SASL negotiation handshake in pure Go (`internal/transport/sasl.go`); see the context-propagation bullet above for how the handshake gets its deadline.
   * `KERBEROS`: SASL GSSAPI (RFC 4752) over the same socket, in the same `TSaslTransport` framing as `PLAIN`, using a pure-Go Kerberos implementation (`gokrb5`) rather than native C Kerberos, keeping the zero-Cgo invariant. Selected with `WithKerberos`; see §5.1. It is mutually exclusive with `WithPlainAuth`, and configuring both is rejected by `New` as `ErrInvalidOperation`, as are Kerberos credentials that cannot be read at all.
     * **Handshake**: three rounds -- an AP_REQ initial context token with the mutual-required option; the server's AP_REP, whose `EncAPRepPart` must echo the authenticator's timestamp (this is what proves the server holds the service key, and a server that answers `COMPLETE` before it is rejected rather than trusted); then the security-layer negotiation. When the AP_REP carries an acceptor subkey, that key -- not the ticket session key -- signs the negotiation's wrap tokens.
@@ -163,8 +163,9 @@ func WithPartitionBatchSize(n int) Option       // per-request batch size for Ad
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
-func WithUser(name string) Option               // x-actor-username over HTTP; set_ugi user over binary NOSASL (§3.1)
+func WithUser(name string) Option               // x-actor-username over HTTP; set_ugi user over binary NOSASL; both default to the OS user (§3.1)
 func WithUserGroups(groups ...string) Option    // set_ugi groups over binary NOSASL; repeated calls append; no effect over HTTP or non-NOSASL binary auth
+func WithoutUGI() Option                        // disables set_ugi over binary NOSASL entirely; no effect over HTTP or non-NOSASL binary auth (§3.1)
 func WithPlainAuth(user, password string) Option // SASL PLAIN over binary TCP
 func WithKerberos(principal string, keytabOrCCache ...string) Option // SASL GSSAPI over binary TCP, pure Go (gokrb5); see §3.1
 func WithKerberosServicePrincipal(spn string) Option // overrides the metastore's principal; default "hive/<host>"

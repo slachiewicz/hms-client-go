@@ -16,13 +16,16 @@ import (
 
 // TestHA_FailoverToSecondEndpoint covers SPEC §4.2 points 2 and 3: an
 // idempotent RPC (get_all_databases) that fails after being sent retries on
-// the next endpoint and succeeds there.
+// the next endpoint and succeeds there. WithoutUGI keeps the default
+// binary NOSASL set_ugi (SPEC §3.1) from consuming srv1's single
+// WithFailNext budget itself, which would otherwise make New's own eager
+// dial -- not get_all_databases -- the thing that fails over.
 func TestHA_FailoverToSecondEndpoint(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40, hmstest.WithFailNext(1))
 	srv2 := hmstest.Start(t, hmstest.Hive40)
 
-	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI())
+	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI(), hms.WithoutUGI())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -71,13 +74,15 @@ func TestHA_NewFailsWhenEveryEndpointIsDown(t *testing.T) {
 // TestHA_NonIdempotentOpDoesNotFailOver covers SPEC §4.2 point 3: a
 // non-idempotent RPC (create_database) that fails after being sent must not
 // be retried on another endpoint, since the server may already have
-// applied it.
+// applied it. WithoutUGI keeps New's own eager dial from consuming srv1's
+// WithFailNext budget with its default set_ugi call (SPEC §3.1) instead of
+// the create_database call under test.
 func TestHA_NonIdempotentOpDoesNotFailOver(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40, hmstest.WithFailNext(1))
 	srv2 := hmstest.Start(t, hmstest.Hive40)
 
-	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI(), hms.WithMaxRetries(3))
+	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI(), hms.WithMaxRetries(3), hms.WithoutUGI())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -89,13 +94,15 @@ func TestHA_NonIdempotentOpDoesNotFailOver(t *testing.T) {
 
 // TestHA_MaxRetriesOfOneNeverTriesTheSecondEndpoint covers SPEC §4.2 point
 // 3's retry budget: with WithMaxRetries(1), even an idempotent op gets only
-// one attempt.
+// one attempt. WithoutUGI keeps New's own eager dial from consuming
+// srv1's WithFailNext budget with its default set_ugi call (SPEC §3.1)
+// instead of the get_all_databases call under test.
 func TestHA_MaxRetriesOfOneNeverTriesTheSecondEndpoint(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40, hmstest.WithFailNext(1))
 	srv2 := hmstest.Start(t, hmstest.Hive40)
 
-	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI(), hms.WithMaxRetries(1))
+	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI(), hms.WithMaxRetries(1), hms.WithoutUGI())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -155,6 +162,8 @@ func TestHA_RecoveryProbeReenablesCooledEndpoint(t *testing.T) {
 // The table is seeded directly into both servers' stores (bypassing
 // CreateTable, a non-idempotent RPC that would itself consume srv1's
 // WithFailNext budget), since either server may end up answering the read.
+// WithoutUGI keeps New's own eager dial from consuming that same budget
+// with its default set_ugi call (SPEC §3.1) instead of get_table_req.
 func TestHA_FailoverToSecondEndpoint_GetTable(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40, hmstest.WithFailNext(1))
@@ -165,7 +174,7 @@ func TestHA_FailoverToSecondEndpoint_GetTable(t *testing.T) {
 	srv1.Store().Tables["hive.db.t"] = tbl
 	srv2.Store().Tables["hive.db.t"] = tbl
 
-	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI())
+	c, err := hms.New(context.Background(), srv1.URI()+","+srv2.URI(), hms.WithoutUGI())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 

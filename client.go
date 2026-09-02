@@ -102,6 +102,10 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		o(cfg)
 	}
 	cfg.clamp()
+	// Resolved once here, not per dial: newConn's binary NOSASL set_ugi
+	// call (SPEC §3.1) reads cfg.ugiUser rather than re-resolving the OS
+	// user on every connection.
+	cfg.resolveUgiUser()
 
 	eps, err := transport.ParseEndpoints(uris)
 	if err != nil {

@@ -76,7 +76,8 @@ type conn struct {
 
 	// setUgi is bound on every conn (binary and HTTP alike, per AGENTS.md
 	// invariant #5), but newConn only ever calls it for a binary NOSASL
-	// dial with a configured user (config.wantsSetUgi); see newConn.
+	// dial (config.wantsSetUgi; true by default, see WithoutUGI); see
+	// newConn.
 	setUgi func(ctx context.Context, userName string, groupNames []string) ([]string, error)
 
 	alterDatabase func(ctx context.Context, dbname string, db *hive_metastore.Database) error
@@ -228,15 +229,18 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *
 
 	// set_ugi establishes the caller's identity over binary NOSASL (SPEC
 	// §3.1): issued once, right here, so it is unconditionally the first
-	// call any caller ever observes on this conn. It is never issued over
-	// HTTP (identity there is the "x-actor-username" header, set per
-	// request) nor when SASL PLAIN auth is configured (WithPlainAuth
-	// already establishes identity during the handshake DialBinary just
-	// completed). A failure closes cn and surfaces as newConn's own error,
-	// so the caller's dial-failure path -- including HA failover -- applies
-	// exactly as it would for the dial itself.
+	// call any caller ever observes on this conn. It carries cfg.ugiUser
+	// (WithUser's value, or the current OS user by default -- see
+	// resolveUgiUser, called once by New rather than per dial), and is
+	// never issued over HTTP (identity there is the "x-actor-username"
+	// header, set per request), when WithoutUGI was called, or when SASL
+	// PLAIN/Kerberos auth is configured (that handshake DialBinary just
+	// completed already establishes identity). A failure closes cn and
+	// surfaces as newConn's own error, so the caller's dial-failure path --
+	// including HA failover -- applies exactly as it would for the dial
+	// itself.
 	if ep.Scheme == transport.SchemeThrift && cfg.wantsSetUgi() {
-		if _, err := cn.setUgi(ctx, cfg.user, cfg.userGroups); err != nil {
+		if _, err := cn.setUgi(ctx, cfg.ugiUser, cfg.userGroups); err != nil {
 			_ = cn.close()
 			return nil, err
 		}
