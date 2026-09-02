@@ -136,6 +136,13 @@ func newTableStatsRequest(dbName, tblName string, cat *string, columns []string)
 // Hive 2.3 the effective catalog resolves to nil exactly as every other
 // catalog-scoped call resolves it (SPEC §5.0), so no catName is ever
 // written to a server whose own IDL never declared one.
+//
+// Hive 4's metastore stores column statistics per computing engine
+// (TableStatsRequest.Engine); this call always requests the "hive" engine's
+// statistics (Engine's IDL default, via newTableStatsRequest, and never
+// overridden here), so statistics Spark, Impala, or another engine
+// computed and stored under its own engine name are not returned. An
+// engine option is out of scope for 1.0.
 func (c *Client) GetTableColumnStatistics(ctx context.Context, db, tbl string, columns []string, opts ...CatalogOption) ([]ColumnStatistics, error) {
 	if len(columns) == 0 {
 		return nil, nil

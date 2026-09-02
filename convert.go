@@ -744,9 +744,27 @@ func partitionsToThrift(ps []*Partition, cat *string, dbName, tableName string) 
 // server-side clock carries no zone information for this package to
 // preserve otherwise. A nil wire CatName defaults to the "hive" catalog,
 // matching Hive's own convention on a server that predates catalogs (Hive
-// 2.3 and 3.x, where NotificationEvent.catName does not exist on the wire
-// at all; see notification.go's doc comment on newNotificationEventRequest
-// for the same gap on the request side).
+// 2.3, where NotificationEvent.catName does not exist on the wire at all;
+// it exists from 3.x onward. See notification.go's doc comment on
+// newNotificationEventRequest for the same gap on the request side).
+func notificationFromThrift(e *hive_metastore.NotificationEvent) NotificationEvent {
+	out := NotificationEvent{
+		ID:            e.EventId,
+		Time:          time.Unix(int64(e.EventTime), 0).UTC(),
+		Type:          e.EventType,
+		DatabaseName:  deref(e.DbName),
+		TableName:     deref(e.TableName),
+		Message:       e.Message,
+		MessageFormat: deref(e.MessageFormat),
+	}
+	if e.CatName != nil {
+		out.CatalogName = *e.CatName
+	} else {
+		out.CatalogName = defaultCatalog
+	}
+	return out
+}
+
 // decimalFromThrift converts a generated Decimal to the exported Decimal
 // type, copying Unscaled (see copyStrings) so the result never aliases the
 // wire struct's slice. It returns nil for a nil input.
@@ -837,24 +855,6 @@ func columnStatisticsListFromThrift(objs []*hive_metastore.ColumnStatisticsObj) 
 	out := make([]ColumnStatistics, len(objs))
 	for i, o := range objs {
 		out[i] = columnStatisticsFromThrift(o)
-	}
-	return out
-}
-
-func notificationFromThrift(e *hive_metastore.NotificationEvent) NotificationEvent {
-	out := NotificationEvent{
-		ID:            e.EventId,
-		Time:          time.Unix(int64(e.EventTime), 0).UTC(),
-		Type:          e.EventType,
-		DatabaseName:  deref(e.DbName),
-		TableName:     deref(e.TableName),
-		Message:       e.Message,
-		MessageFormat: deref(e.MessageFormat),
-	}
-	if e.CatName != nil {
-		out.CatalogName = *e.CatName
-	} else {
-		out.CatalogName = defaultCatalog
 	}
 	return out
 }

@@ -385,6 +385,8 @@ type Decimal struct{ Unscaled []byte; Scale int16 }
 
 `TableStatsRequest`'s fields differ across the IDL history (verified against `hive_metastore.thrift` at `rel/release-2.3.9`, `rel/release-3.1.3`, and the 4.2.1 IDL this client is generated from): 2.3.9 declares only `dbName`/`tblName`/`colNames`; 3.1.3 adds `catName`; 4.2.1 adds `validWriteIdList`/`engine`/`id`. `get_table_statistics_req` itself exists on every supported version (2.3+), so `GetTableColumnStatistics` calls it directly with no legacy fallback. On a Hive 2.3 server, the effective catalog resolves to `nil` exactly as every other catalog-scoped call resolves it (SPEC §5.0), so no `catName` field -- one that server's own IDL never declared -- is written to the wire; `engine`/`id` are likewise fields a pre-4.x server's IDL never declared, but its Thrift decoder silently skips a field it does not recognize (the same tolerance §5.7 documents for `NotificationEventRequest`), so sending the IDL defaults there is harmless.
 
+Hive 4's metastore stores column statistics per computing engine (`engine`, above): statistics Spark, Impala, or another engine wrote under its own engine name are a separate row from Hive's, even for the same column. `GetTableColumnStatistics` always requests the `"hive"` engine's statistics (`TableStatsRequest.Engine`'s IDL default, which this call never overrides); statistics another engine computed and stored under its own name are not returned, and this call has no way to ask for them -- an `engine` option is out of scope for 1.0.
+
 ### 5.9. ACID: Locks and Transactions
 
 Minimal surface for the metastore's lock manager and transaction lifecycle, available on Hive 2.3+.
