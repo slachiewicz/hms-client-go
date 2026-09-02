@@ -27,7 +27,7 @@ func clampParts(n int) int16 {
 // degrades to the legacy get_partitions RPC (SPEC §2.3 Rule 4).
 func (c *Client) GetPartitions(ctx context.Context, dbName, tableName string, maxParts int, opts ...CatalogOption) ([]*Partition, error) {
 	var out []*Partition
-	err := c.call(ctx, "GetPartitions", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -66,7 +66,7 @@ func (c *Client) GetPartitions(ctx context.Context, dbName, tableName string, ma
 // maxParts means "all partitions".
 func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string, maxParts int, opts ...CatalogOption) ([]string, error) {
 	var out []string
-	err := c.call(ctx, "GetPartitionNames", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_partition_names", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -87,7 +87,7 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 // already exist is silently skipped; otherwise it is reported as
 // ErrAlreadyExists.
 func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, ifNotExists bool, opts ...CatalogOption) error {
-	return c.call(ctx, "AddPartitions", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "add_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -118,7 +118,7 @@ func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, pa
 // alter_partitions_req (Hive 2.3 and 3.x), it degrades to the legacy
 // alter_partitions RPC (SPEC §2.3 Rule 3).
 func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, opts ...CatalogOption) error {
-	return c.call(ctx, "AlterPartitions", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "alter_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -145,7 +145,7 @@ func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, 
 // deleteData is forwarded to the server. With ifExists true, a missing
 // partition is not an error.
 func (c *Client) DropPartition(ctx context.Context, dbName, tableName string, partVals []string, deleteData, ifExists bool, opts ...CatalogOption) error {
-	return c.call(ctx, "DropPartition", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "drop_partition", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
