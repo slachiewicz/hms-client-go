@@ -15,6 +15,12 @@ a release, so everything below is unreleased.
   partition's values, following Hive's own `Warehouse.makePartName`/`FileUtils.escapePathName`
   escaping and lowercasing rules exactly (SPEC §5.5).
 
+### Changed
+
+- `AlterPartitions` now batches at `WithPartitionBatchSize` (the same knob `AddPartitions` and
+  the new `DropPartitionsByNames` use), sending one `alter_partitions_req`/`alter_partitions` per
+  batch instead of the whole `partitions` slice in one request (SPEC §2.3 Rule 5, §5.5).
+
 ## [0.1.0] - 2026-09-02
 
 ### Added

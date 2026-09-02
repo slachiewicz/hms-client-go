@@ -748,6 +748,60 @@ func TestAlterDatabase_MissingIsNotFound(t *testing.T) {
 	require.ErrorIs(t, err, hms.ErrNotFound)
 }
 
+// TestAlterPartitions_Chunked covers G10: a batch of 5 partitions with
+// WithPartitionBatchSize(2) must be sent as 3 alter RPCs, sequentially --
+// alter_partitions_req on Hive40, alter_partitions on Hive23 (whose
+// alter_partitions_req is absent from the fake server's processor map, see
+// removedRPCs, so the generic Thrift dispatcher answers UNKNOWN_METHOD
+// without ever reaching (*handler).AlterPartitionsReq: only the legacy
+// fallback each chunk degrades to is ever recorded there). The tryReq
+// fallback decision is cached per conn (conn.tryReq), so only the first
+// chunk on Hive23 ever attempts alter_partitions_req at all; every later
+// chunk goes straight to legacy.
+func TestAlterPartitions_Chunked(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		v       hmstest.Version
+		wantRPC string
+	}{
+		{"hive40", hmstest.Hive40, "alter_partitions_req"},
+		{"hive23", hmstest.Hive23, "alter_partitions"},
+	}
+	for _, tt := range tests {
+		v, wantRPC := tt.v, tt.wantRPC
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI(), hms.WithPartitionBatchSize(2))
+			ctx := context.Background()
+
+			require.NoError(t, c.CreateTable(ctx, &hms.Table{
+				DatabaseName:  "db",
+				TableName:     "t",
+				PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+			}))
+
+			dates := []string{"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"}
+			parts := make([]*hms.Partition, len(dates))
+			for i, d := range dates {
+				parts[i] = &hms.Partition{Values: []string{d}}
+			}
+			require.NoError(t, c.AddPartitions(ctx, "db", "t", parts, false))
+
+			require.NoError(t, c.AlterPartitions(ctx, "db", "t", parts))
+
+			n := 0
+			for _, call := range srv.Calls() {
+				if call == wantRPC {
+					n++
+				}
+			}
+			assert.Equal(t, 3, n)
+		})
+	}
+}
+
 // TestDropPartitionsByNames covers G9's main path across every emulated
 // version: drop_partitions_req exists on every version's IDL (SPEC §2.1),
 // so it carries no legacy fallback and must appear on the wire on Hive23

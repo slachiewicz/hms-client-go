@@ -160,24 +160,47 @@ func newAlterPartitionsRequest(dbName, tableName string, cat *string, partitions
 // privileges, and statistics -- instead of having them reset (SPEC §5.4
 // "Round-trip fidelity").
 //
-// Against a server lacking alter_partitions_req (Hive 2.3 and 3.x), it
-// degrades to the legacy alter_partitions RPC (SPEC §2.3 Rule 3).
+// Requests are batched to at most the client's partition batch size (see
+// WithPartitionBatchSize; default 1000) partitions each, the same knob
+// AddPartitions uses (SPEC §2.3 Rule 5) -- independent of WithChunkSize;
+// batches are sent sequentially, so a failure on a later batch leaves the
+// earlier batches already committed on the server.
+//
+// Against a server lacking alter_partitions_req (Hive 2.3 and 3.x), each
+// batch degrades to the legacy alter_partitions RPC (SPEC §2.3 Rule 3).
+// The fallback decision itself is made at most once per call: conn.tryReq
+// caches it per conn, keyed by method, so only the very first batch that
+// reaches a given conn ever attempts alter_partitions_req and observes
+// UNKNOWN_METHOD -- every later batch on that conn (this call's own
+// remaining batches, and every later AlterPartitions call that lands on
+// the same pooled conn) goes straight to legacy.
 func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, opts ...CatalogOption) error {
 	return c.call(ctx, "alter_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		return cn.tryReq(ctx, "alter_partitions_req",
-			func(ctx context.Context) error {
-				req := newAlterPartitionsRequest(dbName, tableName, cat, partitionsToThriftFrom(partitions, cat, dbName, tableName))
-				_, err := cn.alterPartitionsReq(ctx, req)
+		for i := 0; i < len(partitions); i += c.cfg.partitionBatchSize {
+			end := i + c.cfg.partitionBatchSize
+			if end > len(partitions) {
+				end = len(partitions)
+			}
+			chunk := partitions[i:end]
+			err := cn.tryReq(ctx, "alter_partitions_req",
+				func(ctx context.Context) error {
+					req := newAlterPartitionsRequest(dbName, tableName, cat, partitionsToThriftFrom(chunk, cat, dbName, tableName))
+					_, err := cn.alterPartitionsReq(ctx, req)
+					return err
+				},
+				func(ctx context.Context) error {
+					return cn.alterPartitions(ctx, qualifyDBName(cat, dbName), tableName, partitionsToThriftFrom(chunk, cat, dbName, tableName))
+				},
+			)
+			if err != nil {
 				return err
-			},
-			func(ctx context.Context) error {
-				return cn.alterPartitions(ctx, qualifyDBName(cat, dbName), tableName, partitionsToThriftFrom(partitions, cat, dbName, tableName))
-			},
-		)
+			}
+		}
+		return nil
 	})
 }
 
