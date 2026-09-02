@@ -26,6 +26,11 @@ func ConnMarkLegacy(cn *conn, method string)     { cn.markLegacy(method) }
 func ClientPoolSize(c *Client) int   { return c.cfg.poolSize }
 func ClientMaxRetries(c *Client) int { return c.cfg.maxRetries }
 
+// ClientConnectTimeout exposes a Client's effective, clamped connect
+// timeout (config.connectTimeout, see config.clamp and WithConnectTimeout)
+// to hms_test, since cfg is unexported.
+func ClientConnectTimeout(c *Client) time.Duration { return c.cfg.connectTimeout }
+
 // ClientAcquire, ClientRelease, and ClientLiveConns expose Client's pool
 // internals to hms_test, so it can drive and observe the exact
 // acquire/release/Close interleavings the pool-lifecycle tests exercise

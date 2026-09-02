@@ -73,6 +73,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **Framing / Buffering**: `TBufferedTransport` (default buffer size: 8192 bytes). No `TFramedTransport`.
 * **Protocol**: `TBinaryProtocol` (strict write: true, strict read: true).
 * **Context propagation**:
+  * `WithConnectTimeout` (§5.1) bounds connection setup -- dialing (`net.Dialer.Timeout`), the TLS handshake (when `WithTLS` is set), and the SASL handshake (when `WithPlainAuth` is set) -- as a fallback applied when the caller's `ctx` carries no deadline of its own, exactly as `WithTimeout` bounds each later per-call I/O. It defaults to `WithTimeout`'s value, so a caller who only ever tunes `WithTimeout` gets the same effective behavior as before `WithConnectTimeout` existed.
   * Binding happens in the `thrift.TClient` wrapper, `internal/transport.ContextClient`, not at the protocol layer: its `Call` is the single choke point every RPC passes through. Before delegating to the wrapped client, it sets the raw `net.Conn`'s deadline from `ctx.Deadline()`, falling back to the configured socket timeout when the context carries none, and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })` to cut that deadline short on cancellation; the stop handle is released when `Call` returns.
   * The `thrift.TSocket` handed to Thrift is constructed over a `deadlineShield` wrapping the same `net.Conn`: `SetDeadline`/`SetReadDeadline`/`SetWriteDeadline` on it are no-ops, so `TSocket`'s own per-read/write deadline resets (driven by its `TConfiguration.SocketTimeout`, left at 0) never fight `ContextClient` for ownership of the connection's deadline.
   * `ContextClient` does not exist yet during the SASL handshake (§3.1 Authentication), since it wraps the client built on top of the fully assembled transport. `DialBinary` gives the handshake the same deadline/cancel treatment directly against the raw `net.Conn` for its duration, then clears the deadline before `ContextClient` takes over.
@@ -81,7 +82,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
   * `NOSASL` / `NONE`: raw binary protocol, the default. When `WithUser` (and optionally `WithUserGroups`) is set and no SASL auth is configured, the client calls `set_ugi(user, groups)` once per newly dialed connection, mirroring the Java `HiveMetaStoreClient`'s behavior under `hive.metastore.execute.setugi` (§5.1).
   * `LDAP` / `CUSTOM`: SASL `PLAIN` framing (RFC 4616 initial response `\0user\0password`), 1-byte-status/4-byte-length-prefixed negotiation frames followed by 4-byte-length-prefixed data frames (the Java `TSaslTransport` wire format). The client implements the SASL negotiation handshake in pure Go (`internal/transport/sasl.go`); see the context-propagation bullet above for how the handshake gets its deadline.
   * `KERBEROS`: SASL GSSAPI (QOP `auth`) over the same socket, using a pure-Go Kerberos implementation (`gokrb5`) rather than native C Kerberos, keeping the zero-Cgo invariant. Selected with `WithKerberos`; see §5.1.
-  * **TLS**: `WithTLS(cfg *tls.Config)` wraps the dialed socket in `tls.Client` before the SASL/binary protocol layers are attached, for a server configured with `metastore.use.SSL=true`. See §5.1.
+  * **TLS**: `WithTLS(cfg *tls.Config)` wraps the dialed socket in `tls.Client` and completes its handshake -- bound to `ctx`/`WithConnectTimeout` exactly as the SASL handshake is (see the context-propagation bullet above) -- before the SASL/binary protocol layers are attached, for a server configured with `metastore.use.SSL=true`. `ContextClient` still owns deadlines on the raw `net.Conn`, not the `tls.Conn`: `(*tls.Conn).SetDeadline` and its `Read`/`Write` counterparts delegate straight to the underlying conn, so a deadline set on the raw conn already bounds the TLS conn's I/O. See §5.1.
 
 ### 3.2. Thrift-over-HTTP/HTTPS Transport (`http://` / `https://`)
 * **Availability**: Hive 4.0+ only. Connecting to a 2.x or 3.x endpoint over HTTP fails with `ErrUnavailable`: the endpoint does not speak Thrift-over-HTTP at all, so the first `TApplicationException` or non-Thrift response classifies as a transport failure, not as `ErrNotSupported` (reserved for `UNKNOWN_METHOD` and the catalog case in §2.3 Rule 1).
@@ -144,6 +145,7 @@ func (c *Client) Close() error
 
 func WithCatalog(name string) Option            // default catalog for every call; default "hive"
 func WithTimeout(d time.Duration) Option        // socket / per-request timeout when ctx has no deadline
+func WithConnectTimeout(d time.Duration) Option // dial / TLS handshake / SASL handshake timeout; defaults to WithTimeout's value
 func WithMaxRetries(n int) Option
 func WithRandomEndpointOrder() Option
 func WithPoolSize(n int) Option

@@ -89,14 +89,17 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 	switch ep.Scheme {
 	case transport.SchemeThrift:
 		tc, err = transport.DialBinary(ctx, ep.Host, transport.BinaryConfig{
-			Timeout:       cfg.timeout,
-			PlainUser:     cfg.plainUser,
-			PlainPassword: cfg.plainPassword,
+			Timeout:        cfg.timeout,
+			ConnectTimeout: cfg.connectTimeout,
+			TLS:            cfg.tlsConfig,
+			PlainUser:      cfg.plainUser,
+			PlainPassword:  cfg.plainPassword,
 		})
 	default:
 		tc, err = transport.NewHTTP(ctx, ep.URL, transport.HTTPConfig{
 			Client:      cfg.httpClient,
 			Timeout:     cfg.timeout,
+			TLS:         cfg.tlsConfig,
 			BearerToken: cfg.bearerToken,
 			User:        cfg.user,
 			Headers:     cfg.httpHeaders,

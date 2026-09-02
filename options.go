@@ -1,6 +1,7 @@
 package hms
 
 import (
+	"crypto/tls"
 	"net/http"
 	"time"
 )
@@ -22,13 +23,14 @@ const (
 
 // config accumulates the effect of every Option passed to New.
 type config struct {
-	catalog       string
-	timeout       time.Duration
-	maxRetries    int
-	randomOrder   bool
-	poolSize      int
-	probeInterval time.Duration
-	chunkSize     int
+	catalog        string
+	timeout        time.Duration
+	connectTimeout time.Duration
+	maxRetries     int
+	randomOrder    bool
+	poolSize       int
+	probeInterval  time.Duration
+	chunkSize      int
 
 	httpClient  *http.Client
 	httpHeaders map[string]string
@@ -38,6 +40,8 @@ type config struct {
 
 	plainUser     string
 	plainPassword string
+
+	tlsConfig *tls.Config
 }
 
 // wantsSetUgi reports whether newConn should issue set_ugi once a binary
@@ -68,6 +72,11 @@ func newConfig() *config {
 // a zero or negative probeInterval would panic inside time.NewTicker)
 // instead degrades to the smallest value that still works. See
 // WithPoolSize, WithMaxRetries, and withProbeInterval.
+//
+// connectTimeout defaults to timeout when unset (WithConnectTimeout never
+// called, or called with 0): most callers only ever tune the one timeout
+// they know about (WithTimeout) and expect it to bound dialing too, per
+// SPEC §5.1.
 func (cfg *config) clamp() {
 	if cfg.poolSize < 1 {
 		cfg.poolSize = 1
@@ -80,6 +89,9 @@ func (cfg *config) clamp() {
 	}
 	if cfg.chunkSize < 1 {
 		cfg.chunkSize = 1
+	}
+	if cfg.connectTimeout == 0 {
+		cfg.connectTimeout = cfg.timeout
 	}
 }
 
@@ -96,6 +108,16 @@ func WithCatalog(name string) Option {
 // context carries no deadline of its own. The default is 30 seconds.
 func WithTimeout(d time.Duration) Option {
 	return func(c *config) { c.timeout = d }
+}
+
+// WithConnectTimeout sets the deadline for dialing, the TLS handshake, and
+// the SASL handshake over the binary TCP transport (SPEC §3.1, §5.1),
+// separate from WithTimeout's per-call socket timeout. It has no effect
+// over the HTTP transport, whose connection setup is governed by
+// WithHTTPClient / WithTimeout instead. The default is WithTimeout's
+// value; a zero (or unset) WithConnectTimeout resolves to it.
+func WithConnectTimeout(d time.Duration) Option {
+	return func(c *config) { c.connectTimeout = d }
 }
 
 // WithMaxRetries sets the maximum number of attempts per RPC across
@@ -182,6 +204,16 @@ func WithPlainAuth(user, password string) Option {
 		c.plainUser = user
 		c.plainPassword = password
 	}
+}
+
+// WithTLS wraps the binary TCP socket in TLS, for a server configured with
+// metastore.use.SSL=true, and overrides the *http.Client's
+// Transport.TLSClientConfig for "https://" endpoints when no WithHTTPClient
+// is supplied (SPEC §3.1, §3.2). cfg's Certificates, RootCAs, ServerName,
+// and InsecureSkipVerify apply exactly as crypto/tls interprets them; the
+// caller is responsible for building a cfg suited to the server.
+func WithTLS(cfg *tls.Config) Option {
+	return func(c *config) { c.tlsConfig = cfg }
 }
 
 // catalogOpts accumulates the effect of every CatalogOption passed to a

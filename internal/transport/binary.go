@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"time"
 
@@ -12,8 +13,22 @@ const bufferSize = 8192
 
 // BinaryConfig configures a binary Thrift-over-TCP connection.
 type BinaryConfig struct {
-	// Timeout bounds both connect and per-call socket I/O.
+	// Timeout bounds per-call socket I/O (applied by ContextClient as a
+	// fallback when a call's context carries no deadline). It does not
+	// bound dialing, the TLS handshake, or the SASL handshake; see
+	// ConnectTimeout for those.
 	Timeout time.Duration
+	// ConnectTimeout bounds dialing (net.Dialer.Timeout), the TLS
+	// handshake (when TLS is set), and the SASL handshake (when PlainUser
+	// is set), as a fallback applied when ctx carries no deadline of its
+	// own -- exactly as Timeout does for later per-call I/O. Zero means no
+	// dial-side timeout beyond ctx.
+	ConnectTimeout time.Duration
+	// TLS, when non-nil, wraps the dialed socket in tls.Client(raw, TLS)
+	// and completes its handshake before the SASL/binary protocol layers
+	// are attached, for a server configured with metastore.use.SSL=true.
+	// See DialBinary.
+	TLS *tls.Config
 	// PlainUser and PlainPassword select SASL PLAIN authentication when
 	// PlainUser is non-empty; when empty the connection uses NOSASL. See
 	// DialBinary.
@@ -56,39 +71,72 @@ func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
 // returned Conn's Client applies cfg.Timeout as a per-call fallback and
 // binds each call's context deadline to the socket via ContextClient, which
 // is the sole owner of the connection's read/write deadlines (see
-// deadlineShield); TSocket is never allowed to set them.
+// deadlineShield); TSocket is never allowed to set them. ContextClient
+// always holds the raw net.Conn, even when cfg.TLS wraps it: crypto/tls
+// documents that (*tls.Conn).SetDeadline/SetReadDeadline/SetWriteDeadline
+// simply delegate to the underlying conn's, so a deadline set on raw
+// bounds the TLS conn's Read/Write too (its handshake state machine calls
+// back into raw's Read/Write, which is what actually blocks); there is no
+// TLS-specific deadline behavior ContextClient would otherwise need to
+// reach through the TLS layer for.
+//
+// When cfg.TLS is non-nil, DialBinary wraps the dialed socket with
+// tls.Client and completes its handshake, bound to ctx and cfg.ConnectTimeout
+// (see the ConnectTimeout fallback described below), before the SASL/binary
+// protocol layers are attached; on handshake failure the raw connection is
+// closed and the error is returned unwrapped. The deadlineShield-wrapped
+// TSocket is built over the TLS conn in that case, so cfg.PlainUser's SASL
+// handshake and every later RPC run over the encrypted connection.
 //
 // When cfg.PlainUser is non-empty, DialBinary performs a SASL PLAIN
 // handshake (see NewSaslPlain) before wrapping the transport for buffered
 // I/O; on handshake failure the raw connection is closed and the error is
 // returned unwrapped.
 //
-// The handshake runs before ContextClient exists to own raw's deadlines
-// (see deadlineShield), so DialBinary binds ctx to raw directly for the
-// handshake's duration: it sets a deadline from ctx.Deadline() (falling
-// back to time.Now().Add(cfg.Timeout) when cfg.Timeout > 0), and arranges
-// for ctx cancellation to unblock any in-flight handshake I/O by moving
-// that deadline to now, exactly as ContextClient.Call does for every later
-// RPC. The deadline is cleared again once the handshake returns, so
-// ContextClient starts from a clean slate.
+// The SASL handshake runs before ContextClient exists to own raw's
+// deadlines (see deadlineShield), so DialBinary binds ctx to raw directly
+// for the handshake's duration: it sets a deadline from ctx.Deadline()
+// (falling back to time.Now().Add(cfg.ConnectTimeout) when
+// cfg.ConnectTimeout > 0), and arranges for ctx cancellation to unblock any
+// in-flight handshake I/O by moving that deadline to now, exactly as
+// ContextClient.Call does for every later RPC. The deadline is cleared
+// again once the handshake returns, so ContextClient starts from a clean
+// slate.
 func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, error) {
-	d := net.Dialer{Timeout: cfg.Timeout}
+	d := net.Dialer{Timeout: cfg.ConnectTimeout}
 	raw, err := d.DialContext(ctx, "tcp", hostPort)
 	if err != nil {
 		return nil, err
 	}
+
+	conn := raw
+	if cfg.TLS != nil {
+		hctx := ctx
+		if cfg.ConnectTimeout > 0 {
+			var hcancel context.CancelFunc
+			hctx, hcancel = context.WithTimeout(ctx, cfg.ConnectTimeout)
+			defer hcancel()
+		}
+		tlsConn := tls.Client(raw, cfg.TLS)
+		if err := tlsConn.HandshakeContext(hctx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		conn = tlsConn
+	}
+
 	// SocketTimeout is intentionally 0: TSocket must not manage deadlines
 	// itself (see deadlineShield). ConnectTimeout still applies since Open()
 	// is never called on this TSocket (it is constructed from an already
 	// connected conn).
-	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.Timeout}
-	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{raw}, tcfg)
+	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.ConnectTimeout}
+	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{conn}, tcfg)
 	if cfg.PlainUser != "" {
 		sasl := NewSaslPlain(trans, cfg.PlainUser, cfg.PlainPassword)
 
 		deadline, ok := ctx.Deadline()
-		if !ok && cfg.Timeout > 0 {
-			deadline = time.Now().Add(cfg.Timeout)
+		if !ok && cfg.ConnectTimeout > 0 {
+			deadline = time.Now().Add(cfg.ConnectTimeout)
 		}
 		if !deadline.IsZero() {
 			_ = raw.SetDeadline(deadline)

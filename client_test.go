@@ -157,6 +157,29 @@ func TestNew_MaxRetriesClamped(t *testing.T) {
 	}
 }
 
+// TestNew_ConnectTimeoutDefaultsToTimeout covers config.clamp's default for
+// WithConnectTimeout (SPEC §5.1): left unset (or set to 0), it resolves to
+// WithTimeout's value rather than staying 0 (which would mean "no dial-side
+// timeout" -- a silent behavior change for callers who only ever tuned
+// WithTimeout).
+func TestNew_ConnectTimeoutDefaultsToTimeout(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+
+	c := mustNew(t, srv.URI(), hms.WithTimeout(7*time.Second))
+	assert.Equal(t, 7*time.Second, hms.ClientConnectTimeout(c))
+}
+
+// TestNew_ConnectTimeoutExplicit covers WithConnectTimeout overriding the
+// WithTimeout-derived default.
+func TestNew_ConnectTimeoutExplicit(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+
+	c := mustNew(t, srv.URI(), hms.WithTimeout(7*time.Second), hms.WithConnectTimeout(3*time.Second))
+	assert.Equal(t, 3*time.Second, hms.ClientConnectTimeout(c))
+}
+
 // TestClient_ContextExpiredMidRPCDiscardsConn covers the fix for do()
 // releasing a conn whose fn failed only because the caller's own ctx was
 // already past its deadline: fn's error classifies as ErrUnavailable (via

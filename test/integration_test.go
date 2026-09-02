@@ -25,6 +25,7 @@ package integration_test
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"strconv"
@@ -50,6 +51,13 @@ const envExpectVersion = "HMS_EXPECT_VERSION"
 // envUser is the environment variable naming the principal to authenticate
 // as, forwarded via hms.WithUser. See the package doc comment.
 const envUser = "HMS_USER"
+
+// envTLSURIs names the endpoint(s) of a metastore configured with
+// metastore.use.SSL=true (SPEC §3.1), for TestTLS. None of the matrix
+// images enable it yet (PLAN.md Slice 9 tracks a TLS-enabled leg as a
+// follow-up), so this is always empty today and TestTLS always skips; it
+// exists so that job has a test ready to enable once it lands.
+const envTLSURIs = "HMS_TLS_URIS"
 
 // dialTimeout bounds how long New (and thus every test's setup) waits to
 // connect before failing, distinct from each RPC's own context below.
@@ -433,4 +441,25 @@ func TestServerVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, expectMajor, strconv.Itoa(v.Major))
 	assert.GreaterOrEqual(t, v.Minor, 0)
+}
+
+// TestTLS connects to a metastore configured with metastore.use.SSL=true
+// via hms.WithTLS (SPEC §3.1) and confirms a basic RPC round-trips over
+// the encrypted socket. It skips unless HMS_TLS_URIS is set; see
+// envTLSURIs's doc comment.
+func TestTLS(t *testing.T) {
+	t.Parallel()
+	uris := os.Getenv(envTLSURIs)
+	if uris == "" {
+		t.Skipf("%s is not set; skipping TLS integration test (see PLAN.md Slice 9)", envTLSURIs)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	c, err := hms.New(ctx, uris, hms.WithTLS(&tls.Config{}))
+	require.NoError(t, err, "connecting to %s over TLS", uris)
+	t.Cleanup(func() { _ = c.Close() })
+
+	_, err = c.ServerVersion(context.Background())
+	require.NoError(t, err)
 }
