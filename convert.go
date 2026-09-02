@@ -734,3 +734,33 @@ func partitionsToThrift(ps []*Partition, cat *string, dbName, tableName string) 
 	}
 	return out
 }
+
+// notificationFromThrift converts a generated NotificationEvent to the
+// exported NotificationEvent type (notification.go). EventTime is a
+// required Thrift int32 "seconds since epoch" field -- unlike
+// Database/Table/Partition's optional CreateTime fields (timeFromUnix32),
+// there is no "0 means unset" convention to apply here, so it always
+// converts to a real instant; the result is normalised to UTC, since Hive's
+// server-side clock carries no zone information for this package to
+// preserve otherwise. A nil wire CatName defaults to the "hive" catalog,
+// matching Hive's own convention on a server that predates catalogs (Hive
+// 2.3 and 3.x, where NotificationEvent.catName does not exist on the wire
+// at all; see notification.go's doc comment on newNotificationEventRequest
+// for the same gap on the request side).
+func notificationFromThrift(e *hive_metastore.NotificationEvent) NotificationEvent {
+	out := NotificationEvent{
+		ID:            e.EventId,
+		Time:          time.Unix(int64(e.EventTime), 0).UTC(),
+		Type:          e.EventType,
+		DatabaseName:  deref(e.DbName),
+		TableName:     deref(e.TableName),
+		Message:       e.Message,
+		MessageFormat: deref(e.MessageFormat),
+	}
+	if e.CatName != nil {
+		out.CatalogName = *e.CatName
+	} else {
+		out.CatalogName = defaultCatalog
+	}
+	return out
+}

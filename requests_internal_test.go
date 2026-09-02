@@ -173,3 +173,36 @@ func TestDatabaseFromThrift_CopiesParameters(t *testing.T) {
 	out.Parameters["k"] = "changed"
 	assert.Equal(t, "v", params["k"], "databaseFromThrift must not alias the wire struct's Parameters map")
 }
+
+// TestNewNotificationEventRequest_KeepsIDLDefaultsOverWire covers
+// notification.go's newNotificationEventRequest building a
+// NotificationEventRequest via hive_metastore.NewNotificationEventRequest()
+// rather than a bare struct literal, and leaving MaxEvents/EventTypeList
+// absent (nil) over the wire when max <= 0 / eventTypes is empty, rather
+// than sending a Go zero value a real server could misread as "return
+// nothing" (MaxEvents: 0) instead of "no limit".
+func TestNewNotificationEventRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	req := newNotificationEventRequest(5, 0, nil)
+
+	got := hive_metastore.NewNotificationEventRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int64(5), got.LastEvent)
+	assert.Nil(t, got.MaxEvents)
+	assert.Nil(t, got.EventTypeList)
+}
+
+// TestNewNotificationEventRequest_SetsMaxEventsAndEventTypeList covers the
+// max > 0 / eventTypes non-empty path of newNotificationEventRequest.
+func TestNewNotificationEventRequest_SetsMaxEventsAndEventTypeList(t *testing.T) {
+	t.Parallel()
+	req := newNotificationEventRequest(5, 10, []string{"CREATE_TABLE"})
+
+	got := hive_metastore.NewNotificationEventRequest()
+	roundTrip(t, req, got)
+
+	require.NotNil(t, got.MaxEvents)
+	assert.Equal(t, int32(10), *got.MaxEvents)
+	assert.Equal(t, []string{"CREATE_TABLE"}, got.EventTypeList)
+}

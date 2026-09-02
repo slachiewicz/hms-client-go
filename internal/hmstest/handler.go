@@ -59,6 +59,11 @@ type Store struct {
 	Partitions map[string][]*hive_metastore.Partition
 	// Config holds metastore configuration values served by GetConfigValue.
 	Config map[string]string
+	// Events holds the notification event log, oldest first, appended to
+	// by CreateDatabase/DropDatabase/CreateTable/AlterTable/DropTable/
+	// AddPartitionsReq/DropPartition (see recordEvent) and served by
+	// GetNextNotification/GetCurrentNotificationEventId.
+	Events []*hive_metastore.NotificationEvent
 }
 
 // NewStore returns an empty Store pre-populated with the default "hive"
@@ -73,6 +78,38 @@ func NewStore() *Store {
 		Partitions: map[string][]*hive_metastore.Partition{},
 		Config:     map[string]string{},
 	}
+}
+
+// recordEvent appends a notification event to the store's event log
+// (Store.Events), mirroring what a real Hive Metastore's
+// DbNotificationListener records for the create/alter/drop RPCs this fake
+// server implements (SPEC §5.7). Event IDs are assigned monotonically from
+// 1. db is always set on the wire NotificationEvent; tbl is only set (and
+// only appears in Message) for a table/partition-level event -- a
+// database-level event (CREATE_DATABASE, DROP_DATABASE) passes tbl="".
+// Message is compact JSON, {"db":"<db>"} or {"db":"<db>","table":"<tbl>"},
+// matching the shape a real metastore's own DbNotificationListener message
+// bodies carry (this fake server implements no other part of that
+// encoding). The store's mu must already be held by the caller.
+func (s *Store) recordEvent(eventType, db, tbl string) {
+	msg := `{"db":"` + db + `"`
+	if tbl != "" {
+		msg += `,"table":"` + tbl + `"`
+	}
+	msg += `}`
+	format := "json-0.2"
+	ev := &hive_metastore.NotificationEvent{
+		EventId:       int64(len(s.Events)) + 1,
+		EventTime:     now32(),
+		EventType:     eventType,
+		DbName:        &db,
+		Message:       msg,
+		MessageFormat: &format,
+	}
+	if tbl != "" {
+		ev.TableName = &tbl
+	}
+	s.Events = append(s.Events, ev)
 }
 
 // recorder tracks RPCs invoked against the fake server, in call order,
@@ -604,6 +641,7 @@ func (h *handler) CreateDatabase(_ context.Context, db *hive_metastore.Database)
 		stored.CreateTime = &t
 	}
 	h.store.Databases[key] = &stored
+	h.store.recordEvent("CREATE_DATABASE", name, "")
 	return nil
 }
 
@@ -667,6 +705,7 @@ func (h *handler) DropDatabase(_ context.Context, name string, deleteData, casca
 		delete(h.store.Partitions, tk)
 	}
 	delete(h.store.Databases, key)
+	h.store.recordEvent("DROP_DATABASE", db, "")
 	return nil
 }
 
@@ -750,6 +789,7 @@ func (h *handler) CreateTable(_ context.Context, tbl *hive_metastore.Table) erro
 		stored.CreateTime = now32()
 	}
 	h.store.Tables[key] = &stored
+	h.store.recordEvent("CREATE_TABLE", tbl.DbName, tbl.TableName)
 	return nil
 }
 
@@ -769,6 +809,7 @@ func (h *handler) AlterTable(_ context.Context, dbName, tblName string, newTbl *
 	delete(h.store.Tables, key)
 	stored := *newTbl
 	h.store.Tables[tblKey(catName, db, newTbl.TableName)] = &stored
+	h.store.recordEvent("ALTER_TABLE", db, newTbl.TableName)
 	return nil
 }
 
@@ -787,6 +828,7 @@ func (h *handler) DropTable(_ context.Context, dbName, name string, deleteData b
 	}
 	delete(h.store.Tables, key)
 	delete(h.store.Partitions, key)
+	h.store.recordEvent("DROP_TABLE", db, name)
 	return nil
 }
 
@@ -880,6 +922,9 @@ func (h *handler) AddPartitionsReq(_ context.Context, req *hive_metastore.AddPar
 		added = append(added, &stored)
 	}
 	h.store.Partitions[key] = existing
+	if len(added) > 0 {
+		h.store.recordEvent("ADD_PARTITION", req.DbName, req.TblName)
+	}
 	return &hive_metastore.AddPartitionsResult_{Partitions: added}, nil
 }
 
@@ -957,6 +1002,7 @@ func (h *handler) DropPartition(_ context.Context, dbName, tblName string, partV
 		return false, &hive_metastore.NoSuchObjectException{Message: "partition not found"}
 	}
 	h.store.Partitions[key] = append(existing[:idx], existing[idx+1:]...)
+	h.store.recordEvent("DROP_PARTITION", db, tblName)
 	return true, nil
 }
 
@@ -1083,4 +1129,53 @@ func (h *handler) GetPartitionNamesPsReq(_ context.Context, req *hive_metastore.
 		names[i] = partitionName(tbl, p)
 	}
 	return &hive_metastore.GetPartitionNamesPsResponse{Names: names}, nil
+}
+
+// GetCurrentNotificationEventId returns the ID of the most recently
+// recorded notification event, or 0 when the event log is empty.
+func (h *handler) GetCurrentNotificationEventId(_ context.Context) (*hive_metastore.CurrentNotificationEventId, error) {
+	h.rec.record("get_current_notificationEventId", nil)
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	var id int64
+	if n := len(h.store.Events); n > 0 {
+		id = h.store.Events[n-1].EventId
+	}
+	return &hive_metastore.CurrentNotificationEventId{EventId: id}, nil
+}
+
+// GetNextNotification returns the events recorded after req.LastEvent,
+// oldest first, honouring req.MaxEvents (no limit when unset or <= 0).
+// req.EventTypeList is honoured server-side only on Hive40, mirroring a
+// real 2.3/3.x metastore, whose NotificationEventRequest predates that
+// field entirely (SPEC §2.1; see notification.go's doc comment on
+// newNotificationEventRequest for why the client additionally filters the
+// response locally).
+func (h *handler) GetNextNotification(_ context.Context, req *hive_metastore.NotificationEventRequest) (*hive_metastore.NotificationEventResponse, error) {
+	h.rec.record("get_next_notification", req)
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+
+	var want map[string]bool
+	if h.v == Hive40 && len(req.EventTypeList) > 0 {
+		want = make(map[string]bool, len(req.EventTypeList))
+		for _, t := range req.EventTypeList {
+			want[t] = true
+		}
+	}
+
+	var out []*hive_metastore.NotificationEvent
+	for _, e := range h.store.Events {
+		if e.EventId <= req.LastEvent {
+			continue
+		}
+		if want != nil && !want[e.EventType] {
+			continue
+		}
+		out = append(out, e)
+		if req.MaxEvents != nil && *req.MaxEvents > 0 && len(out) >= int(*req.MaxEvents) {
+			break
+		}
+	}
+	return &hive_metastore.NotificationEventResponse{Events: out}, nil
 }

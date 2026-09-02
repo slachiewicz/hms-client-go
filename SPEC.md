@@ -342,7 +342,9 @@ func (c *Client) CurrentNotificationID(ctx context.Context) (int64, error)
 func (c *Client) GetNextNotifications(ctx context.Context, lastEventID int64, max int, eventTypes []string) ([]NotificationEvent, error)
 ```
 
-`CurrentNotificationID` wraps `get_current_notificationEventId`. `GetNextNotifications` wraps `get_next_notification`, requesting `NotificationEventRequest{LastEvent: lastEventID, MaxEvents: max, EventTypeList: eventTypes}`; `eventTypes` nil or empty means every event type. Both RPCs exist on 2.3+.
+`CurrentNotificationID` wraps `get_current_notificationEventId`. `GetNextNotifications` wraps `get_next_notification`, requesting `NotificationEventRequest{LastEvent: lastEventID}` plus `MaxEvents` (a `*int32`, set only when `max > 0`, clamped rather than wrapped) and `EventTypeList` (set only when `eventTypes` is non-empty); `eventTypes` nil or empty means every event type. Both RPCs exist on 2.3+.
+
+`NotificationEventRequest`'s optional filter fields -- `EventTypeList`, `EventTypeSkipList`, `CatName`, `DbName`, `TableNames` -- are a Hive 4.x-only addition to the IDL: verified against `hive_metastore.thrift` at `rel/release-2.3.9` and `rel/release-3.1.3`, where `NotificationEventRequest` declares only `lastEvent` and `maxEvents`. A 2.3/3.x server's Thrift decoder silently ignores a field it does not recognize rather than rejecting the request, so `GetNextNotifications` sends `EventTypeList` unconditionally when `eventTypes` is non-empty but additionally filters the response by event type client-side, so `eventTypes` has the same effect on every supported version instead of silently becoming a no-op pre-4.0. `NotificationEvent.CatName` is the same 4.x-only addition on the response side; a nil wire `CatName` maps to `NotificationEvent.CatalogName` `"hive"`.
 
 ### 5.8. Column Statistics
 

@@ -530,6 +530,48 @@ func TestServerVersion(t *testing.T) {
 	assert.GreaterOrEqual(t, v.Minor, 0)
 }
 
+// TestNotifications covers SPEC.md §5.7's notification polling on every
+// supported version: CurrentNotificationID taken before a CreateTable call
+// must be strictly less than the ID of the CREATE_TABLE event that call
+// produces, and GetNextNotifications(sinceID, 100, nil) must return that
+// event with the created table's name in its Message. The real
+// metastore's message body is JSON carrying (at least) "db" and "table"
+// keys on every supported version; this only checks the table name appears
+// in Message rather than parsing it, since the exact JSON shape is a Hive
+// implementation detail this package does not otherwise depend on.
+func TestNotifications(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	ctx := context.Background()
+
+	dbName := uniqueName("it_notifdb_")
+	createDB(t, c, ctx, dbName, "")
+
+	sinceID, err := c.CurrentNotificationID(ctx)
+	require.NoError(t, err)
+
+	tableName := "it_notif_tbl"
+	table := &hms.Table{
+		DatabaseName: dbName,
+		TableName:    tableName,
+		TableType:    hms.TableTypeManaged,
+		Storage:      textStorage("file:///tmp/"+dbName+"/"+tableName, []*hms.FieldSchema{{Name: "id", Type: "bigint"}}),
+	}
+	require.NoError(t, c.CreateTable(ctx, table))
+
+	events, err := c.GetNextNotifications(ctx, sinceID, 100, nil)
+	require.NoError(t, err)
+
+	var found bool
+	for _, ev := range events {
+		assert.Greater(t, ev.ID, sinceID, "every returned event must be newer than sinceID")
+		if ev.Type == "CREATE_TABLE" && strings.Contains(ev.Message, tableName) {
+			found = true
+		}
+	}
+	assert.True(t, found, "no CREATE_TABLE event for %s.%s found in %d events after %d", dbName, tableName, len(events), sinceID)
+}
+
 // TestTLS connects to a metastore configured with metastore.use.SSL=true
 // via hms.WithTLS (SPEC §3.1) and confirms a basic RPC round-trips over
 // the encrypted socket. It skips unless HMS_TLS_URIS is set; see

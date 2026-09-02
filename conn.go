@@ -86,6 +86,9 @@ type conn struct {
 	getPartitionsByFilter   func(ctx context.Context, dbName, tblName, filter string, maxParts int16) ([]*hive_metastore.Partition, error)
 	getPartitionNamesPs     func(ctx context.Context, dbName, tblName string, partVals []string, maxParts int16) ([]string, error)
 	getPartitionNamesPsReq  func(ctx context.Context, req *hive_metastore.GetPartitionNamesPsRequest) (*hive_metastore.GetPartitionNamesPsResponse, error)
+
+	getNextNotification           func(ctx context.Context, req *hive_metastore.NotificationEventRequest) (*hive_metastore.NotificationEventResponse, error)
+	getCurrentNotificationEventId func(ctx context.Context) (*hive_metastore.CurrentNotificationEventId, error)
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
@@ -165,6 +168,9 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 		getPartitionsByFilter:   g.GetPartitionsByFilter,
 		getPartitionNamesPs:     g.GetPartitionNamesPs,
 		getPartitionNamesPsReq:  g.GetPartitionNamesPsReq,
+
+		getNextNotification:           g.GetNextNotification,
+		getCurrentNotificationEventId: g.GetCurrentNotificationEventId,
 	}
 
 	// set_ugi establishes the caller's identity over binary NOSASL (SPEC
