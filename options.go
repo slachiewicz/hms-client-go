@@ -7,19 +7,21 @@ import (
 
 // Default configuration values applied by New before any Option runs.
 const (
-	defaultCatalog    = "hive"
-	defaultTimeout    = 30 * time.Second
-	defaultMaxRetries = 3
-	defaultPoolSize   = 4
+	defaultCatalog       = "hive"
+	defaultTimeout       = 30 * time.Second
+	defaultMaxRetries    = 3
+	defaultPoolSize      = 4
+	defaultProbeInterval = 30 * time.Second
 )
 
 // config accumulates the effect of every Option passed to New.
 type config struct {
-	catalog     string
-	timeout     time.Duration
-	maxRetries  int
-	randomOrder bool
-	poolSize    int
+	catalog       string
+	timeout       time.Duration
+	maxRetries    int
+	randomOrder   bool
+	poolSize      int
+	probeInterval time.Duration
 
 	httpClient  *http.Client
 	httpHeaders map[string]string
@@ -33,10 +35,11 @@ type config struct {
 // newConfig returns a config seeded with the library defaults.
 func newConfig() *config {
 	return &config{
-		catalog:    defaultCatalog,
-		timeout:    defaultTimeout,
-		maxRetries: defaultMaxRetries,
-		poolSize:   defaultPoolSize,
+		catalog:       defaultCatalog,
+		timeout:       defaultTimeout,
+		maxRetries:    defaultMaxRetries,
+		poolSize:      defaultPoolSize,
+		probeInterval: defaultProbeInterval,
 	}
 }
 
@@ -88,6 +91,15 @@ func WithRandomEndpointOrder() Option {
 // room for a connection would block every call forever.
 func WithPoolSize(n int) Option {
 	return func(c *config) { c.poolSize = n }
+}
+
+// withProbeInterval sets the interval between recovery-probe sweeps of the
+// cluster's cooling endpoints (see Client's recoveryProbe). It is
+// unexported: the default of 30s (SPEC §4.2 point 4) is not meant to be
+// caller-tunable, but export_test.go exposes it as WithProbeIntervalForTest
+// so ha_test.go can bound its waits.
+func withProbeInterval(d time.Duration) Option {
+	return func(c *config) { c.probeInterval = d }
 }
 
 // WithHTTPClient sets the *http.Client used for the "http://" and "https://"

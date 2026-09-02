@@ -7,10 +7,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
+	"github.com/slachiewicz/hms-client-go/internal/ha"
 	"github.com/slachiewicz/hms-client-go/internal/transport"
 )
 
@@ -19,21 +22,36 @@ import (
 // path (errors.go) reports it correctly without any special-casing here.
 var errClosed = fmt.Errorf("hms: client closed: %w", ErrUnavailable)
 
-// Client is a connection-pooled Hive Metastore client. Construct one with
-// New.
-type Client struct {
-	cfg      config
-	endpoint transport.Endpoint
-
-	// mu guards closed together with every send into, or drain of, idle:
-	// Close must never observe idle as fully drained while a concurrent
-	// release is still deciding whether to send into it (and vice versa),
-	// or the conn that "won" that race would never be closed. See release
-	// and Close.
-	mu sync.Mutex
-	// idle holds pooled, currently unused conns. Its buffer size is
-	// cfg.poolSize. Only touched while mu is held.
+// endpointPool holds the pooled connections and live count for one
+// endpoint. A Client has one endpointPool per endpoint, in endpoint order
+// (matching endpoints and cluster's index space); all of them share the
+// Client's mu and closeCh.
+type endpointPool struct {
+	// idle holds pooled, currently unused conns for this endpoint. Its
+	// buffer size is cfg.poolSize. Only touched while Client.mu is held.
 	idle chan *conn
+	// live counts conns currently dialed for this endpoint (idle or on
+	// loan), so acquire knows when it may dial a new one instead of
+	// blocking.
+	live atomic.Int32
+}
+
+// Client is a connection-pooled Hive Metastore client, failing over across
+// endpoints per SPEC §4.2. Construct one with New.
+type Client struct {
+	cfg       config
+	endpoints []transport.Endpoint
+	cluster   *ha.Cluster
+
+	// mu guards closed together with every send into, or drain of, any
+	// pool's idle channel: Close must never observe every pool as fully
+	// drained while a concurrent release is still deciding whether to
+	// send into one (and vice versa), or the conn that "won" that race
+	// would never be closed. See release and Close.
+	mu sync.Mutex
+	// pools holds one endpointPool per endpoint, indexed the same way as
+	// endpoints and cluster. Only touched while mu is held.
+	pools []*endpointPool
 	// closed is true once Close has run. Only touched while mu is held.
 	closed bool
 	// closeCh is closed exactly once, by Close, so a goroutine blocked in
@@ -41,17 +59,20 @@ type Client struct {
 	// release or its context that may never come.
 	closeCh chan struct{}
 
-	// live counts conns currently dialed (idle or on loan), so acquire
-	// knows when it may dial a new one instead of blocking.
-	live atomic.Int32
+	// probeCancel stops the recovery-probe goroutine; probeDone is
+	// closed once that goroutine has actually exited, so Close can wait
+	// for it.
+	probeCancel context.CancelFunc
+	probeDone   chan struct{}
 }
 
 // New connects to the Hive Metastore endpoint(s) named by uris (a single
 // URI, or a comma-separated list for HA; see SPEC §4.1) and returns a ready
-// Client. It dials one connection eagerly, so a refused or unreachable
-// endpoint fails New immediately with an error wrapping ErrUnavailable.
-// Task 11 adds failover across the remaining endpoints; this task uses
-// only the first.
+// Client. It dials the first endpoint that answers, in cluster order (list
+// order, or random order under WithRandomEndpointOrder), so New fails only
+// when every endpoint refuses or is unreachable, with an error wrapping
+// ErrUnavailable. A background goroutine periodically probes cooled-down
+// endpoints for recovery (SPEC §4.2 point 4); Close stops it.
 func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	cfg := newConfig()
 	for _, o := range opts {
@@ -68,78 +89,125 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		// letting classify's default of ErrMeta hide that distinction.
 		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
-	ep := eps[0]
+
+	cluster := ha.New(len(eps), cfg.randomOrder, time.Now)
+	pools := make([]*endpointPool, len(eps))
+	for i := range pools {
+		pools[i] = &endpointPool{idle: make(chan *conn, cfg.poolSize)}
+	}
 
 	c := &Client{
-		cfg:      *cfg,
-		endpoint: ep,
-		idle:     make(chan *conn, cfg.poolSize),
-		closeCh:  make(chan struct{}),
+		cfg:       *cfg,
+		endpoints: eps,
+		cluster:   cluster,
+		pools:     pools,
+		closeCh:   make(chan struct{}),
 	}
 
-	cn, err := newConn(ctx, ep, cfg)
-	if err != nil {
-		return nil, wrapError("New", err)
+	var lastErr error
+	dialed := false
+	for attempt := 0; attempt < len(eps); attempt++ {
+		idx, ok := cluster.Pick()
+		if !ok {
+			break
+		}
+		cn, err := newConn(ctx, eps[idx], cfg)
+		if err != nil {
+			cluster.MarkFailed(idx)
+			lastErr = err
+			continue
+		}
+		pools[idx].live.Add(1)
+		pools[idx].idle <- cn
+		dialed = true
+		break
 	}
-	c.live.Add(1)
-	c.idle <- cn
+	if !dialed {
+		return nil, wrapError("New", errors.Join(ErrUnavailable, lastErr))
+	}
+
+	probeCtx, cancel := context.WithCancel(context.Background())
+	c.probeCancel = cancel
+	c.probeDone = make(chan struct{})
+	go c.recoveryProbe(probeCtx)
+
 	return c, nil
 }
 
-// Close releases every pooled connection and marks the client closed. Any
+// Close releases every pooled connection, stops the recovery-probe
+// goroutine (waiting for it to exit), and marks the client closed. Any
 // call still in flight completes normally; its connection is closed rather
 // than returned to the pool once the call finishes (see release). A
 // goroutine blocked in acquire wakes immediately via closeCh. Close is
 // idempotent.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
 	close(c.closeCh)
 
 	var errs []error
+	for _, p := range c.pools {
+		drainPool(p, &errs)
+	}
+	c.mu.Unlock()
+
+	if c.probeCancel != nil {
+		c.probeCancel()
+	}
+	if c.probeDone != nil {
+		<-c.probeDone
+	}
+	return errors.Join(errs...)
+}
+
+// drainPool closes every conn currently idle in p, appending any close
+// error to errs. Client.mu must be held.
+func drainPool(p *endpointPool, errs *[]error) {
 	for {
 		select {
-		case cn := <-c.idle:
+		case cn := <-p.idle:
 			if err := cn.close(); err != nil {
-				errs = append(errs, err)
+				*errs = append(*errs, err)
 			}
-			c.live.Add(-1)
+			p.live.Add(-1)
 		default:
-			return errors.Join(errs...)
+			return
 		}
 	}
 }
 
-// acquire takes an idle conn from the pool, dials a new one if the pool is
-// under capacity, or blocks until one is released, the client is closed, or
-// ctx is done. It returns errClosed once the client has been closed.
-func (c *Client) acquire(ctx context.Context) (*conn, error) {
+// acquire takes an idle conn from endpoint idx's pool, dials a new one if
+// that pool is under capacity, or blocks until one is released, the client
+// is closed, or ctx is done. It returns errClosed once the client has been
+// closed.
+func (c *Client) acquire(ctx context.Context, idx int) (*conn, error) {
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
 		return nil, errClosed
 	}
+	p := c.pools[idx]
 
 	select {
-	case cn := <-c.idle:
+	case cn := <-p.idle:
 		return cn, nil
 	default:
 	}
 
 	for {
-		cur := c.live.Load()
+		cur := p.live.Load()
 		if int(cur) >= c.cfg.poolSize {
 			break
 		}
-		if c.live.CompareAndSwap(cur, cur+1) {
-			cn, err := newConn(ctx, c.endpoint, &c.cfg)
+		if p.live.CompareAndSwap(cur, cur+1) {
+			cn, err := newConn(ctx, c.endpoints[idx], &c.cfg)
 			if err != nil {
-				c.live.Add(-1)
+				p.live.Add(-1)
 				return nil, err
 			}
 			return cn, nil
@@ -147,7 +215,7 @@ func (c *Client) acquire(ctx context.Context) (*conn, error) {
 	}
 
 	select {
-	case cn := <-c.idle:
+	case cn := <-p.idle:
 		return cn, nil
 	case <-c.closeCh:
 		return nil, errClosed
@@ -156,60 +224,141 @@ func (c *Client) acquire(ctx context.Context) (*conn, error) {
 	}
 }
 
-// release returns cn to the idle pool, or closes it when the client has
-// been closed or the pool is already full. The closed check and the idle
-// send happen under the same lock Close holds while draining idle, so a
-// release racing a concurrent Close either lands in idle before Close's
-// drain sees it, or observes closed and closes cn itself; either way cn is
-// never abandoned in an idle pool nobody will ever drain again.
-func (c *Client) release(cn *conn) {
+// release returns cn to endpoint idx's idle pool, or closes it when the
+// client has been closed or that pool is already full. The closed check
+// and the idle send happen under the same lock Close holds while draining
+// every pool, so a release racing a concurrent Close either lands in idle
+// before Close's drain sees it, or observes closed and closes cn itself;
+// either way cn is never abandoned in an idle pool nobody will ever drain
+// again.
+func (c *Client) release(idx int, cn *conn) {
+	p := c.pools[idx]
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		_ = cn.close()
-		c.live.Add(-1)
+		p.live.Add(-1)
 		return
 	}
 	select {
-	case c.idle <- cn:
+	case p.idle <- cn:
 		c.mu.Unlock()
 		return
 	default:
 	}
 	c.mu.Unlock()
 	_ = cn.close()
-	c.live.Add(-1)
+	p.live.Add(-1)
 }
 
-// discard closes cn without returning it to the pool, for use after an
-// error that leaves the connection's state unknown (ErrUnavailable).
-func (c *Client) discard(cn *conn) {
+// discard closes cn without returning it to endpoint idx's pool, for use
+// after an error that leaves the connection's state unknown
+// (ErrUnavailable).
+func (c *Client) discard(idx int, cn *conn) {
 	_ = cn.close()
-	c.live.Add(-1)
+	c.pools[idx].live.Add(-1)
 }
 
-// call acquires a conn from the pool, runs fn against it, and wraps any
-// error fn returns with wrapError(op, err). A conn whose wrapped error
-// satisfies errors.Is(err, ErrUnavailable) is discarded instead of
-// returned to the pool, since its state after an I/O failure is unknown.
-// Task 11 adds the retry/failover loop here.
+// call picks an endpoint via cluster, acquires a conn from its pool, and
+// runs fn against it, retrying on another endpoint per SPEC §4.2 point 3:
+// a dial failure is always retryable; once fn has started, a failure is
+// retried only when it classifies as ErrUnavailable, ctx is not yet done,
+// and op is idempotent (its wire name has the "get_" prefix used by every
+// read-only RPC). A non-idempotent op (create_*, add_partitions*, drop_*,
+// alter_*) that fails after fn started is returned immediately, without
+// trying another endpoint, since the request may already have reached the
+// server. Attempts are bounded by cfg.maxRetries (clamped to at least 1 by
+// config.clamp). When every endpoint is cooling, call returns
+// ErrUnavailable joined with the last error observed.
 func (c *Client) call(ctx context.Context, op string, fn func(ctx context.Context, cn *conn) error) error {
-	cn, err := c.acquire(ctx)
-	if err != nil {
+	idempotent := strings.HasPrefix(op, "get_")
+	var last error
+	for attempt := 0; attempt < c.cfg.maxRetries; attempt++ {
+		idx, ok := c.cluster.Pick()
+		if !ok {
+			return wrapError(op, errors.Join(ErrUnavailable, last))
+		}
+
+		cn, err := c.acquire(ctx, idx)
+		if err != nil {
+			c.cluster.MarkFailed(idx)
+			last = err
+			continue // dial failures are always retryable
+		}
+
+		err = fn(ctx, cn)
+		if err == nil {
+			c.release(idx, cn)
+			c.cluster.MarkHealthy(idx)
+			return nil
+		}
+		if errors.Is(classify(err), ErrUnavailable) && ctx.Err() == nil {
+			c.discard(idx, cn)
+			c.cluster.MarkFailed(idx)
+			last = err
+			if idempotent {
+				continue
+			}
+		} else {
+			c.release(idx, cn)
+		}
 		return wrapError(op, err)
 	}
+	return wrapError(op, last)
+}
 
-	if err := fn(ctx, cn); err != nil {
-		wrapped := wrapError(op, err)
-		if errors.Is(wrapped, ErrUnavailable) {
-			c.discard(cn)
-		} else {
-			c.release(cn)
+// recoveryProbe periodically re-tests every endpoint the cluster currently
+// reports as cooling (SPEC §4.2 point 4), until ctx is cancelled by Close.
+// probeDone is closed on return so Close can wait for this goroutine to
+// actually exit before returning itself.
+func (c *Client) recoveryProbe(ctx context.Context) {
+	defer close(c.probeDone)
+	ticker := time.NewTicker(c.cfg.probeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.probeCooling(ctx)
 		}
-		return wrapped
 	}
-	c.release(cn)
-	return nil
+}
+
+// probeCooling dials a fresh conn to each of the cluster's currently
+// cooling endpoints and calls fb303's getStatus on it. A successful probe
+// marks that endpoint healthy and hands the freshly dialed conn to its
+// pool (or closes it if the pool is already full or the client has been
+// closed in the meantime); a failed probe leaves the endpoint cooling and
+// closes the conn, if one was even dialed.
+func (c *Client) probeCooling(ctx context.Context) {
+	for _, idx := range c.cluster.Cooling() {
+		cn, err := newConn(ctx, c.endpoints[idx], &c.cfg)
+		if err != nil {
+			continue
+		}
+		if _, err := cn.getStatus(ctx); err != nil {
+			_ = cn.close()
+			continue
+		}
+		c.cluster.MarkHealthy(idx)
+
+		p := c.pools[idx]
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			_ = cn.close()
+			continue
+		}
+		select {
+		case p.idle <- cn:
+			p.live.Add(1)
+			c.mu.Unlock()
+		default:
+			c.mu.Unlock()
+			_ = cn.close()
+		}
+	}
 }
 
 // resolveCat resolves the effective catalog for one call: a per-call
@@ -266,7 +415,7 @@ func qualifyDBName(cat *string, name string) string {
 // defaultValue when it is unset.
 func (c *Client) GetConfigValue(ctx context.Context, name, defaultValue string) (string, error) {
 	var out string
-	err := c.call(ctx, "GetConfigValue", func(ctx context.Context, cn *conn) error {
+	err := c.call(ctx, "get_config_value", func(ctx context.Context, cn *conn) error {
 		v, err := cn.getConfigValue(ctx, name, defaultValue)
 		if err != nil {
 			return err
@@ -303,7 +452,7 @@ func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) {
 // predates catalogs (Hive 2.3).
 func (c *Client) GetCatalogs(ctx context.Context) ([]string, error) {
 	var names []string
-	err := c.call(ctx, "GetCatalogs", func(ctx context.Context, cn *conn) error {
+	err := c.call(ctx, "get_catalogs", func(ctx context.Context, cn *conn) error {
 		resp, err := cn.getCatalogs(ctx)
 		if err != nil {
 			if isUnknownMethod(err) {
@@ -321,7 +470,7 @@ func (c *Client) GetCatalogs(ctx context.Context) ([]string, error) {
 // GetCatalog returns the catalog named name.
 func (c *Client) GetCatalog(ctx context.Context, name string) (*Catalog, error) {
 	var out *Catalog
-	err := c.call(ctx, "GetCatalog", func(ctx context.Context, cn *conn) error {
+	err := c.call(ctx, "get_catalog", func(ctx context.Context, cn *conn) error {
 		resp, err := cn.getCatalog(ctx, &hive_metastore.GetCatalogRequest{Name: name})
 		if err != nil {
 			return err
@@ -334,7 +483,7 @@ func (c *Client) GetCatalog(ctx context.Context, name string) (*Catalog, error) 
 
 // CreateCatalog creates cat.
 func (c *Client) CreateCatalog(ctx context.Context, cat *Catalog) error {
-	return c.call(ctx, "CreateCatalog", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "create_catalog", func(ctx context.Context, cn *conn) error {
 		return cn.createCatalog(ctx, &hive_metastore.CreateCatalogRequest{Catalog: catalogToThrift(cat)})
 	})
 }
@@ -342,7 +491,7 @@ func (c *Client) CreateCatalog(ctx context.Context, cat *Catalog) error {
 // DropCatalog removes the catalog named name. With ifExists true, a missing
 // catalog is not an error.
 func (c *Client) DropCatalog(ctx context.Context, name string, ifExists bool) error {
-	return c.call(ctx, "DropCatalog", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "drop_catalog", func(ctx context.Context, cn *conn) error {
 		err := cn.dropCatalog(ctx, &hive_metastore.DropCatalogRequest{Name: name})
 		if err != nil && ifExists && classify(err) == ErrNotFound {
 			return nil
@@ -362,7 +511,7 @@ func (c *Client) DropCatalog(ctx context.Context, name string, ifExists bool) er
 // RPC.
 func (c *Client) GetAllDatabases(ctx context.Context, opts ...CatalogOption) ([]string, error) {
 	var names []string
-	err := c.call(ctx, "GetAllDatabases", func(ctx context.Context, cn *conn) error {
+	err := c.call(ctx, "get_all_databases", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -385,7 +534,7 @@ func (c *Client) GetAllDatabases(ctx context.Context, opts ...CatalogOption) ([]
 // GetDatabase returns the database named name.
 func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOption) (*Database, error) {
 	var out *Database
-	err := c.call(ctx, "GetDatabase", func(ctx context.Context, cn *conn) error {
+	err := c.call(ctx, "get_database", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -403,7 +552,7 @@ func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOp
 // CreateDatabase creates db. A non-empty db.CatalogName overrides the
 // client's default catalog for this call.
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
-	return c.call(ctx, "CreateDatabase", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "create_database", func(ctx context.Context, cn *conn) error {
 		var opts []CatalogOption
 		if db.CatalogName != "" {
 			opts = append(opts, InCatalog(db.CatalogName))
@@ -421,7 +570,7 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 // database, or the server returns ErrInvalidOperation. With ifExists true,
 // a missing database is not an error.
 func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, cascade, ifExists bool, opts ...CatalogOption) error {
-	return c.call(ctx, "DropDatabase", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "drop_database", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err

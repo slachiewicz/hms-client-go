@@ -68,7 +68,7 @@ func TestClient_ReleaseRacingCloseDoesNotLeakConn(t *testing.T) {
 
 	// Take the pool's only conn on loan, mirroring a call whose fn is
 	// still in flight when Close runs.
-	cn, err := hms.ClientAcquire(c, context.Background())
+	cn, err := hms.ClientAcquire(c, context.Background(), 0)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -79,11 +79,11 @@ func TestClient_ReleaseRacingCloseDoesNotLeakConn(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		hms.ClientRelease(c, cn)
+		hms.ClientRelease(c, 0, cn)
 	}()
 	wg.Wait()
 
-	assert.Equal(t, int32(0), hms.ClientLiveConns(c), "release racing Close must not leak the conn")
+	assert.Equal(t, int32(0), hms.ClientLiveConns(c, 0), "release racing Close must not leak the conn")
 }
 
 // TestClient_AcquireWakesOnClose covers the fix for acquire never waking
@@ -100,12 +100,12 @@ func TestClient_AcquireWakesOnClose(t *testing.T) {
 
 	// Hold the only pooled conn on loan so a second acquire has nowhere
 	// to come from but Close.
-	cn, err := hms.ClientAcquire(c, context.Background())
+	cn, err := hms.ClientAcquire(c, context.Background(), 0)
 	require.NoError(t, err)
 
 	waiterErr := make(chan error, 1)
 	go func() {
-		_, err := hms.ClientAcquire(c, context.Background())
+		_, err := hms.ClientAcquire(c, context.Background(), 0)
 		waiterErr <- err
 	}()
 
@@ -122,7 +122,7 @@ func TestClient_AcquireWakesOnClose(t *testing.T) {
 		t.Fatal("acquire did not wake up promptly after Close")
 	}
 
-	hms.ClientRelease(c, cn)
+	hms.ClientRelease(c, 0, cn)
 }
 
 // TestNew_PoolSizeClamped covers the fix for WithPoolSize(0) hanging New:
