@@ -8,7 +8,7 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](go.mod)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> **Status:** pre-1.0. The 1.0-scope capabilities (see [CHANGELOG.md](CHANGELOG.md)) are complete
+> **Status:** `v0.1.0` is the first tagged release. The API follows the stability policy in [SPEC.md §8](SPEC.md): `v0.x` may still change before `v1.0.0`; every release is verified nightly against real Hive 2.3.9, 3.1.3, 4.0.1 and 4.2.1 metastores.
 > on `main`, pending a `v0.1.0` tag. The API is usable today and is verified nightly against
 > real metastores, but it may still change before `v1.0.0`. See [SPEC.md §8](SPEC.md) for the
 > stability policy.

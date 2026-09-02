@@ -6,6 +6,10 @@ a release, so everything below is unreleased.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-02
+
 ### Added
 
 - `set_ugi` caller identity on binary NOSASL connections, and `WithUserGroups` to set the
