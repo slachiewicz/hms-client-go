@@ -2,6 +2,7 @@ package hms
 
 import (
 	"context"
+	"iter"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
 )
@@ -72,6 +73,7 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 			return err
 		}
 		var tables []*Table
+		in := make(columnIntern)
 		for i := 0; i < len(tableNames); i += c.cfg.chunkSize {
 			end := i + c.cfg.chunkSize
 			if end > len(tableNames) {
@@ -86,13 +88,77 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 				return err
 			}
 			for _, t := range res.Tables {
-				tables = append(tables, tableFromThrift(t))
+				tables = append(tables, tableFromThriftIntern(t, in))
 			}
 		}
 		out = tables
 		return nil
 	})
 	return out, err
+}
+
+// GetTablesSeq is GetTables' streaming, memory-bounded form (1.0 addition,
+// G11), the same shape GetPartitionsSeq gives GetPartitions: it calls
+// GetAllTables once (get_all_tables returns names only, cheap enough to
+// hold in full) and then get_table_objects_by_name_req in chunks of the
+// client's chunk size (WithChunkSize; default 1000, the same knob and
+// default GetTables itself chunks by, SPEC §5.4), yielding each converted
+// Table as its chunk arrives instead of appending it to a growing slice,
+// so at most one chunk's worth of Tables is ever alive at once however
+// many tables the database has. get_table_objects_by_name_req carries no
+// legacy-RPC fallback (SPEC §2.1): it exists on every supported version,
+// so unlike GetPartitionsSeq's by-names chunks this call's own chunks
+// never need cn.tryReq.
+//
+// On failure, exactly one (nil, err) pair is yielded and the sequence
+// ends; breaking out of the range loop early stops the sequence
+// immediately and issues no further RPCs, and ctx's cancellation/deadline
+// is checked between chunks, exactly as GetPartitionsSeq describes. Like
+// GetPartitionsSeq, every RPC runs inside a single c.call invocation (not
+// c.read), so a retry on another endpoint -- which would re-run this
+// call's own fn from get_all_tables and re-yield every table already
+// handed to the caller -- never happens once fn has started; see
+// GetPartitionsSeq's doc comment for the full rationale.
+func (c *Client) GetTablesSeq(ctx context.Context, dbName string, opts ...CatalogOption) iter.Seq2[*Table, error] {
+	return func(yield func(*Table, error) bool) {
+		err := c.call(ctx, "get_all_tables", func(ctx context.Context, cn *conn) error {
+			cat, err := c.resolveCat(ctx, cn, opts)
+			if err != nil {
+				return err
+			}
+			names, err := cn.getAllTables(ctx, qualifyDBName(cat, dbName))
+			if err != nil {
+				return err
+			}
+			in := make(columnIntern)
+			for i := 0; i < len(names); i += c.cfg.chunkSize {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				end := i + c.cfg.chunkSize
+				if end > len(names) {
+					end = len(names)
+				}
+				res, err := cn.getTableObjectsByNameReq(ctx, &hive_metastore.GetTablesRequest{
+					DbName:   dbName,
+					TblNames: names[i:end],
+					CatName:  cat,
+				})
+				if err != nil {
+					return err
+				}
+				for _, t := range res.Tables {
+					if !yield(tableFromThriftIntern(t, in), nil) {
+						return nil
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			yield(nil, err)
+		}
+	}
 }
 
 // CreateTable creates table. A non-empty table.CatalogName overrides the

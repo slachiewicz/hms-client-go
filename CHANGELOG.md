@@ -8,6 +8,17 @@ a release, so everything below is unreleased.
 
 ### Added
 
+- `GetPartitionsSeq` and `GetTablesSeq`, `iter.Seq2` streaming forms of `GetPartitions`/
+  `GetTables` that actually bound memory: each calls its names-only RPC once
+  (`get_partition_names`/`get_all_tables`) and then fetches by name in chunks of
+  `WithChunkSize`, yielding each result as its chunk arrives instead of accumulating the whole
+  table's or database's result in memory first (SPEC §5.4, §5.5, G11). Breaking out of the range
+  loop early issues no further RPCs. `GetPartitions`, `GetPartitionsByNames`,
+  `GetPartitionsByFilter`, and `GetPartitionsSeq` now intern identical `Storage.Columns` lists
+  (by `Name`/`Type`/`Comment`) within one call, so partitions sharing a column list share one
+  `[]*FieldSchema` instead of each getting its own copy; `GetTables` and `GetTablesSeq` do the
+  same for `Table.Storage.Columns`. See `Partition.Storage`'s and `Table.Storage`'s doc comments
+  for the resulting aliasing contract.
 - `DropPartitionsByNames` and `DropPartitions` (by partition values), both wrapping the batched
   `drop_partitions_req` RPC, which carries no legacy-RPC fallback: it is declared in the Hive
   2.3.9 and 3.1.3 IDL as well as 4.2.1's (SPEC §2.1, §2.3 Rule 2, §5.5).

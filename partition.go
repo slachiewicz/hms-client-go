@@ -2,6 +2,7 @@ package hms
 
 import (
 	"context"
+	"iter"
 	"math"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
@@ -90,6 +91,106 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 		return nil
 	})
 	return out, err
+}
+
+// GetPartitionsSeq is GetPartitions' streaming, memory-bounded form (1.0
+// addition, G11): GetPartitions(maxParts=-1) always returns every
+// partition in one Thrift response, so an iter.Seq2 wrapped around it
+// would still hold the whole table's partitions (and every Storage.Columns
+// slice) in memory at once before yielding the first one -- it would not
+// actually bound memory. GetPartitionsSeq instead calls GetPartitionNames
+// once (get_partition_names, unbounded: every name, never chunked -- a
+// name is a string, not a full Partition, so the whole list is cheap
+// enough to hold at once) and then GetPartitionsByNames in chunks of the
+// client's chunk size (WithChunkSize; default 1000, the same knob and
+// default GetPartitionsByNames itself chunks by, SPEC §5.4/§5.5), yielding
+// each converted Partition as its chunk arrives instead of appending it to
+// a growing slice: at most one chunk's worth of Partitions (and their
+// Storage.Columns) is ever alive at once, however many partitions the
+// table has. Against a server lacking get_partitions_by_names_req (Hive
+// 2.3 and 3.x), each chunk independently degrades to the legacy
+// get_partitions_by_names RPC (SPEC §2.3), with the fallback decision
+// cached per conn exactly as GetPartitionsByNames' own does.
+//
+// Every chunk's Storage.Columns lists are interned against one another
+// (columnIntern): partitions across the whole sequence -- not just one
+// chunk -- whose columns are equal (Name/Type/Comment) share a single
+// []*FieldSchema slice rather than each getting its own copy, extending
+// GetPartitionsByNames' own within-call interning across every chunk this
+// call issues. See Partition.Storage's doc comment (types.go): the shared
+// slice must be copied before mutation.
+//
+// On failure, exactly one (nil, err) pair is yielded and the sequence
+// ends; breaking out of the range loop early (or returning from within
+// it) stops the sequence immediately and issues no further RPCs -- the
+// chunk loop below checks the yield function's own return value between
+// every partition, and ctx's cancellation/deadline between every chunk, so
+// an early stop can never leave a chunk's RPC in flight or a later one
+// started needlessly. Both checks, and every RPC this call issues, run
+// inside a single c.call invocation (not c.read): once this call's own fn
+// has started, any error -- including one that would otherwise be
+// retried on another endpoint as ErrUnavailable -- is returned
+// immediately rather than retried, because a retry would re-run fn from
+// its first RPC and re-yield every partition already handed to the
+// caller, which no other call in this package does and which range-over-
+// func gives no way to undo. The pooled connection this call acquires is
+// therefore released (or discarded, on an unavailable error) exactly
+// once, on every path a caller's range loop can take.
+func (c *Client) GetPartitionsSeq(ctx context.Context, dbName, tableName string, opts ...CatalogOption) iter.Seq2[*Partition, error] {
+	return func(yield func(*Partition, error) bool) {
+		err := c.call(ctx, "get_partition_names", func(ctx context.Context, cn *conn) error {
+			cat, err := c.resolveCat(ctx, cn, opts)
+			if err != nil {
+				return err
+			}
+			names, err := cn.getPartitionNames(ctx, qualifyDBName(cat, dbName), tableName, -1)
+			if err != nil {
+				return err
+			}
+			in := make(columnIntern)
+			for i := 0; i < len(names); i += c.cfg.chunkSize {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				end := i + c.cfg.chunkSize
+				if end > len(names) {
+					end = len(names)
+				}
+				chunk := names[i:end]
+				var raw []*hive_metastore.Partition
+				err := cn.tryReq(ctx, "get_partitions_by_names_req",
+					func(ctx context.Context) error {
+						resp, err := cn.getPartitionsByNamesReq(ctx, newGetPartitionsByNamesRequest(dbName, tableName, cat, chunk))
+						if err != nil {
+							return err
+						}
+						raw = resp.Partitions
+						return nil
+					},
+					func(ctx context.Context) error {
+						ps, err := cn.getPartitionsByNames(ctx, qualifyDBName(cat, dbName), tableName, chunk)
+						if err != nil {
+							return err
+						}
+						raw = ps
+						return nil
+					},
+				)
+				if err != nil {
+					return err
+				}
+				for _, p := range raw {
+					if !yield(partitionFromThriftIntern(p, in), nil) {
+						return nil
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			yield(nil, err)
+		}
+	}
 }
 
 // AddPartitions adds partitions to the table named tableName in database
@@ -241,6 +342,7 @@ func (c *Client) GetPartitionsByNames(ctx context.Context, dbName, tableName str
 			return err
 		}
 		var parts []*Partition
+		in := make(columnIntern)
 		for i := 0; i < len(names); i += c.cfg.chunkSize {
 			end := i + c.cfg.chunkSize
 			if end > len(names) {
@@ -253,7 +355,7 @@ func (c *Client) GetPartitionsByNames(ctx context.Context, dbName, tableName str
 					if err != nil {
 						return err
 					}
-					parts = append(parts, partitionsFromThrift(resp.Partitions)...)
+					parts = append(parts, partitionsFromThriftIntern(resp.Partitions, in)...)
 					return nil
 				},
 				func(ctx context.Context) error {
@@ -261,7 +363,7 @@ func (c *Client) GetPartitionsByNames(ctx context.Context, dbName, tableName str
 					if err != nil {
 						return err
 					}
-					parts = append(parts, partitionsFromThrift(ps)...)
+					parts = append(parts, partitionsFromThriftIntern(ps, in)...)
 					return nil
 				},
 			)

@@ -2,6 +2,7 @@ package hms
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -431,4 +432,110 @@ func TestDecimalFromThrift_CopiesUnscaled(t *testing.T) {
 
 	out.Unscaled[0] = 0xFF
 	assert.Equal(t, byte(1), unscaled[0], "decimalFromThrift must not alias the wire struct's Unscaled slice")
+}
+
+// sliceIdentity returns fs's backing array's address as a comparable
+// value (reflect.Value.Pointer, not assert.Equal: two distinct backing
+// arrays holding equal *FieldSchema pointers would otherwise look
+// identical to assert.Equal's reflect.DeepEqual), so two []*FieldSchema
+// slices can be checked for actually sharing one backing array rather
+// than merely being equal.
+func sliceIdentity(fs []*FieldSchema) uintptr { return reflect.ValueOf(fs).Pointer() }
+
+// TestPartitionsFromThrift_InternsIdenticalColumns covers G11's
+// column-list interning (columnIntern, storageFromThriftIntern): within
+// one partitionsFromThrift call, two partitions whose Storage.Cols are
+// equal (Name/Type/Comment) end up sharing the exact same []*FieldSchema
+// slice -- not merely an equal one -- while a partition with different
+// columns gets its own, distinct slice.
+func TestPartitionsFromThrift_InternsIdenticalColumns(t *testing.T) {
+	t.Parallel()
+	colsA := []*hive_metastore.FieldSchema{{Name: "a", Type: "string"}, {Name: "b", Type: "int"}}
+	// colsA2 is field-for-field equal to colsA but a distinct slice and
+	// distinct *FieldSchema values, so any sharing observed below can only
+	// come from columnIntern, not from the two Partitions pointing at the
+	// same wire struct to begin with.
+	colsA2 := []*hive_metastore.FieldSchema{{Name: "a", Type: "string"}, {Name: "b", Type: "int"}}
+	colsB := []*hive_metastore.FieldSchema{{Name: "c", Type: "string"}}
+
+	p1 := hive_metastore.NewPartition()
+	p1.Values = []string{"1"}
+	p1.Sd = &hive_metastore.StorageDescriptor{Cols: colsA}
+	p2 := hive_metastore.NewPartition()
+	p2.Values = []string{"2"}
+	p2.Sd = &hive_metastore.StorageDescriptor{Cols: colsA2}
+	p3 := hive_metastore.NewPartition()
+	p3.Values = []string{"3"}
+	p3.Sd = &hive_metastore.StorageDescriptor{Cols: colsB}
+
+	out := partitionsFromThrift([]*hive_metastore.Partition{p1, p2, p3})
+	require.Len(t, out, 3)
+	require.Len(t, out[0].Storage.Columns, 2)
+	require.Len(t, out[1].Storage.Columns, 2)
+	require.Len(t, out[2].Storage.Columns, 1)
+	assert.Equal(t, out[0].Storage.Columns, out[1].Storage.Columns)
+
+	assert.True(t, sliceIdentity(out[0].Storage.Columns) == sliceIdentity(out[1].Storage.Columns),
+		"partitions with equal columns must share one []*FieldSchema slice")
+	assert.False(t, sliceIdentity(out[0].Storage.Columns) == sliceIdentity(out[2].Storage.Columns),
+		"partitions with different columns must not share a slice")
+}
+
+// TestPartitionsFromThriftIntern_SharesAcrossCalls covers the extension
+// GetPartitionsByNames and GetPartitionsSeq rely on: passing the same
+// columnIntern to more than one partitionsFromThriftIntern call (one per
+// chunk) shares identical column lists across those calls too, not just
+// within a single one.
+func TestPartitionsFromThriftIntern_SharesAcrossCalls(t *testing.T) {
+	t.Parallel()
+	cols1 := []*hive_metastore.FieldSchema{{Name: "a", Type: "string"}}
+	cols2 := []*hive_metastore.FieldSchema{{Name: "a", Type: "string"}}
+
+	p1 := hive_metastore.NewPartition()
+	p1.Values = []string{"1"}
+	p1.Sd = &hive_metastore.StorageDescriptor{Cols: cols1}
+	p2 := hive_metastore.NewPartition()
+	p2.Values = []string{"2"}
+	p2.Sd = &hive_metastore.StorageDescriptor{Cols: cols2}
+
+	in := make(columnIntern)
+	chunk1 := partitionsFromThriftIntern([]*hive_metastore.Partition{p1}, in)
+	chunk2 := partitionsFromThriftIntern([]*hive_metastore.Partition{p2}, in)
+	require.Len(t, chunk1, 1)
+	require.Len(t, chunk2, 1)
+
+	assert.True(t, sliceIdentity(chunk1[0].Storage.Columns) == sliceIdentity(chunk2[0].Storage.Columns),
+		"two partitionsFromThriftIntern calls sharing one columnIntern must share equal columns' slice")
+}
+
+// TestTableFromThriftIntern_InternsIdenticalColumns mirrors
+// TestPartitionsFromThrift_InternsIdenticalColumns for tableFromThriftIntern
+// (GetTables/GetTablesSeq's own column-list interning): two tables sharing
+// one columnIntern and equal Storage.Cols end up with the same
+// []*FieldSchema slice, while a table with different columns does not.
+func TestTableFromThriftIntern_InternsIdenticalColumns(t *testing.T) {
+	t.Parallel()
+	colsA := []*hive_metastore.FieldSchema{{Name: "a", Type: "string"}}
+	colsA2 := []*hive_metastore.FieldSchema{{Name: "a", Type: "string"}}
+	colsB := []*hive_metastore.FieldSchema{{Name: "b", Type: "int"}}
+
+	t1 := hive_metastore.NewTable()
+	t1.TableName = "t1"
+	t1.Sd = &hive_metastore.StorageDescriptor{Cols: colsA}
+	t2 := hive_metastore.NewTable()
+	t2.TableName = "t2"
+	t2.Sd = &hive_metastore.StorageDescriptor{Cols: colsA2}
+	t3 := hive_metastore.NewTable()
+	t3.TableName = "t3"
+	t3.Sd = &hive_metastore.StorageDescriptor{Cols: colsB}
+
+	in := make(columnIntern)
+	out1 := tableFromThriftIntern(t1, in)
+	out2 := tableFromThriftIntern(t2, in)
+	out3 := tableFromThriftIntern(t3, in)
+
+	assert.True(t, sliceIdentity(out1.Storage.Columns) == sliceIdentity(out2.Storage.Columns),
+		"tables with equal columns must share one []*FieldSchema slice")
+	assert.False(t, sliceIdentity(out1.Storage.Columns) == sliceIdentity(out3.Storage.Columns),
+		"tables with different columns must not share a slice")
 }

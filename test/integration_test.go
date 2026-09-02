@@ -326,6 +326,17 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	require.Len(t, gotHudi.PartitionKeys, 1)
 	assert.Equal(t, "dt", gotHudi.PartitionKeys[0].Name)
 
+	// GetTablesSeq (1.0 addition, G11): the streaming form must count every
+	// table created in this database so far (iceberg_tbl, delta_tbl,
+	// hudi_tbl), against a real metastore.
+	var tableCount int
+	for tbl, err := range c.GetTablesSeq(ctx, dbName) {
+		require.NoError(t, err)
+		require.NotNil(t, tbl)
+		tableCount++
+	}
+	assert.Equal(t, 3, tableCount)
+
 	// AlterTable: add a parameter to the Iceberg table and confirm it
 	// sticks.
 	altered := gotIceberg
@@ -381,6 +392,19 @@ func TestPartitions_AddGetAlterDrop(t *testing.T) {
 	all, err := c.GetPartitions(ctx, dbName, tableName, -1)
 	require.NoError(t, err)
 	assert.Len(t, all, partitionCount)
+
+	// GetPartitionsSeq (1.0 addition, G11): the streaming form must count
+	// the same partitions as GetPartitions, against a real metastore
+	// (get_partition_names followed by get_partitions_by_names_req in
+	// WithChunkSize-sized chunks, rather than the single get_partitions_req
+	// GetPartitions itself issues).
+	var seqCount int
+	for p, err := range c.GetPartitionsSeq(ctx, dbName, tableName) {
+		require.NoError(t, err)
+		require.NotNil(t, p)
+		seqCount++
+	}
+	assert.Equal(t, partitionCount, seqCount)
 
 	limited, err := c.GetPartitions(ctx, dbName, tableName, 10)
 	require.NoError(t, err)
@@ -489,6 +513,13 @@ func TestDropPartitions_ByValuesAndByNames(t *testing.T) {
 	names, err = c.GetPartitionNames(ctx, dbName, tableName, -1)
 	require.NoError(t, err)
 	assert.Empty(t, names)
+
+	// DropPartitionsByNames' ifExists behavior against a real metastore,
+	// on a name that never existed (the table now has no partitions at
+	// all): ifExists=true is not an error, ifExists=false is ErrNotFound.
+	require.NoError(t, c.DropPartitionsByNames(ctx, dbName, tableName, []string{"dt=nope"}, false, true))
+	err = c.DropPartitionsByNames(ctx, dbName, tableName, []string{"dt=nope"}, false, false)
+	require.ErrorIs(t, err, hms.ErrNotFound)
 }
 
 // TestCatalogs covers SPEC.md §5.2 and §2.1's catalog row: on Hive 2.3,

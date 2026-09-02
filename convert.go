@@ -3,6 +3,7 @@ package hms
 import (
 	"context"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/apache/thrift/lib/go/thrift"
@@ -409,6 +410,58 @@ func fieldSchemasFromThrift(fs []*hive_metastore.FieldSchema) []*FieldSchema {
 	return out
 }
 
+// columnIntern deduplicates the []*FieldSchema slices a batch conversion
+// (partitionsFromThrift, and the multi-chunk callers below that reuse one
+// interner across chunks: GetPartitionsByNames, GetPartitionsSeq) produces
+// for Storage.Columns: many partitions of the same table share byte-
+// identical column lists, so rather than allocate one fresh []*FieldSchema
+// (and one *FieldSchema per column) per partition, columnIntern hands back
+// the same slice to every partition whose columns are equal. Keyed by
+// columnKey, a string built from each column's Name/Type/Comment -- the
+// only fields fieldSchemaFromThrift itself converts, so two columns equal
+// on those three fields are indistinguishable in the result regardless of
+// anything else the wire FieldSchema might (today, nothing else) carry.
+// See Partition.Storage's doc comment (types.go) for the resulting
+// aliasing contract: the returned slice must be copied before mutation.
+type columnIntern map[string][]*FieldSchema
+
+// columnKey builds columnIntern's map key from fs's Name/Type/Comment
+// fields, in order; NUL and SOH (neither valid in a Hive column name,
+// type, or comment in practice, but not rejected by this package either)
+// separate fields and columns so two different column lists cannot
+// collide onto the same key.
+func columnKey(fs []*hive_metastore.FieldSchema) string {
+	var b strings.Builder
+	for _, f := range fs {
+		b.WriteString(f.Name)
+		b.WriteByte(0)
+		b.WriteString(f.Type)
+		b.WriteByte(0)
+		b.WriteString(f.Comment)
+		b.WriteByte(1)
+	}
+	return b.String()
+}
+
+// intern returns the []*FieldSchema for fs, converting and caching it on
+// in the first time this exact column list (per columnKey) is seen, and
+// returning the cached slice -- shared with every earlier caller that saw
+// an equal column list -- on every later one. It returns nil for a nil or
+// empty fs, matching fieldSchemasFromThrift, and never caches that case
+// (a nil result needs no sharing).
+func (in columnIntern) intern(fs []*hive_metastore.FieldSchema) []*FieldSchema {
+	if len(fs) == 0 {
+		return nil
+	}
+	key := columnKey(fs)
+	if cached, ok := in[key]; ok {
+		return cached
+	}
+	out := fieldSchemasFromThrift(fs)
+	in[key] = out
+	return out
+}
+
 // fieldSchemasToThrift converts a slice of the exported FieldSchema type. It
 // returns nil for a nil or empty input (see copyStringMap).
 func fieldSchemasToThrift(fs []*FieldSchema) []*hive_metastore.FieldSchema {
@@ -503,14 +556,26 @@ func ordersToThrift(os []*Order) []*hive_metastore.Order {
 	return out
 }
 
-// storageFromThrift converts a generated StorageDescriptor to the exported
-// StorageDescriptor type. It returns nil for a nil input.
-func storageFromThrift(sd *hive_metastore.StorageDescriptor) *StorageDescriptor {
+// storageFromThriftIntern converts a generated StorageDescriptor to the
+// exported StorageDescriptor type, with optional column-list interning:
+// when in is non-nil, sd.Cols is converted through in.intern instead of a
+// fresh fieldSchemasFromThrift call, so repeated identical column lists
+// across one batch conversion (partitionsFromThrift/tableFromThriftIntern
+// and their multi-chunk callers) share a single []*FieldSchema instead of
+// each partition or table getting its own copy. A nil in converts sd.Cols
+// directly, with no interning. It returns nil for a nil sd.
+func storageFromThriftIntern(sd *hive_metastore.StorageDescriptor, in columnIntern) *StorageDescriptor {
 	if sd == nil {
 		return nil
 	}
+	var cols []*FieldSchema
+	if in != nil {
+		cols = in.intern(sd.Cols)
+	} else {
+		cols = fieldSchemasFromThrift(sd.Cols)
+	}
 	out := &StorageDescriptor{
-		Columns:       fieldSchemasFromThrift(sd.Cols),
+		Columns:       cols,
 		Location:      sd.Location,
 		InputFormat:   sd.InputFormat,
 		OutputFormat:  sd.OutputFormat,
@@ -582,6 +647,21 @@ func storageToThrift(sd *StorageDescriptor, base *hive_metastore.StorageDescript
 // see Table's doc comment for the round-trip fidelity contract this exists
 // for.
 func tableFromThrift(t *hive_metastore.Table) *Table {
+	return tableFromThriftIntern(t, nil)
+}
+
+// tableFromThriftIntern is tableFromThrift with optional column-list
+// interning (see storageFromThriftIntern), for GetTables' and
+// GetTablesSeq's multi-chunk loops: two tables in the same call whose
+// Storage.Columns are equal (Name/Type/Comment) share one []*FieldSchema
+// slice instead of each getting its own copy. A nil in behaves exactly
+// like tableFromThrift. PartitionKeys is deliberately not interned here:
+// unlike a table's data columns, its partition keys are not expected to
+// repeat identically across unrelated tables in one GetTables/
+// GetTablesSeq call often enough to be worth the extra aliasing this
+// would add to a field Table's own doc comment does not describe as
+// shared.
+func tableFromThriftIntern(t *hive_metastore.Table, in columnIntern) *Table {
 	if t == nil {
 		return nil
 	}
@@ -593,7 +673,7 @@ func tableFromThrift(t *hive_metastore.Table) *Table {
 		CreateTime:       timeFromUnix32(t.CreateTime),
 		LastAccessTime:   timeFromUnix32(t.LastAccessTime),
 		Retention:        t.Retention,
-		Storage:          storageFromThrift(t.Sd),
+		Storage:          storageFromThriftIntern(t.Sd, in),
 		PartitionKeys:    fieldSchemasFromThrift(t.PartitionKeys),
 		Parameters:       copyStringMap(t.Parameters),
 		ViewOriginalText: t.ViewOriginalText,
@@ -688,6 +768,13 @@ func fillTable(out *hive_metastore.Table, t *Table, cat *string) *hive_metastore
 // deepCopyThrift), independent of p itself; see tableFromThrift's identical
 // treatment and Table's doc comment for the round-trip fidelity contract.
 func partitionFromThrift(p *hive_metastore.Partition) *Partition {
+	return partitionFromThriftIntern(p, nil)
+}
+
+// partitionFromThriftIntern is partitionFromThrift with optional
+// column-list interning (see storageFromThriftIntern); a nil in behaves
+// exactly like partitionFromThrift.
+func partitionFromThriftIntern(p *hive_metastore.Partition, in columnIntern) *Partition {
 	if p == nil {
 		return nil
 	}
@@ -696,7 +783,7 @@ func partitionFromThrift(p *hive_metastore.Partition) *Partition {
 		TableName:    p.TableName,
 		Values:       copyStrings(p.Values),
 		CreateTime:   timeFromUnix32(p.CreateTime),
-		Storage:      storageFromThrift(p.Sd),
+		Storage:      storageFromThriftIntern(p.Sd, in),
 		Parameters:   copyStringMap(p.Parameters),
 		raw:          rawPartition(p),
 	}
@@ -708,15 +795,31 @@ func partitionFromThrift(p *hive_metastore.Partition) *Partition {
 	return out
 }
 
-// partitionsFromThrift converts a slice of generated Partition values. It
+// partitionsFromThrift converts a slice of generated Partition values,
+// interning identical Storage.Columns lists across the whole slice (see
+// columnIntern) so that partitions of ps sharing byte-identical columns
+// share one []*FieldSchema instead of each getting its own copy. It
 // returns nil for a nil or empty input (see copyStringMap).
 func partitionsFromThrift(ps []*hive_metastore.Partition) []*Partition {
 	if len(ps) == 0 {
 		return nil
 	}
+	return partitionsFromThriftIntern(ps, make(columnIntern))
+}
+
+// partitionsFromThriftIntern is partitionsFromThrift taking an existing
+// columnIntern instead of creating one of its own, so a caller that
+// converts ps across several calls (GetPartitionsByNames' chunk loop,
+// GetPartitionsSeq's chunk loop) can share one interner across all of
+// them, extending the sharing partitionsFromThrift gives one slice to the
+// whole call rather than just one chunk.
+func partitionsFromThriftIntern(ps []*hive_metastore.Partition, in columnIntern) []*Partition {
+	if len(ps) == 0 {
+		return nil
+	}
 	out := make([]*Partition, len(ps))
 	for i, p := range ps {
-		out[i] = partitionFromThrift(p)
+		out[i] = partitionFromThriftIntern(p, in)
 	}
 	return out
 }

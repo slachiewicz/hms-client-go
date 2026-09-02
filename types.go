@@ -219,6 +219,13 @@ type Table struct {
 	// Retention is the table's data retention period, in seconds.
 	Retention int32
 	// Storage describes where and how the table's data is stored.
+	//
+	// Storage.Columns may be shared, by pointer, among every Table
+	// returned by one GetTables or GetTablesSeq call whose columns are
+	// equal (Name/Type/Comment): those calls intern identical column
+	// lists the same way GetPartitions and its siblings do for Partition
+	// (1.0 addition, G11; see Partition.Storage's doc comment for the
+	// full aliasing contract). PartitionKeys is not interned.
 	Storage *StorageDescriptor
 	// PartitionKeys describes the table's partition columns, in order.
 	PartitionKeys []*FieldSchema
@@ -259,6 +266,17 @@ type Partition struct {
 	// CreateTime is when the partition was created.
 	CreateTime time.Time
 	// Storage describes where and how the partition's data is stored.
+	//
+	// Storage.Columns may be shared, by pointer, among every Partition
+	// returned by one GetPartitions, GetPartitionsByNames,
+	// GetPartitionsByFilter, or GetPartitionsSeq call whose columns are
+	// equal (Name/Type/Comment): those calls intern identical column
+	// lists into a single []*FieldSchema rather than allocate one per
+	// partition (1.0 addition, G11). A caller that mutates
+	// Storage.Columns, or a *FieldSchema within it, in place must copy it
+	// first -- the same slice may be visible through another Partition
+	// from the same call. A Partition built directly (a struct literal)
+	// is unaffected.
 	Storage *StorageDescriptor
 	// Parameters holds arbitrary key/value metadata.
 	Parameters map[string]string
