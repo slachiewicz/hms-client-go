@@ -3,6 +3,7 @@ package hms
 import (
 	"crypto/tls"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -41,16 +42,23 @@ type config struct {
 	plainUser     string
 	plainPassword string
 
+	kerberos     bool
+	krbPrincipal string
+	krbKeytab    string
+	krbCCache    string
+
 	tlsConfig *tls.Config
 }
 
 // wantsSetUgi reports whether newConn should issue set_ugi once a binary
 // NOSASL connection is dialed (SPEC §3.1): only when a user is configured
-// (WithUser) and no SASL auth is configured (WithPlainAuth), since SASL
-// PLAIN establishes the caller's identity during the handshake itself and
-// must never be followed by a second, contradicting identity claim.
+// (WithUser) and no SASL auth is configured (WithPlainAuth or
+// WithKerberos), since SASL establishes the caller's identity during the
+// handshake itself -- from the credentials for PLAIN, from the ticket for
+// GSSAPI -- and must never be followed by a second, contradicting identity
+// claim.
 func (cfg *config) wantsSetUgi() bool {
-	return cfg.plainUser == "" && cfg.user != ""
+	return cfg.plainUser == "" && !cfg.kerberos && cfg.user != ""
 }
 
 // newConfig returns a config seeded with the library defaults.
@@ -201,6 +209,40 @@ func WithPlainAuth(user, password string) Option {
 	return func(c *config) {
 		c.plainUser = user
 		c.plainPassword = password
+	}
+}
+
+// WithKerberos selects SASL GSSAPI (Kerberos) authentication over the
+// binary TCP transport, at QOP auth, using a pure-Go Kerberos
+// implementation rather than native C Kerberos (SPEC §3.1, §5.1). It is
+// mutually exclusive with WithPlainAuth: a connection carries exactly one
+// SASL identity, and configuring both fails the dial.
+//
+// principal is the client principal to authenticate as, either "user" or
+// "user@REALM"; without a realm, krb5.conf's default_realm applies. The
+// optional second argument names the credentials to use: a path ending in
+// ".keytab" is read as a keytab, anything else as a credential cache. With
+// no second argument the credential cache named by KRB5CCNAME is used,
+// falling back to /tmp/krb5cc_<uid>, so a caller who has already run kinit
+// need only name their principal. Further arguments are ignored. The
+// Kerberos configuration comes from KRB5_CONFIG, falling back to
+// /etc/krb5.conf.
+//
+// The metastore's own principal is "hive/<host>" for the endpoint host
+// being dialed, matching hive.metastore.kerberos.principal's default.
+func WithKerberos(principal string, keytabOrCCache ...string) Option {
+	return func(c *config) {
+		c.kerberos = true
+		c.krbPrincipal = principal
+		c.krbKeytab = ""
+		c.krbCCache = ""
+		if len(keytabOrCCache) > 0 && keytabOrCCache[0] != "" {
+			if strings.HasSuffix(keytabOrCCache[0], ".keytab") {
+				c.krbKeytab = keytabOrCCache[0]
+			} else {
+				c.krbCCache = keytabOrCCache[0]
+			}
+		}
 	}
 }
 

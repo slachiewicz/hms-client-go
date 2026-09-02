@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"time"
 
@@ -34,6 +35,10 @@ type BinaryConfig struct {
 	// DialBinary.
 	PlainUser     string
 	PlainPassword string
+	// Kerberos, when non-nil, selects SASL GSSAPI (Kerberos)
+	// authentication, mutually exclusive with PlainUser. See DialBinary
+	// and NewSaslGSSAPI.
+	Kerberos *KerberosConfig
 }
 
 // Conn is an open connection to a metastore, ready to bind to a generated
@@ -91,7 +96,15 @@ func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
 // When cfg.PlainUser is non-empty, DialBinary performs a SASL PLAIN
 // handshake (see NewSaslPlain) before wrapping the transport for buffered
 // I/O; on handshake failure the raw connection is closed and the error is
-// returned unwrapped.
+// returned unwrapped. When cfg.Kerberos is non-nil it performs a SASL
+// GSSAPI handshake instead (see NewSaslGSSAPI), on the same terms.
+// Configuring both is a caller error and fails before the socket is
+// dialed, since a connection carries exactly one SASL identity.
+//
+// The Kerberos handshake's own KDC exchanges are the one piece of I/O the
+// deadline below does not reach: they run against the KDC over gokrb5's
+// own sockets, not the metastore connection, and are bounded by
+// krb5.conf's kdc_timeout instead.
 //
 // The SASL handshake runs before ContextClient exists to own raw's
 // deadlines (see deadlineShield), so DialBinary binds ctx to raw directly
@@ -103,6 +116,9 @@ func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
 // again once the handshake returns, so ContextClient starts from a clean
 // slate.
 func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, error) {
+	if cfg.PlainUser != "" && cfg.Kerberos != nil {
+		return nil, errors.New("hms: WithPlainAuth and WithKerberos are mutually exclusive")
+	}
 	d := net.Dialer{Timeout: cfg.ConnectTimeout}
 	raw, err := d.DialContext(ctx, "tcp", hostPort)
 	if err != nil {
@@ -131,9 +147,19 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 	// connected conn).
 	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.ConnectTimeout}
 	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{conn}, tcfg)
-	if cfg.PlainUser != "" {
-		sasl := NewSaslPlain(trans, cfg.PlainUser, cfg.PlainPassword)
 
+	var sasl SaslTransport
+	switch {
+	case cfg.Kerberos != nil:
+		var err error
+		if sasl, err = NewSaslGSSAPI(trans, hostPort, *cfg.Kerberos); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+	case cfg.PlainUser != "":
+		sasl = NewSaslPlain(trans, cfg.PlainUser, cfg.PlainPassword)
+	}
+	if sasl != nil {
 		deadline, ok := ctx.Deadline()
 		if !ok && cfg.ConnectTimeout > 0 {
 			deadline = time.Now().Add(cfg.ConnectTimeout)

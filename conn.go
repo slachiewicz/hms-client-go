@@ -94,6 +94,7 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 			TLS:            cfg.tlsConfig,
 			PlainUser:      cfg.plainUser,
 			PlainPassword:  cfg.plainPassword,
+			Kerberos:       krbConfig(cfg),
 		})
 	default:
 		tc, err = transport.NewHTTP(ctx, ep.URL, transport.HTTPConfig{
@@ -166,6 +167,20 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 	}
 
 	return cn, nil
+}
+
+// krbConfig returns the transport-level Kerberos configuration for cfg, or
+// nil when WithKerberos was never called, in which case DialBinary uses
+// NOSASL or SASL PLAIN as before.
+func krbConfig(cfg *config) *transport.KerberosConfig {
+	if !cfg.kerberos {
+		return nil
+	}
+	return &transport.KerberosConfig{
+		Principal: cfg.krbPrincipal,
+		Keytab:    cfg.krbKeytab,
+		CCache:    cfg.krbCCache,
+	}
 }
 
 // useLegacy reports whether method previously observed UNKNOWN_METHOD on
