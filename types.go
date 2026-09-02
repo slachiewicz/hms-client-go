@@ -166,7 +166,9 @@ type StorageDescriptor struct {
 	OutputFormat string
 	// Compressed reports whether the data is compressed.
 	Compressed bool
-	// NumBuckets is the number of hash buckets, or -1 if not bucketed.
+	// NumBuckets is the number of hash buckets; Hive uses -1 for "not
+	// bucketed". A zero-value StorageDescriptor writes 0, which Hive also
+	// treats as unbucketed; set -1 explicitly to match Hive's own DDL.
 	NumBuckets int32
 	// SerDe describes how rows are serialized and deserialized.
 	SerDe *SerDeInfo

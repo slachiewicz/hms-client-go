@@ -523,7 +523,7 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 * Module tags stay on the `v0.x` line until the `polytable` adoption described in PLAN.md's downstream note ships.
 * `v1.0.0` promises standard Go-module semver for package `hms`: no breaking change to an exported identifier without a major version bump.
 * `internal/` (`internal/transport`, `internal/ha`) is unstable and carries no compatibility promise at any version; it exists to be reorganized freely.
-* `gen/` (the generated Thrift bindings) is not part of the API surface at any version — AGENTS.md invariant #4 already forbids a generated type from appearing in an exported `hms` identifier, so `gen/`'s own shape changing (e.g. on an IDL bump) is never a breaking change to package `hms`.
+* `gen/` (the generated Thrift bindings) is not part of the API surface at any version — AGENTS.md invariant #4 already forbids a generated type from appearing in an exported `hms` identifier, so `gen/`'s own shape changing (e.g. on an IDL bump) is never a breaking change to package `hms`. It nevertheless stays importable and outside `internal/`, so test oracles and tooling may depend on `gen/hive_metastore` at a pinned module version; its generated types, fields and method names can change on any IDL regeneration without a major version bump.
 
 ---
 
