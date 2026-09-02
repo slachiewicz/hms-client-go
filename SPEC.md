@@ -445,24 +445,25 @@ type RPCInfo struct {
 
 The client MUST provide native builder helpers for registering and updating open table formats:
 
+These conventions follow the Java builders in `xtable-hive-metastore`, the library `polytable` ports this package's builders from, rather than being invented independently -- matching them is what makes a table this client registers readable by the same Spark/Trino/Presto integrations that read one `xtable-hive-metastore` registered.
+
 1. **Apache Iceberg**:
    * Storage Handler: `org.apache.iceberg.mr.hive.HiveIcebergStorageHandler`
    * SerDe: `org.apache.iceberg.mr.hive.HiveIcebergSerDe`
    * Input Format: `org.apache.iceberg.mr.hive.HiveIcebergInputFormat`
    * Output Format: `org.apache.iceberg.mr.hive.HiveIcebergOutputFormat`
-   * Parameters: `metadata_location`, `previous_metadata_location`, `table_type: "ICEBERG"`.
+   * Parameters: `metadata_location`, `previous_metadata_location`, `table_type: "ICEBERG"`, `iceberg.catalog: "location_based_table"`.
 
 2. **Delta Lake**:
-   * Input Format: `io.delta.hive.DeltaInputFormat`
-   * Output Format: `org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat`
-   * SerDe: `org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe`
-   * Parameters: `spark.sql.sources.provider: "delta"`, `table_type: "DELTA"`.
+   * Storage Handler: `io.delta.hive.DeltaStorageHandler`; `Storage.InputFormat`/`OutputFormat` are left empty -- Delta is registered by storage handler, not an input/output format pair.
+   * SerDe: `org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe`, with SerDe parameters `serialization.format: "1"` and `path: <location>`.
+   * Parameters: `spark.sql.sources.provider: "delta"`, `table_type: "DELTA"`, `storage_handler: "io.delta.hive.DeltaStorageHandler"`.
 
 3. **Apache Hudi**:
    * Input Format: `org.apache.hudi.hadoop.HoodieParquetInputFormat`
-   * Output Format: `org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat`
-   * SerDe: `org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe`
-   * Parameters: `spark.sql.sources.provider: "hudi"`.
+   * Output Format: `org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat`
+   * SerDe: `org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe`, with the SerDe parameter `path: <location>`.
+   * Parameters: `spark.sql.sources.provider: "hudi"`. `hudi.metadata-listing-enabled` is left to the caller to set.
 
 ---
 

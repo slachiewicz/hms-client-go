@@ -29,6 +29,7 @@ func TestNewIcebergTable(t *testing.T) {
 		wantParamMetadata  string
 		wantParamHandler   string
 		wantParamExternal  string
+		wantParamCatalog   string
 	}{
 		{
 			name:               "basic iceberg table",
@@ -46,6 +47,7 @@ func TestNewIcebergTable(t *testing.T) {
 			wantParamMetadata:  "s3://bucket/db/tbl/metadata",
 			wantParamHandler:   hms.IcebergStorageHandler,
 			wantParamExternal:  "TRUE",
+			wantParamCatalog:   "location_based_table",
 		},
 	}
 
@@ -67,6 +69,7 @@ func TestNewIcebergTable(t *testing.T) {
 			assert.Equal(t, tt.wantParamMetadata, got.Parameters["metadata_location"])
 			assert.Equal(t, tt.wantParamHandler, got.Parameters["storage_handler"])
 			assert.Equal(t, tt.wantParamExternal, got.Parameters["EXTERNAL"])
+			assert.Equal(t, tt.wantParamCatalog, got.Parameters["iceberg.catalog"])
 
 			// Verify storage_handler constant matches literal
 			assert.Equal(t, "org.apache.iceberg.mr.hive.HiveIcebergStorageHandler", got.Parameters["storage_handler"])
@@ -83,8 +86,7 @@ func TestNewDeltaTable(t *testing.T) {
 		location           string
 		cols               []*hms.FieldSchema
 		wantSerDe          string
-		wantInputFormat    string
-		wantOutputFormat   string
+		wantStorageHandler string
 		wantTableType      hms.TableType
 		wantParamProvider  string
 		wantParamTableType string
@@ -97,8 +99,7 @@ func TestNewDeltaTable(t *testing.T) {
 			location:           "s3://bucket/db/tbl",
 			cols:               []*hms.FieldSchema{{Name: "id", Type: "bigint"}},
 			wantSerDe:          hms.DeltaSerDe,
-			wantInputFormat:    hms.DeltaInputFormat,
-			wantOutputFormat:   hms.DeltaOutputFormat,
+			wantStorageHandler: hms.DeltaStorageHandler,
 			wantTableType:      hms.TableTypeExternal,
 			wantParamProvider:  "delta",
 			wantParamTableType: "DELTA",
@@ -115,18 +116,22 @@ func TestNewDeltaTable(t *testing.T) {
 			assert.Equal(t, tt.tableName, got.TableName)
 			assert.Equal(t, tt.wantTableType, got.TableType)
 			assert.Equal(t, tt.location, got.Storage.Location)
-			assert.Equal(t, tt.wantInputFormat, got.Storage.InputFormat)
-			assert.Equal(t, tt.wantOutputFormat, got.Storage.OutputFormat)
+			// Delta is registered by storage handler, not an input/output
+			// format pair (SPEC §6).
+			assert.Empty(t, got.Storage.InputFormat)
+			assert.Empty(t, got.Storage.OutputFormat)
 			assert.Equal(t, tt.wantSerDe, got.Storage.SerDe.SerializationLib)
 			assert.Equal(t, tt.cols, got.Storage.Columns)
+			assert.Equal(t, "1", got.Storage.SerDe.Parameters["serialization.format"])
+			assert.Equal(t, tt.location, got.Storage.SerDe.Parameters["path"])
 
 			assert.Equal(t, tt.wantParamProvider, got.Parameters["spark.sql.sources.provider"])
 			assert.Equal(t, tt.wantParamTableType, got.Parameters["table_type"])
 			assert.Equal(t, tt.wantParamExternal, got.Parameters["EXTERNAL"])
+			assert.Equal(t, tt.wantStorageHandler, got.Parameters["storage_handler"])
 
 			// Verify constants match literals
-			assert.Equal(t, "io.delta.hive.DeltaInputFormat", got.Storage.InputFormat)
-			assert.Equal(t, "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat", got.Storage.OutputFormat)
+			assert.Equal(t, "io.delta.hive.DeltaStorageHandler", got.Parameters["storage_handler"])
 			assert.Equal(t, "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe", got.Storage.SerDe.SerializationLib)
 		})
 	}
@@ -178,13 +183,14 @@ func TestNewHudiTable(t *testing.T) {
 			assert.Equal(t, tt.wantSerDe, got.Storage.SerDe.SerializationLib)
 			assert.Equal(t, tt.cols, got.Storage.Columns)
 			assert.Equal(t, tt.partitionKeys, got.PartitionKeys)
+			assert.Equal(t, tt.location, got.Storage.SerDe.Parameters["path"])
 
 			assert.Equal(t, tt.wantParamProvider, got.Parameters["spark.sql.sources.provider"])
 			assert.Equal(t, tt.wantParamExternal, got.Parameters["EXTERNAL"])
 
 			// Verify constants match literals
 			assert.Equal(t, "org.apache.hudi.hadoop.HoodieParquetInputFormat", got.Storage.InputFormat)
-			assert.Equal(t, "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat", got.Storage.OutputFormat)
+			assert.Equal(t, "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat", got.Storage.OutputFormat)
 			assert.Equal(t, "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe", got.Storage.SerDe.SerializationLib)
 		})
 	}
@@ -261,5 +267,6 @@ func TestIcebergTableRoundTrip(t *testing.T) {
 	assert.Equal(t, "s3://bucket/db/iceberg_tbl/metadata", got.Parameters["metadata_location"])
 	assert.Equal(t, hms.IcebergStorageHandler, got.Parameters["storage_handler"])
 	assert.Equal(t, "TRUE", got.Parameters["EXTERNAL"])
+	assert.Equal(t, "location_based_table", got.Parameters["iceberg.catalog"])
 	assert.Equal(t, cols, got.Storage.Columns)
 }
