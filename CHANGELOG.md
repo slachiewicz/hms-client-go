@@ -89,6 +89,11 @@ a release, so everything below is unreleased.
   still overrides the identity sent, and `WithoutUGI` (new, above) disables the call entirely.
   Previously `set_ugi` was sent only when `WithUser` was configured -- a client relying on that to
   skip `set_ugi` (e.g. against a server that rejects it) must now call `WithoutUGI` explicitly.
+  `New` now performs an RPC on every newly dialed binary connection rather than just the dial
+  itself, so a bare listener that accepts a connection but never speaks Thrift no longer models
+  a live server in a test -- `WithoutUGI` restores the pre-0.1.0 dial-only behavior for such a
+  test double. This `set_ugi` call is bounded by `WithConnectTimeout`, not the per-call
+  `WithTimeout`, since it is part of connection establishment (SPEC §3.1).
 
 ### Known issues
 

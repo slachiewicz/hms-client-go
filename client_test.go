@@ -3,6 +3,7 @@ package hms_test
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -182,6 +183,33 @@ func TestNew_ConnectTimeoutExplicit(t *testing.T) {
 
 	c := mustNew(t, srv.URI(), hms.WithTimeout(7*time.Second), hms.WithConnectTimeout(3*time.Second))
 	assert.Equal(t, 3*time.Second, hms.ClientConnectTimeout(c))
+}
+
+// TestNew_SetUgiBoundedByConnectTimeout covers the fix for newConn's
+// set_ugi call (SPEC §3.1) previously falling back to WithTimeout's value
+// (the per-call socket timeout, default 30s) rather than
+// WithConnectTimeout when the caller's ctx carries no deadline of its own:
+// a bare TCP listener that accepts but never speaks Thrift is
+// indistinguishable from a live metastore until this call times out, so
+// without the fix New would hang for the full per-call timeout instead of
+// the much shorter WithConnectTimeout configured here.
+func TestNew_SetUgiBoundedByConnectTimeout(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}()
+
+	start := time.Now()
+	_, err = hms.New(context.Background(), "thrift://"+ln.Addr().String(), hms.WithConnectTimeout(100*time.Millisecond))
+	require.ErrorIs(t, err, hms.ErrUnavailable)
+	assert.Less(t, time.Since(start), time.Second)
 }
 
 // TestClient_ContextExpiredMidRPCDiscardsConn covers the fix for do()

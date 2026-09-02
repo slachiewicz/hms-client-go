@@ -244,8 +244,26 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *
 	// surfaces as newConn's own error, so the caller's dial-failure path --
 	// including HA failover -- applies exactly as it would for the dial
 	// itself.
+	//
+	// This RPC is part of connection establishment, not a per-call RPC, so
+	// it is bounded by cfg.connectTimeout rather than the per-call socket
+	// timeout ContextClient would otherwise fall back to when ctx carries
+	// no deadline of its own: without this, a server that accepts the TCP
+	// connection but never speaks Thrift -- indistinguishable from a live
+	// metastore until this call times out -- made New hang for the full
+	// per-call timeout (WithTimeout, default 30s) instead of the shorter
+	// WithConnectTimeout a caller configured for exactly this dial-time
+	// case. cfg.connectTimeout is always positive here: New calls
+	// cfg.clamp() (which defaults it from cfg.timeout) before ever dialing,
+	// and acquire/probeCooling both reuse that already-clamped *config.
 	if ep.Scheme == transport.SchemeThrift && cfg.wantsSetUgi() {
-		if _, err := cn.setUgi(ctx, cfg.ugiUser, cfg.userGroups); err != nil {
+		ugiCtx := ctx
+		if _, ok := ctx.Deadline(); !ok && cfg.connectTimeout > 0 {
+			var cancel context.CancelFunc
+			ugiCtx, cancel = context.WithTimeout(ctx, cfg.connectTimeout)
+			defer cancel()
+		}
+		if _, err := cn.setUgi(ugiCtx, cfg.ugiUser, cfg.userGroups); err != nil {
 			_ = cn.close()
 			return nil, err
 		}

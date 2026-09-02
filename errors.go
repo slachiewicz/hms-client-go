@@ -56,6 +56,13 @@ func (e *hmsError) Unwrap() []error { return []error{e.sentinel, e.cause} }
 // uses this to build "<op>: <message>"; it is exported so a caller holding
 // only the sentinel error (via errors.Is) can still recover the original
 // server text via errors.As-free code, e.g. hms.Message(err).
+//
+// Message renders in place of err's own text, not alongside it: since
+// hmsError.Error() already is "<op>: " + Message(err), wrapping err with
+// %w and separately appending hms.Message(err) --
+// fmt.Errorf("op failed: %w: %s", err, hms.Message(err)), say -- prints the
+// same server message twice. Call Message(err) where err.Error() would
+// otherwise appear, not in addition to it.
 func Message(err error) string {
 	if err == nil {
 		return ""
