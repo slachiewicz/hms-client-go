@@ -68,24 +68,32 @@ jobs:
       - name: Start metastore container (HTTP mode)
         if: matrix.http
         run: |
-          # The mounted file must be named metastore-site.xml: the image
-          # copies every file under HIVE_CUSTOM_CONF_DIR into the conf
-          # directory verbatim, but the standalone metastore's config
-          # loader only reads metastore-site.xml (and hive-site.xml) by
-          # that exact name -- a differently named file is copied in but
-          # never read, leaving the server in binary mode.
+          # MetastoreConf applies -D system properties for every ConfVar,
+          # and the image passes SERVICE_OPTS into HADOOP_CLIENT_OPTS, so
+          # transport mode is switched without replacing the image's own
+          # config directory (a mounted HIVE_CUSTOM_CONF_DIR displaces the
+          # Derby settings and breaks schema init).
           docker run -d --name hms -p 9083:9083 \
             --env SERVICE_NAME=metastore \
-            --env HIVE_CUSTOM_CONF_DIR=/hive_custom_conf \
-            -v "${{ github.workspace }}/test/docker/conf-http:/hive_custom_conf" \
+            --env SERVICE_OPTS="-Dmetastore.server.thrift.transport.mode=http -Dmetastore.server.thrift.http.path=metastore" \
             "${{ matrix.image }}"
 
-      - name: Wait for metastore port 9083
+      - name: Wait for the metastore to start
         run: |
-          for i in $(seq 1 90); do
-            if (exec 3<>/dev/tcp/127.0.0.1/9083) 2>/dev/null; then
-              echo "metastore is accepting connections on 9083"
+          # Connecting to the published host port is not a readiness check:
+          # docker-proxy accepts on 9083 as soon as the container starts,
+          # long before Derby schema init finishes, and the tests then see
+          # EOF. Every supported Hive version logs this line once the Thrift
+          # server is serving.
+          for i in $(seq 1 120); do
+            if docker logs hms 2>&1 | grep -q "Started the new metaserver"; then
+              echo "metastore is serving (after $((i*2))s)"
               exit 0
+            fi
+            if [ -z "$(docker ps -q -f name=hms)" ]; then
+              echo "metastore container exited" >&2
+              docker logs hms || true
+              exit 1
             fi
             sleep 2
           done
