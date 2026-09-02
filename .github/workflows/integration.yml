@@ -80,14 +80,14 @@ jobs:
 
       - name: Wait for the metastore to start
         run: |
-          # Connecting to the published host port is not a readiness check:
-          # docker-proxy accepts on 9083 as soon as the container starts,
-          # long before Derby schema init finishes, and the tests then see
-          # EOF. Every supported Hive version logs this line once the Thrift
-          # server is serving.
-          for i in $(seq 1 120); do
-            if docker logs hms 2>&1 | grep -q "Started the new metaserver"; then
-              echo "metastore is serving (after $((i*2))s)"
+          # Probe the port from inside the container. Connecting to the
+          # published host port is not a readiness check (docker-proxy
+          # accepts before the JVM listens), and the metastore's INFO log
+          # goes to a file on most images, so neither the host port nor
+          # `docker logs` can be relied on.
+          for i in $(seq 1 150); do
+            if docker exec hms bash -c 'exec 3<>/dev/tcp/127.0.0.1/9083' 2>/dev/null; then
+              echo "metastore is listening inside the container (after $((i*2))s)"
               exit 0
             fi
             if [ -z "$(docker ps -q -f name=hms)" ]; then
