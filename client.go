@@ -690,13 +690,30 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 // forwarded to the server; cascade must be true to drop a non-empty
 // database, or the server returns ErrInvalidOperation. With ifExists true,
 // a missing database is not an error.
+//
+// Hive 3.1's metastore has been observed to raise a bare
+// MetaException(java.lang.NullPointerException) from drop_database when
+// the named database does not exist, instead of the NoSuchObjectException
+// every other supported version raises (and that classify maps to
+// ErrNotFound). When drop_database's error does not already classify as
+// ErrNotFound, DropDatabase follows up with get_database on the same
+// connection; if that reports the database missing, the original error is
+// replaced with that NoSuchObjectException so the ErrNotFound contract
+// above holds on Hive 3.1 too. This extra RPC is paid only on the error
+// path, never on a successful drop.
 func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, cascade, ifExists bool, opts ...CatalogOption) error {
 	return c.call(ctx, "drop_database", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		err = cn.dropDatabase(ctx, qualifyDBName(cat, name), deleteData, cascade)
+		qname := qualifyDBName(cat, name)
+		err = cn.dropDatabase(ctx, qname, deleteData, cascade)
+		if err != nil && classify(err) != ErrNotFound {
+			if _, gerr := cn.getDatabase(ctx, qname); classify(gerr) == ErrNotFound {
+				err = gerr
+			}
+		}
 		if err != nil && ifExists && classify(err) == ErrNotFound {
 			return nil
 		}

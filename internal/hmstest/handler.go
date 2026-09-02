@@ -456,6 +456,16 @@ func (h *handler) DropDatabase(_ context.Context, name string, deleteData, casca
 	defer h.store.mu.Unlock()
 	key := dbKey(catName, db)
 	if _, ok := h.store.Databases[key]; !ok {
+		// A real Hive 3.1.3 metastore NPEs instead of raising
+		// NoSuchObjectException when drop_database targets a database
+		// that does not exist, wrapping the NPE in a bare MetaException;
+		// Hive 2.3 and 4.x both raise NoSuchObjectException as documented.
+		// (*Client).DropDatabase copes with this by following up with
+		// get_database on the same connection when drop_database's error
+		// isn't already ErrNotFound.
+		if h.v == Hive31 {
+			return &hive_metastore.MetaException{Message: "java.lang.NullPointerException"}
+		}
 		return &hive_metastore.NoSuchObjectException{Message: "database " + db + " not found"}
 	}
 	prefix := key + "."

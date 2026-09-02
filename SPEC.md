@@ -275,3 +275,5 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `MetaException` | `hms.ErrMeta` | `errors.Is(err, hms.ErrMeta)` |
 | Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
 | `TApplicationException(UNKNOWN_METHOD)` with no fallback, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |
+
+`DropDatabase` on Hive 3.1 additionally maps a bare `MetaException(java.lang.NullPointerException)` from `drop_database` to `hms.ErrNotFound`, following up with `get_database` on the same connection to confirm the database is actually missing: Hive 3.1's metastore NPEs there instead of raising `NoSuchObjectException` as every other supported version does.

@@ -196,4 +196,43 @@ func TestDropDatabase(t *testing.T) {
 		err := c.DropDatabase(context.Background(), "nope", false, false, false)
 		require.ErrorIs(t, err, hms.ErrNotFound)
 	})
+
+	// Hive 3.1's metastore raises a bare
+	// MetaException(java.lang.NullPointerException) from drop_database on
+	// a missing database instead of NoSuchObjectException (see
+	// internal/hmstest/handler.go's DropDatabase and (*Client).DropDatabase's
+	// doc comment); these two cases prove the client still maps that to
+	// ErrNotFound by following up with get_database.
+	t.Run("hive31 missing database maps drop_database's NPE to not found", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive31)
+		c := mustNew(t, srv.URI())
+
+		err := c.DropDatabase(context.Background(), "nope", false, false, false)
+		require.ErrorIs(t, err, hms.ErrNotFound)
+		assert.Contains(t, srv.Calls(), "get_database")
+	})
+
+	t.Run("hive31 missing database with ifExists true is nil", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive31)
+		c := mustNew(t, srv.URI())
+
+		err := c.DropDatabase(context.Background(), "nope", false, false, true)
+		require.NoError(t, err)
+		assert.Contains(t, srv.Calls(), "get_database")
+	})
+
+	// The extra get_database RPC is paid only on the error path: a
+	// successful drop never triggers it.
+	t.Run("hive31 successful drop does not call get_database", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive31)
+		c := mustNew(t, srv.URI())
+		ctx := context.Background()
+
+		require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "db"}))
+		require.NoError(t, c.DropDatabase(ctx, "db", false, false, false))
+		assert.NotContains(t, srv.Calls(), "get_database")
+	})
 }
