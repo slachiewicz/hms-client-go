@@ -78,6 +78,31 @@ func TestNewAlterPartitionsRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
 	assert.Equal(t, int64(-1), got.WriteId)
 }
 
+// TestNewDropPartitionsRequest_SetsFieldsAndTurnsOffNeedResult covers the
+// fix for partition.go's DropPartitionsByNames: every field it sets has an
+// exported equivalent, so unlike newPartitionsRequest/
+// newAlterPartitionsRequest there is no IDL default merely "kept" here --
+// NeedResult_ is instead deliberately overwritten away from
+// NewDropPartitionsRequest()'s own default (true), since
+// DropPartitionsByNames never needs the dropped partitions echoed back.
+func TestNewDropPartitionsRequest_SetsFieldsAndTurnsOffNeedResult(t *testing.T) {
+	t.Parallel()
+	req := newDropPartitionsRequest("db", "tbl", nil, []string{"dt=1"}, true, false)
+
+	got := hive_metastore.NewDropPartitionsRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, "db", got.DbName)
+	assert.Equal(t, "tbl", got.TblName)
+	require.NotNil(t, got.Parts)
+	assert.Equal(t, []string{"dt=1"}, got.Parts.Names)
+	assert.Empty(t, got.Parts.Exprs)
+	require.NotNil(t, got.DeleteData)
+	assert.True(t, *got.DeleteData)
+	assert.False(t, got.IfExists)
+	assert.False(t, got.NeedResult_, "DropPartitionsByNames never needs the dropped partitions echoed back")
+}
+
 // TestTableToThrift_KeepsIDLDefaultsOverWire is the wire-level counterpart
 // to TestTableToThrift_DefaultsOwnerTypeAndWriteId in
 // convert_internal_test.go: it proves the defaults tableToThrift sets

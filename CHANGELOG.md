@@ -6,7 +6,14 @@ a release, so everything below is unreleased.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `DropPartitionsByNames` and `DropPartitions` (by partition values), both wrapping the batched
+  `drop_partitions_req` RPC, which carries no legacy-RPC fallback: it is declared in the Hive
+  2.3.9 and 3.1.3 IDL as well as 4.2.1's (SPEC §2.1, §2.3 Rule 2, §5.5).
+- `PartitionName`, building a Hive-style partition name from a table's partition keys and one
+  partition's values, following Hive's own `Warehouse.makePartName`/`FileUtils.escapePathName`
+  escaping and lowercasing rules exactly (SPEC §5.5).
 
 ## [0.1.0] - 2026-09-02
 

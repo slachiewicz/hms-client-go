@@ -347,3 +347,108 @@ func (c *Client) DropPartition(ctx context.Context, dbName, tableName string, pa
 		return err
 	})
 }
+
+// newDropPartitionsRequest builds a DropPartitionsRequest from
+// hive_metastore.NewDropPartitionsRequest() rather than a bare struct
+// literal, so this call's own explicit fields (Parts, DeleteData, IfExists,
+// NeedResult_, CatName) are set on top of the constructor's IDL defaults --
+// there is no field here without an exported equivalent, unlike
+// newPartitionsRequest's ID, so nothing is merely "kept" from the
+// constructor rather than overwritten. NeedResult_ is turned off (the
+// constructor's own default is true): DropPartitionsByNames never reports
+// which partitions were dropped, so there is nothing for the server to
+// serialize and return. req.Parts always takes RequestPartsSpec's Names
+// arm, never Exprs: Exprs carries Hive's own partition-pruning expression
+// bytes (DropPartitionsExpr.Expr), produced by Hive's SQL planner, and this
+// package has no such expression builder or use for one.
+func newDropPartitionsRequest(dbName, tableName string, cat *string, names []string, deleteData, ifExists bool) *hive_metastore.DropPartitionsRequest {
+	req := hive_metastore.NewDropPartitionsRequest()
+	req.DbName = dbName
+	req.TblName = tableName
+	req.Parts = &hive_metastore.RequestPartsSpec{Names: names}
+	req.DeleteData = &deleteData
+	req.IfExists = ifExists
+	req.NeedResult_ = false
+	req.CatName = cat
+	return req
+}
+
+// DropPartitionsByNames removes the partitions of the table named
+// tableName in database dbName whose partition name (as returned by
+// GetPartitionNames or GetPartitionsByNames, e.g. "dt=2024-01-01", or built
+// client-side by PartitionName) is in names. deleteData is forwarded to
+// the server. With ifExists true, a name that does not match an existing
+// partition is not an error; with ifExists false, the first such name
+// aborts the request it was sent in (SPEC §2.3), leaving any partition
+// already dropped by an earlier batch dropped (see the batching paragraph
+// below) -- drop_partitions_req itself decides where within one request it
+// stops, this package does not re-order or retry around a partial failure.
+//
+// Requests are batched to at most the client's partition batch size (see
+// WithPartitionBatchSize; default 1000) names each, the same knob
+// AddPartitions and AlterPartitions use (SPEC §2.3 Rule 5); batches are
+// sent sequentially, so a failure on a later batch leaves the earlier
+// batches already committed on the server.
+//
+// drop_partitions_req is declared in the Hive 2.3.9 and 3.1.3 IDL as well
+// as the 4.2.1 IDL this client is generated from (SPEC §2.1) -- unlike
+// alter_partitions_req/get_partitions_req and their siblings, it is not a
+// Hive-4-only addition -- so it carries no legacy-RPC fallback (SPEC §2.3
+// Rule 2).
+func (c *Client) DropPartitionsByNames(ctx context.Context, dbName, tableName string, names []string, deleteData, ifExists bool, opts ...CatalogOption) error {
+	return c.call(ctx, "drop_partitions_req", func(ctx context.Context, cn *conn) error {
+		cat, err := c.resolveCat(ctx, cn, opts)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < len(names); i += c.cfg.partitionBatchSize {
+			end := i + c.cfg.partitionBatchSize
+			if end > len(names) {
+				end = len(names)
+			}
+			chunk := names[i:end]
+			req := newDropPartitionsRequest(dbName, tableName, cat, chunk, deleteData, ifExists)
+			if _, err := cn.dropPartitionsReq(ctx, req); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DropPartitions removes the partitions of the table named tableName in
+// database dbName identified by partVals, each in partition-key order (the
+// same shape DropPartition's own partVals takes, one entry per partition
+// instead of one partition per call). deleteData and ifExists behave
+// exactly as DropPartitionsByNames describes.
+//
+// DropPartitions first calls GetTable to learn the table's partition keys,
+// then builds each partition's name with PartitionName (Hive's own
+// Warehouse.makePartName rules, including its escaping and lowercased
+// keys) before delegating to DropPartitionsByNames -- names, not values,
+// because DropPartitionsRequest's parts field is a RequestPartsSpec, a
+// union of a name list and Hive's own partition-pruning expression bytes
+// (see newDropPartitionsRequest); there is no arm that takes ordered
+// values the way DropPartition's own legacy RPC (drop_partition) does. A
+// caller that already has partition names (from GetPartitionNames or
+// GetPartitionsByNames) should call DropPartitionsByNames directly rather
+// than pay for this extra GetTable round trip.
+func (c *Client) DropPartitions(ctx context.Context, dbName, tableName string, partVals [][]string, deleteData, ifExists bool, opts ...CatalogOption) error {
+	tbl, err := c.GetTable(ctx, dbName, tableName, opts...)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, len(tbl.PartitionKeys))
+	for i, k := range tbl.PartitionKeys {
+		keys[i] = k.Name
+	}
+	names := make([]string, len(partVals))
+	for i, vals := range partVals {
+		name, err := PartitionName(keys, vals)
+		if err != nil {
+			return wrapAs("drop_partitions_req", ErrInvalidOperation, err)
+		}
+		names[i] = name
+	}
+	return c.DropPartitionsByNames(ctx, dbName, tableName, names, deleteData, ifExists, opts...)
+}

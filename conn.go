@@ -69,6 +69,10 @@ type conn struct {
 	alterPartitions    func(ctx context.Context, dbName, tblName string, parts []*hive_metastore.Partition) error
 	alterPartitionsReq func(ctx context.Context, req *hive_metastore.AlterPartitionsRequest) (*hive_metastore.AlterPartitionsResponse, error)
 	dropPartition      func(ctx context.Context, dbName, tblName string, partVals []string, deleteData bool) (bool, error)
+	// dropPartitionsReq is declared in the Hive 2.3.9, 3.1.3, and 4.2.1
+	// IDLs alike (SPEC §2.1), so unlike alterPartitionsReq/getPartitionsReq
+	// above it carries no legacy fallback of its own (SPEC §2.3 Rule 2).
+	dropPartitionsReq func(ctx context.Context, req *hive_metastore.DropPartitionsRequest) (*hive_metastore.DropPartitionsResult_, error)
 
 	getConfigValue func(ctx context.Context, name, defaultValue string) (string, error)
 	getStatus      func(ctx context.Context) (fb303.FbStatus, error)
@@ -198,6 +202,7 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *
 		alterPartitions:    g.AlterPartitions,
 		alterPartitionsReq: g.AlterPartitionsReq,
 		dropPartition:      g.DropPartition,
+		dropPartitionsReq:  g.DropPartitionsReq,
 
 		getConfigValue: g.GetConfigValue,
 		getStatus:      fb.GetStatus,

@@ -747,3 +747,142 @@ func TestAlterDatabase_MissingIsNotFound(t *testing.T) {
 	err := c.AlterDatabase(context.Background(), "nope", &hms.Database{Name: "nope"})
 	require.ErrorIs(t, err, hms.ErrNotFound)
 }
+
+// TestDropPartitionsByNames covers G9's main path across every emulated
+// version: drop_partitions_req exists on every version's IDL (SPEC §2.1),
+// so it carries no legacy fallback and must appear on the wire on Hive23
+// and Hive31 too, unlike alter_partitions_req/get_partitions_req and their
+// siblings.
+func TestDropPartitionsByNames(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+
+			names := setupPartitionedTable(t, c, ctx)
+
+			require.NoError(t, c.DropPartitionsByNames(ctx, "db", "t", []string{names[0], names[2]}, false, false))
+
+			got, err := c.GetPartitions(ctx, "db", "t", -1)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			assert.Equal(t, []string{"2024-01-02", "us"}, got[0].Values)
+
+			assert.Contains(t, srv.Calls(), "drop_partitions_req")
+
+			args, ok := srv.LastArgs("drop_partitions_req").(*hive_metastore.DropPartitionsRequest)
+			require.True(t, ok)
+			assert.ElementsMatch(t, []string{names[0], names[2]}, args.Parts.Names)
+			assert.Empty(t, args.Parts.Exprs)
+			assert.False(t, args.NeedResult_)
+			require.NotNil(t, args.DeleteData)
+			assert.False(t, *args.DeleteData)
+			assert.False(t, args.IfExists)
+		})
+	}
+}
+
+// TestDropPartitionsByNames_Chunked mirrors TestAddPartitions_Chunked: with
+// a partition batch size of 2, five names are sent as three
+// drop_partitions_req requests.
+func TestDropPartitionsByNames_Chunked(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI(), hms.WithPartitionBatchSize(2))
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName:  "db",
+		TableName:     "t",
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+	}))
+
+	dates := []string{"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"}
+	parts := make([]*hms.Partition, len(dates))
+	names := make([]string, len(dates))
+	for i, d := range dates {
+		parts[i] = &hms.Partition{Values: []string{d}}
+		names[i] = "dt=" + d
+	}
+	require.NoError(t, c.AddPartitions(ctx, "db", "t", parts, false))
+
+	require.NoError(t, c.DropPartitionsByNames(ctx, "db", "t", names, false, false))
+
+	n := 0
+	for _, call := range srv.Calls() {
+		if call == "drop_partitions_req" {
+			n++
+		}
+	}
+	assert.Equal(t, 3, n)
+
+	got, err := c.GetPartitions(ctx, "db", "t", -1)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestDropPartitionsByNames_IfExists(t *testing.T) {
+	t.Parallel()
+	t.Run("ifExists false on missing name is not found", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive40)
+		c := mustNew(t, srv.URI())
+		ctx := context.Background()
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{
+			DatabaseName:  "db",
+			TableName:     "t",
+			PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		}))
+
+		err := c.DropPartitionsByNames(ctx, "db", "t", []string{"dt=2024-01-01"}, false, false)
+		require.ErrorIs(t, err, hms.ErrNotFound)
+	})
+
+	t.Run("ifExists true on missing name is nil", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive40)
+		c := mustNew(t, srv.URI())
+		ctx := context.Background()
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{
+			DatabaseName:  "db",
+			TableName:     "t",
+			PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		}))
+
+		err := c.DropPartitionsByNames(ctx, "db", "t", []string{"dt=2024-01-01"}, false, true)
+		require.NoError(t, err)
+	})
+}
+
+// TestDropPartitions_BuildsNamesFromValues covers DropPartitions'
+// GetTable-then-PartitionName construction (G9): it must send the escaped,
+// lowercased-key names PartitionName computes, not the raw values, as
+// drop_partitions_req's Parts.Names. ifExists=true means a name the fake
+// server's own (unescaped) partitionName helper never produces is silently
+// skipped rather than failing the whole call -- this test only asserts
+// what was sent on the wire, not that the fake server matched it to a
+// partition (see PartitionName's own unit tests, TestPartitionName, for
+// the escaping's correctness).
+func TestDropPartitions_BuildsNamesFromValues(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName:  "db",
+		TableName:     "t",
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+	}))
+
+	err := c.DropPartitions(ctx, "db", "t", [][]string{{"2024-01-01"}, {"a/b"}}, false, true)
+	require.NoError(t, err)
+
+	args, ok := srv.LastArgs("drop_partitions_req").(*hive_metastore.DropPartitionsRequest)
+	require.True(t, ok)
+	assert.Equal(t, []string{"dt=2024-01-01", "dt=a%2Fb"}, args.Parts.Names)
+}

@@ -1020,6 +1020,71 @@ func (h *handler) DropPartition(_ context.Context, dbName, tblName string, partV
 	return true, nil
 }
 
+// DropPartitionsReq removes the partitions of a table named by
+// req.Parts.Names -- the only RequestPartsSpec arm hms-client-go ever
+// sends (see newDropPartitionsRequest in partition.go); Exprs is rejected
+// below rather than implemented, since nothing in this module's tests
+// populates it. Every other field with no exposed equivalent on this
+// package's DropPartitionsByNames/DropPartitions (IgnoreProtection,
+// EnvironmentContext, SkipColumnSchemaForPartition, and NeedResult_ which
+// this package always turns off) is likewise rejected if the caller sent
+// anything but the default, mirroring GetPartitionsReq's treatment of ID
+// and AlterPartitionsReq's treatment of WriteId. With req.IfExists true, a
+// name matching no existing partition is silently skipped, mirroring
+// DropPartition's own ifExists handling; with it false, the first such
+// name is reported as NoSuchObjectException and nothing named after it in
+// Parts.Names is dropped, mirroring drop_partitions_req's own "stop at the
+// first missing name" behavior on a real server.
+func (h *handler) DropPartitionsReq(_ context.Context, req *hive_metastore.DropPartitionsRequest) (*hive_metastore.DropPartitionsResult_, error) {
+	h.rec.record("drop_partitions_req", req)
+	catName, err := cat(h.v, req.CatName)
+	if err != nil {
+		return nil, err
+	}
+	if req.IgnoreProtection != nil {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field IgnoreProtection"}
+	}
+	if req.EnvironmentContext != nil {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field EnvironmentContext"}
+	}
+	if req.SkipColumnSchemaForPartition != nil {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field SkipColumnSchemaForPartition"}
+	}
+	if req.NeedResult_ {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field NeedResult_"}
+	}
+	if req.Parts == nil || len(req.Parts.Exprs) != 0 {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field Parts.Exprs"}
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := tblKey(catName, req.DbName, req.TblName)
+	tbl, ok := h.store.Tables[key]
+	if !ok {
+		return nil, &hive_metastore.NoSuchObjectException{Message: "table " + req.DbName + "." + req.TblName + " not found"}
+	}
+	existing := h.store.Partitions[key]
+	for _, name := range req.Parts.Names {
+		idx := -1
+		for i, p := range existing {
+			if partitionName(tbl, p) == name {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			if req.IfExists {
+				continue
+			}
+			return nil, &hive_metastore.NoSuchObjectException{Message: "partition " + name + " not found"}
+		}
+		existing = append(existing[:idx], existing[idx+1:]...)
+	}
+	h.store.Partitions[key] = existing
+	h.store.recordEvent("DROP_PARTITION", req.DbName, req.TblName)
+	return &hive_metastore.DropPartitionsResult_{}, nil
+}
+
 // GetPartitionsByNames returns the partitions of a table whose computed
 // name (partitionName) is in names.
 func (h *handler) GetPartitionsByNames(_ context.Context, dbName, tblName string, names []string) ([]*hive_metastore.Partition, error) {

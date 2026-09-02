@@ -440,6 +440,57 @@ func TestPartitions_AddGetAlterDrop(t *testing.T) {
 	require.NoError(t, c.DropPartition(ctx, dbName, tableName, altered[0].Values, false, true))
 }
 
+// TestDropPartitions_ByValuesAndByNames covers the 1.0 additions
+// DropPartitions (by partition values, SPEC.md §5.5) and
+// DropPartitionsByNames against a real metastore, on every version:
+// drop_partitions_req is declared in the Hive 2.3.9 and 3.1.3 IDL as well
+// as 4.2.1's, so it carries no version gate. Three partitions are created;
+// two are removed by DropPartitions (values), leaving the third findable
+// by GetPartitionNames; the third is then removed by DropPartitionsByNames
+// (names).
+func TestDropPartitions_ByValuesAndByNames(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	ctx := context.Background()
+
+	dbName := uniqueName("it_droppartdb_")
+	createDB(t, c, ctx, dbName, "")
+
+	const tableName = "dropparted"
+	table := &hms.Table{
+		DatabaseName:  dbName,
+		TableName:     tableName,
+		TableType:     hms.TableTypeManaged,
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		Storage:       textStorage("file:///tmp/"+dbName+"/"+tableName, []*hms.FieldSchema{{Name: "id", Type: "bigint"}}),
+	}
+	require.NoError(t, c.CreateTable(ctx, table))
+
+	values := [][]string{{"2024-01-01"}, {"2024-01-02"}, {"2024-01-03"}}
+	parts := make([]*hms.Partition, len(values))
+	for i, v := range values {
+		parts[i] = &hms.Partition{
+			DatabaseName: dbName,
+			TableName:    tableName,
+			Values:       v,
+			Storage:      textStorage(fmt.Sprintf("file:///tmp/%s/%s/dt=%s", dbName, tableName, v[0]), nil),
+		}
+	}
+	require.NoError(t, c.AddPartitions(ctx, dbName, tableName, parts, false))
+
+	require.NoError(t, c.DropPartitions(ctx, dbName, tableName, values[:2], false, false))
+
+	names, err := c.GetPartitionNames(ctx, dbName, tableName, -1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dt=" + values[2][0]}, names)
+
+	require.NoError(t, c.DropPartitionsByNames(ctx, dbName, tableName, names, false, false))
+
+	names, err = c.GetPartitionNames(ctx, dbName, tableName, -1)
+	require.NoError(t, err)
+	assert.Empty(t, names)
+}
+
 // TestCatalogs covers SPEC.md §5.2 and §2.1's catalog row: on Hive 2.3,
 // GetCatalogs must fail with ErrNotSupported; on 3.1 and 4.x, catalog and
 // database (via InCatalog) round-trip.
