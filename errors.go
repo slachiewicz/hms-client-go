@@ -86,6 +86,8 @@ func classify(err error) error {
 		return ErrMeta
 	case isUnknownMethod(err):
 		return ErrNotSupported
+	case isDesyncError(err):
+		return ErrUnavailable
 	case errors.As(err, &appErr):
 		return ErrMeta
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
@@ -115,4 +117,26 @@ func classify(err error) error {
 func isUnknownMethod(err error) bool {
 	var appErr thrift.TApplicationException
 	return errors.As(err, &appErr) && appErr.TypeId() == thrift.UNKNOWN_METHOD
+}
+
+// isDesyncError reports whether err is a TApplicationException of the
+// frame-desync class: BAD_SEQUENCE_ID, INVALID_MESSAGE_TYPE_EXCEPTION,
+// PROTOCOL_ERROR, or WRONG_METHOD_NAME. Any of these means the shared
+// connection's read/write framing is itself corrupted -- not merely that
+// this one call failed -- so the conn must be discarded and never reused:
+// classify(err) == ErrUnavailable makes do() discard it (see do's doc
+// comment) and, for an idempotent read, retry on a fresh conn, rather than
+// treating the desync as an ordinary server-side MetaException that would
+// leave the same broken conn in the pool for the next caller.
+func isDesyncError(err error) bool {
+	var appErr thrift.TApplicationException
+	if !errors.As(err, &appErr) {
+		return false
+	}
+	switch appErr.TypeId() {
+	case thrift.BAD_SEQUENCE_ID, thrift.INVALID_MESSAGE_TYPE_EXCEPTION, thrift.PROTOCOL_ERROR, thrift.WRONG_METHOD_NAME:
+		return true
+	default:
+		return false
+	}
 }

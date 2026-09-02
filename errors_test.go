@@ -32,6 +32,15 @@ func TestWrapError(t *testing.T) {
 		{"invalid input", &hive_metastore.InvalidInputException{Message: "in"}, hms.ErrInvalidOperation},
 		{"meta", &hive_metastore.MetaException{Message: "boom"}, hms.ErrMeta},
 		{"unknown method", thrift.NewTApplicationException(thrift.UNKNOWN_METHOD, "get_partitions_req"), hms.ErrNotSupported},
+		// The frame-desync class of TApplicationException means the
+		// shared connection's framing is corrupted, not merely that this
+		// one call failed, so it must classify as ErrUnavailable (which
+		// makes do() discard the conn) rather than the generic ErrMeta
+		// every other TApplicationException gets below.
+		{"bad sequence id", thrift.NewTApplicationException(thrift.BAD_SEQUENCE_ID, "x"), hms.ErrUnavailable},
+		{"invalid message type", thrift.NewTApplicationException(thrift.INVALID_MESSAGE_TYPE_EXCEPTION, "x"), hms.ErrUnavailable},
+		{"protocol error", thrift.NewTApplicationException(thrift.PROTOCOL_ERROR, "x"), hms.ErrUnavailable},
+		{"wrong method name", thrift.NewTApplicationException(thrift.WRONG_METHOD_NAME, "x"), hms.ErrUnavailable},
 		{"other app exception", thrift.NewTApplicationException(thrift.INTERNAL_ERROR, "x"), hms.ErrMeta},
 		{"eof", io.EOF, hms.ErrUnavailable},
 		{"econnrefused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, hms.ErrUnavailable},
