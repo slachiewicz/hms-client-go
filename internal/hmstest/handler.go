@@ -5,6 +5,7 @@ package hmstest
 import (
 	"context"
 	"math"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -342,6 +343,41 @@ func (h *handler) GetAllDatabases(_ context.Context) ([]string, error) {
 	return names, nil
 }
 
+// GetDatabases lists database names in one catalog matching a glob
+// pattern. The client calls this (instead of get_all_databases) when a
+// non-default catalog is requested, since get_all_databases has no
+// catalog parameter: pattern carries the same "@<cat>#<glob>" qualifier
+// convention as get_database/drop_database (see splitCatDB / resolveDB),
+// and is rejected on Hive23 for the same reason resolveDB rejects it
+// elsewhere (Hive23 predates catalogs, so the client never emits the
+// qualifier for it). An empty or "*" glob matches every database in the
+// resolved catalog.
+func (h *handler) GetDatabases(_ context.Context, pattern string) ([]string, error) {
+	h.rec.record("get_databases", pattern)
+	catName, glob, err := resolveDB(h.v, pattern)
+	if err != nil {
+		return nil, err
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	prefix := catName + "."
+	var names []string
+	for key, db := range h.store.Databases {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if glob == "" || glob == "*" {
+			names = append(names, db.Name)
+			continue
+		}
+		if ok, _ := path.Match(glob, db.Name); ok {
+			names = append(names, db.Name)
+		}
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
 // GetDatabase returns one database by (possibly catalog-qualified) name.
 func (h *handler) GetDatabase(_ context.Context, name string) (*hive_metastore.Database, error) {
 	h.rec.record("get_database", name)
@@ -366,6 +402,14 @@ func (h *handler) CreateDatabase(_ context.Context, db *hive_metastore.Database)
 	catName, name, err := resolveDB(h.v, db.Name)
 	if err != nil {
 		return err
+	}
+	// Unlike get_database/drop_database, create_database's wire struct
+	// carries a real CatalogName field (set on Hive31/40, see
+	// (*Client).resolveCat); it takes precedence over the "@cat#" prefix
+	// convention db.Name never actually carries here, so a database
+	// created in a non-default catalog is stored under that catalog.
+	if db.CatalogName != nil && *db.CatalogName != "" {
+		catName = *db.CatalogName
 	}
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
