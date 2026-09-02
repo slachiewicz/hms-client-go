@@ -435,18 +435,24 @@ func partitionsFromThrift(ps []*hive_metastore.Partition) []*Partition {
 // tableName parameters); they become the wire DbName/TableName fields
 // unless p itself already names a database or table, which then takes
 // precedence. It returns nil for a nil input.
+//
+// The result is built from hive_metastore.NewPartition() rather than a bare
+// struct literal so the non-pointer "optional with default" WriteId field
+// (which the exported Partition type has no equivalent for) keeps
+// NewPartition's default of -1 instead of falling back to the Go zero
+// value 0, which is a real write id rather than "unassigned" (see
+// tableToThrift's identical treatment of Table.WriteId).
 func partitionToThrift(p *Partition, cat *string, dbName, tableName string) *hive_metastore.Partition {
 	if p == nil {
 		return nil
 	}
-	out := &hive_metastore.Partition{
-		DbName:     dbName,
-		TableName:  tableName,
-		Values:     copyStrings(p.Values),
-		CreateTime: unix32FromTime(p.CreateTime),
-		Parameters: copyStringMap(p.Parameters),
-		CatName:    cat,
-	}
+	out := hive_metastore.NewPartition()
+	out.DbName = dbName
+	out.TableName = tableName
+	out.Values = copyStrings(p.Values)
+	out.CreateTime = unix32FromTime(p.CreateTime)
+	out.Parameters = copyStringMap(p.Parameters)
+	out.CatName = cat
 	if p.DatabaseName != "" {
 		out.DbName = p.DatabaseName
 	}

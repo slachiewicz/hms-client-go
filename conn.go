@@ -152,6 +152,23 @@ func (cn *conn) markLegacy(method string) {
 	cn.fallback.Store(method, true)
 }
 
+// tryReq runs req; on UNKNOWN_METHOD it records the fallback on this conn
+// (keyed by method, the request-variant RPC's wire name, e.g.
+// "get_partitions_req") and runs legacy instead. Subsequent calls on this
+// conn for the same method go straight to legacy without retrying req
+// (SPEC §2.3 Rules 3 and 4).
+func (cn *conn) tryReq(ctx context.Context, method string, req, legacy func(context.Context) error) error {
+	if cn.useLegacy(method) {
+		return legacy(ctx)
+	}
+	err := req(ctx)
+	if isUnknownMethod(err) {
+		cn.markLegacy(method)
+		return legacy(ctx)
+	}
+	return err
+}
+
 // supportsCatalogs reports whether this conn's server understands Hive 3+
 // catalogs, probing get_catalogs at most once per conn (SPEC §2.3 Rule 1).
 // UNKNOWN_METHOD is treated as "no" and cached; any other error propagates

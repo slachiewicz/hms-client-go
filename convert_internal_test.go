@@ -66,3 +66,17 @@ func TestGetTable_PreservesNonDefaultOwnerType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hive_metastore.PrincipalType_ROLE, res.Table.OwnerType)
 }
+
+// TestPartitionToThrift_DefaultsWriteId is partitionToThrift's counterpart
+// to TestTableToThrift_DefaultsOwnerTypeAndWriteId above: it must also
+// build from hive_metastore.NewPartition() rather than a bare struct
+// literal, or the non-pointer "optional with default" WriteId field (no
+// equivalent on the exported Partition type) would be left at the Go zero
+// value 0 instead of NewPartition's default of -1 — writeId=0 is a real
+// write id on the wire, not "unassigned".
+func TestPartitionToThrift_DefaultsWriteId(t *testing.T) {
+	t.Parallel()
+	got := partitionToThrift(&Partition{Values: []string{"2024-01-01"}}, nil, "d", "t")
+	require.NotNil(t, got)
+	assert.Equal(t, int64(-1), got.WriteId)
+}
