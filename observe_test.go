@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,7 +126,12 @@ func TestObserver_PanicRecovered(t *testing.T) {
 
 // TestLogger_FailoverLogsEndpointMarkedFailed covers SPEC §5.10: WithLogger
 // logs a failover transition (MarkFailed) at slog.LevelInfo, reusing the
-// same failover scenario as TestObserver_Failover_OnePerAttempt.
+// same failover scenario as TestObserver_Failover_OnePerAttempt. Exactly
+// one "endpoint marked failed" line is expected -- the scenario drives
+// exactly one failed attempt against srv1 -- covering fix round 1's
+// Cluster.MarkFailed/MarkHealthy bool: without it, do's success path would
+// also log "endpoint marked healthy" once per successful call, but that is
+// covered separately by TestLogger_RepeatedSuccessLogsNoHealthyTransition.
 func TestLogger_FailoverLogsEndpointMarkedFailed(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40, hmstest.WithFailNext(1))
@@ -139,7 +145,61 @@ func TestLogger_FailoverLogsEndpointMarkedFailed(t *testing.T) {
 	_, err := c.GetAllDatabases(context.Background())
 	require.NoError(t, err)
 
-	assert.Contains(t, buf.String(), "endpoint marked failed")
+	assert.Equal(t, 1, strings.Count(buf.String(), "endpoint marked failed"),
+		"exactly one endpoint failed transition must be logged")
+}
+
+// TestLogger_RepeatedSuccessLogsNoHealthyTransition covers fix round 1's
+// critical finding: markHealthy must log "endpoint marked healthy" only on
+// a real failed-to-healthy transition (Cluster.MarkHealthy's bool), not on
+// every successful call. Five successful calls against an endpoint that
+// was never cooling must produce zero such lines.
+func TestLogger_RepeatedSuccessLogsNoHealthyTransition(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+
+	c := mustNew(t, srv.URI(), hms.WithLogger(logger))
+
+	for i := 0; i < 5; i++ {
+		_, err := c.GetAllDatabases(context.Background())
+		require.NoError(t, err)
+	}
+
+	assert.NotContains(t, buf.String(), "endpoint marked healthy")
+}
+
+// TestLogger_ProbeRecoveryLogsEndpointMarkedHealthyOnce covers fix round 1:
+// once an endpoint's cooldown is cleared by a real recovery -- here, the
+// background probe (probeCooling) confirming a forced-cooling endpoint is
+// actually reachable -- exactly one "endpoint marked healthy" line is
+// logged for that transition. hms.ClientMarkFailed forces cooldown
+// directly on the cluster (bypassing Client.markFailed, so it logs
+// nothing itself) exactly once, unlike
+// TestHA_RecoveryProbeReenablesCooledEndpoint's (ha_test.go) repeated
+// re-arming: re-arming here would risk the probe recovering and
+// re-cooling the endpoint more than once, logging more than one
+// transition. A single MarkFailed's cooldown ceiling is minBackoff (1s),
+// so a 2s wait comfortably covers the full jittered [0, 1s) window plus
+// at least one 20ms probe tick.
+func TestLogger_ProbeRecoveryLogsEndpointMarkedHealthyOnce(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+
+	c := mustNew(t, srv.URI(), hms.WithLogger(logger), hms.WithProbeIntervalForTest(20*time.Millisecond))
+	hms.ClientMarkFailed(c, 0)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), "endpoint marked healthy")
+	}, 2*time.Second, 20*time.Millisecond, "recovery probe must eventually mark the endpoint healthy again")
+
+	assert.Equal(t, 1, strings.Count(buf.String(), "endpoint marked healthy"),
+		"exactly one endpoint healthy transition must be logged")
 }
 
 // TestWithLogger_NilIsSafe covers SPEC §5.10: passing a nil *slog.Logger to

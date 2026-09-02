@@ -120,9 +120,29 @@ func TestCluster_MarkHealthyOnUnfailedEndpointIsANoop(t *testing.T) {
 	clock := newFakeClock()
 	c := ha.New(1, false, clock.Now)
 
-	c.MarkHealthy(0)
+	assert.False(t, c.MarkHealthy(0), "an already-healthy endpoint is not a transition")
 	idx, ok := c.Pick()
 	require.True(t, ok)
 	assert.Equal(t, 0, idx)
 	assert.Empty(t, c.Cooling())
+}
+
+// TestCluster_MarkFailedAndMarkHealthy_TransitionBool covers the bool
+// MarkFailed/MarkHealthy each return: true only on a real state
+// transition, so a caller logging endpoint health (SPEC §5.10) can log
+// once per actual transition rather than once per call. MarkFailed on an
+// already-cooling endpoint (a repeat failure with no intervening
+// MarkHealthy) still doubles the backoff ceiling -- that behavior is
+// unchanged and already covered by TestCluster_ConsecutiveFailuresDoubleTheCeiling
+// -- but must report no transition.
+func TestCluster_MarkFailedAndMarkHealthy_TransitionBool(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClock()
+	c := ha.New(1, false, clock.Now)
+
+	assert.True(t, c.MarkFailed(0), "first failure of a healthy endpoint is a transition")
+	assert.False(t, c.MarkFailed(0), "second failure while already cooling is not a transition")
+
+	assert.True(t, c.MarkHealthy(0), "recovering a cooling endpoint is a transition")
+	assert.False(t, c.MarkHealthy(0), "marking an already-healthy endpoint healthy again is not a transition")
 }

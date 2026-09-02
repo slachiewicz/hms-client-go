@@ -142,22 +142,35 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// markFailed marks endpoint idx failed on the cluster and logs it at
-// slog.LevelInfo (SPEC §5.10), from every call site that observes a failure
-// worth cooling an endpoint down for: New's initial dial loop and do's own
-// retry loop.
+// markFailed marks endpoint idx failed on the cluster, from every call site
+// that observes a failure worth cooling an endpoint down for: New's initial
+// dial loop and do's own retry loop. It logs at slog.LevelInfo only when
+// this is a real transition -- idx was not already cooling (Cluster.
+// MarkFailed's bool) -- so a burst of failed attempts against an endpoint
+// that is already known down produces one Info line, not one per attempt; a
+// repeat failure while already cooling logs at slog.LevelDebug instead
+// (SPEC §5.10).
 func (c *Client) markFailed(idx int, reason string) {
-	c.cluster.MarkFailed(idx)
-	c.cfg.logger.Info("endpoint marked failed", "endpoint", endpointURI(c.endpoints[idx]), "reason", reason)
+	ep := endpointURI(c.endpoints[idx])
+	if c.cluster.MarkFailed(idx) {
+		c.cfg.logger.Info("endpoint marked failed", "endpoint", ep, "reason", reason)
+	} else {
+		c.cfg.logger.Debug("endpoint still failed", "endpoint", ep, "reason", reason)
+	}
 }
 
-// markHealthy marks endpoint idx healthy on the cluster and logs it at
-// slog.LevelInfo (SPEC §5.10), from every call site that observes an
-// endpoint working again: do's own success path and probeCooling's
-// successful getStatus probe.
+// markHealthy marks endpoint idx healthy on the cluster, from every call
+// site that observes an endpoint working again: do's own success path and
+// probeCooling's successful getStatus probe. It logs at slog.LevelInfo only
+// when this is a real transition -- idx was actually cooling beforehand
+// (Cluster.MarkHealthy's bool) -- so every successful call against an
+// endpoint that was already healthy produces no Info line at all (SPEC
+// §5.10).
 func (c *Client) markHealthy(idx int, reason string) {
-	c.cluster.MarkHealthy(idx)
-	c.cfg.logger.Info("endpoint marked healthy", "endpoint", endpointURI(c.endpoints[idx]), "reason", reason)
+	ep := endpointURI(c.endpoints[idx])
+	if c.cluster.MarkHealthy(idx) {
+		c.cfg.logger.Info("endpoint marked healthy", "endpoint", ep, "reason", reason)
+	}
 }
 
 // observe invokes the configured WithRPCObserver function, if any, with the
