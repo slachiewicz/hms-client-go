@@ -247,7 +247,12 @@ func TestParseHiveVersion(t *testing.T) {
 		{"simple", "4.0.1", hms.HiveVersion{Major: 4, Minor: 0, Patch: 1, Raw: "4.0.1"}, false},
 		{"vendor build", "3.1.3000.7.1.7.0-551", hms.HiveVersion{Major: 3, Minor: 1, Patch: 3000, Raw: "3.1.3000.7.1.7.0-551"}, false},
 		{"garbage", "not-a-version", hms.HiveVersion{}, true},
-		{"too short", "4.0", hms.HiveVersion{}, true},
+		// Every Hive 3.1.x metastore's getVersion answers the schema line
+		// "3.0" rather than a release number (see HiveVersion's doc
+		// comment); ParseHiveVersion must accept the two-component form,
+		// defaulting Patch to 0.
+		{"two component (Hive 3.1's schema line)", "3.0", hms.HiveVersion{Major: 3, Minor: 0, Patch: 0, Raw: "3.0"}, false},
+		{"too short", "4", hms.HiveVersion{}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

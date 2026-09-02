@@ -191,6 +191,13 @@ type Partition struct {
 }
 
 // HiveVersion is a parsed Hive Metastore server version.
+//
+// The fb303 getVersion RPC that ServerVersion prefers does not always
+// report the server's release number: on some releases (observed on every
+// 3.1.x release, which answers "3.0") it instead reports the metastore
+// schema version line. Callers that need the actual release should treat
+// Minor (and Patch) as unreliable there and compare only Major, which the
+// schema line and the release agree on.
 type HiveVersion struct {
 	// Major is the major version component.
 	Major int
@@ -211,23 +218,33 @@ func (v HiveVersion) String() string {
 
 // ParseHiveVersion parses a Hive Metastore version string such as "4.0.1" or
 // "3.1.3000.7.1.7.0-551" (a vendor-patched build), taking the first three
-// dot-separated numeric components as Major, Minor, and Patch.
+// dot-separated numeric components as Major, Minor, and Patch. A
+// two-component string such as "3.0" is also accepted, with Patch defaulted
+// to 0: getVersion reports the metastore schema line rather than the
+// release on some servers (every 3.1.x release answers "3.0"; see
+// HiveVersion's doc comment), and the schema line carries no patch
+// component.
 func ParseHiveVersion(s string) (HiveVersion, error) {
 	raw := s
 	// A vendor build may append a "-<suffix>" after the numeric components
 	// (e.g. "3.1.3000.7.1.7.0-551"); only the numeric prefix is parsed.
 	numeric, _, _ := strings.Cut(s, "-")
 	parts := strings.Split(numeric, ".")
-	if len(parts) < 3 {
-		return HiveVersion{}, fmt.Errorf("hms: invalid Hive version %q: expected at least 3 dot-separated components", s)
+	if len(parts) < 2 {
+		return HiveVersion{}, fmt.Errorf("hms: invalid Hive version %q: expected at least 2 dot-separated components", s)
 	}
-	nums := make([]int, 3)
-	for i := range 3 {
+	want := min(len(parts), 3)
+	nums := make([]int, want)
+	for i := range want {
 		n, err := strconv.Atoi(parts[i])
 		if err != nil {
 			return HiveVersion{}, fmt.Errorf("hms: invalid Hive version %q: %w", s, err)
 		}
 		nums[i] = n
 	}
-	return HiveVersion{Major: nums[0], Minor: nums[1], Patch: nums[2], Raw: raw}, nil
+	v := HiveVersion{Major: nums[0], Minor: nums[1], Raw: raw}
+	if want == 3 {
+		v.Patch = nums[2]
+	}
+	return v, nil
 }
