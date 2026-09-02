@@ -202,6 +202,54 @@ func TestAlterTable_UpdatesParameters(t *testing.T) {
 	assert.Equal(t, "2", got.Parameters["x"])
 }
 
+// TestAlterTable_CatalogPrecedence covers SPEC §5.0's catalog resolution
+// order for AlterTable, the 1.0 fix in decision item 3: before it,
+// AlterTable looked only at its opts ...CatalogOption and ignored
+// newTable.CatalogName entirely.
+func TestAlterTable_CatalogPrecedence(t *testing.T) {
+	t.Parallel()
+
+	t.Run("newTable.CatalogName selects the catalog, InCatalog overrides it", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive40)
+		c := mustNew(t, srv.URI())
+		ctx := context.Background()
+
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{CatalogName: "spark", DatabaseName: "db", TableName: "t"}))
+
+		newTable := &hms.Table{CatalogName: "spark", DatabaseName: "db", TableName: "t", Parameters: map[string]string{"x": "1"}}
+		require.NoError(t, c.AlterTable(ctx, "db", "t", newTable))
+
+		args, ok := srv.LastArgs("alter_table").(hmstest.AlterTableArgs)
+		require.True(t, ok)
+		require.NotNil(t, args.NewTbl.CatName)
+		assert.Equal(t, "spark", *args.NewTbl.CatName)
+
+		// A per-call InCatalog overrides the struct's own CatalogName.
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{DatabaseName: "db2", TableName: "t2"}))
+		newTable2 := &hms.Table{CatalogName: "spark", DatabaseName: "db2", TableName: "t2"}
+		require.NoError(t, c.AlterTable(ctx, "db2", "t2", newTable2, hms.InCatalog("hive")))
+
+		args2, ok := srv.LastArgs("alter_table").(hmstest.AlterTableArgs)
+		require.True(t, ok)
+		require.NotNil(t, args2.NewTbl.CatName)
+		assert.Equal(t, "hive", *args2.NewTbl.CatName)
+	})
+
+	t.Run("struct catalog on Hive23 returns ErrNotSupported without issuing the RPC", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive23)
+		c := mustNew(t, srv.URI())
+		ctx := context.Background()
+
+		newTable := &hms.Table{CatalogName: "spark", DatabaseName: "db", TableName: "t"}
+		err := c.AlterTable(ctx, "db", "t", newTable)
+		require.ErrorIs(t, err, hms.ErrNotSupported)
+
+		assert.NotContains(t, srv.Calls(), "alter_table")
+	})
+}
+
 func TestDropTable(t *testing.T) {
 	t.Parallel()
 

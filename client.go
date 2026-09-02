@@ -420,21 +420,37 @@ func (c *Client) probeCooling(ctx context.Context) {
 	}
 }
 
-// resolveCat resolves the effective catalog for one call: a per-call
-// InCatalog option overrides WithCatalog, which defaults to "hive" (SPEC
-// §5.1). It returns nil when the effective catalog is "hive" and cn's
-// server does not support catalogs, so the caller never writes a catName
-// field on the wire to such a server (SPEC §2.3 Rule 1); it returns
-// ErrNotSupported when a non-default catalog is requested against such a
-// server; otherwise it returns a pointer to the effective catalog name.
-// Any error from the underlying catalog-support probe other than
-// UNKNOWN_METHOD propagates unclassified.
+// resolveCat resolves the effective catalog for one call from opts alone:
+// a per-call InCatalog option overrides WithCatalog, which defaults to
+// "hive" (SPEC §5.1). It is resolveCatFor with an empty structCat, for the
+// majority of calls that take no struct carrying its own CatalogName field.
+// See resolveCatFor for the full precedence order and every other aspect of
+// this behavior.
 func (c *Client) resolveCat(ctx context.Context, cn *conn, opts []CatalogOption) (*string, error) {
+	return c.resolveCatFor(ctx, cn, "", opts)
+}
+
+// resolveCatFor resolves the effective catalog for one call, in precedence
+// order highest first: a per-call InCatalog option (opts), then structCat
+// (a create/alter call's own struct.CatalogName field, e.g.
+// CreateDatabase's db.CatalogName or AlterTable's newTable.CatalogName;
+// empty means the struct did not set one), then WithCatalog, then "hive"
+// (SPEC §5.0). It returns nil when the effective catalog is "hive" and
+// cn's server does not support catalogs, so the caller never writes a
+// catName field on the wire to such a server (SPEC §2.3 Rule 1); it
+// returns ErrNotSupported when a non-default catalog is requested against
+// such a server; otherwise it returns a pointer to the effective catalog
+// name. Any error from the underlying catalog-support probe other than
+// UNKNOWN_METHOD propagates unclassified.
+func (c *Client) resolveCatFor(ctx context.Context, cn *conn, structCat string, opts []CatalogOption) (*string, error) {
 	var co catalogOpts
 	for _, o := range opts {
 		o(&co)
 	}
 	effective := c.cfg.catalog
+	if structCat != "" {
+		effective = structCat
+	}
 	if co.catalog != "" {
 		effective = co.catalog
 	}
@@ -678,11 +694,7 @@ func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOp
 // entirely rather than working around it.
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 	return c.call(ctx, "create_database", func(ctx context.Context, cn *conn) error {
-		var opts []CatalogOption
-		if db.CatalogName != "" {
-			opts = append(opts, InCatalog(db.CatalogName))
-		}
-		cat, err := c.resolveCat(ctx, cn, opts)
+		cat, err := c.resolveCatFor(ctx, cn, db.CatalogName, nil)
 		if err != nil {
 			return err
 		}
