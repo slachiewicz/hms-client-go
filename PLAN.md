@@ -84,7 +84,7 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
   ```
 * The script applies two wire-safe patches to the downloaded IDL before generating, and the patched IDL is what gets committed:
   1. `SkewedInfo.skewedColValueLocationMaps` (`map<list<string>, string>`) is removed. Go has no valid type for a list-keyed map and the generator aborts (THRIFT-2063). See SPEC §1.1 for why removal is safe and retyping is not.
-  2. `WMNullableResourcePlan.isSetQueryParallelism`, `.isSetDefaultPoolPath` and `WMNullablePool.isSetSchedulingPolicy` are renamed with a `Flag` suffix. The Go generator emits an `IsSetX()` accessor for every field, so a field literally named `isSetX` produces a field and a method with the same name and the package does not compile. Only field IDs are serialised, so the rename does not change the wire format.
+  2. `WMNullableResourcePlan.isSetQueryParallelism`, `.isSetDefaultPoolPath` and `WMNullablePool.isSetSchedulingPolicy` are renamed with a `Flag` suffix. The Go generator emits an `IsSetX()` accessor for every field, so a field literally named `isSetX` produces a field and a method with the same name and the package does not compile (THRIFT-6176). Only field IDs are serialised, so the rename does not change the wire format.
 * The generated `*-remote` CLI packages (`package main`) are deleted; they are not part of the library.
 * Both `idl/` and `gen/` are committed so `go get` works without a Thrift compiler and so the diff of a regeneration is reviewable.
 

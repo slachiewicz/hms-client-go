@@ -44,6 +44,7 @@ echo "==> Patching IDL for the Go generator..."
 # WMNullablePool.isSetSchedulingPolicy collide with the IsSetX() accessors the
 # Go generator emits for the sibling fields, so the package does not compile.
 # Renaming a field is wire-safe: only the field ID is serialised.
+# Tracked upstream as THRIFT-6176.
 awk '
   /^[[:space:]]*[0-9]+:.*[[:space:]]isSet[A-Za-z]+;/ {
     sub(/;[[:space:]]*$/, "Flag;")
