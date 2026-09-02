@@ -266,6 +266,9 @@ func TestServer_StopWithNoConnectionsReturnsPromptly(t *testing.T) {
 func TestServer_GetConfigValue(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive31)
+	// Start no longer seeds this key itself (see versionString); seed it
+	// directly to exercise GetConfigValue's plumbing.
+	srv.Store().Config["hive.metastore.version"] = "3.1.3"
 	client := dial(t, srv.Addr())
 
 	v, err := client.GetConfigValue(context.Background(), "hive.metastore.version", "unset")

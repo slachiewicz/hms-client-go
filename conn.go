@@ -71,6 +71,7 @@ type conn struct {
 
 	getConfigValue func(ctx context.Context, name, defaultValue string) (string, error)
 	getStatus      func(ctx context.Context) (fb303.FbStatus, error)
+	getVersion     func(ctx context.Context) (string, error)
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
@@ -135,6 +136,7 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 
 		getConfigValue: g.GetConfigValue,
 		getStatus:      fb.GetStatus,
+		getVersion:     fb.GetVersion,
 	}, nil
 }
 

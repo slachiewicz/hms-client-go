@@ -484,14 +484,30 @@ func (c *Client) GetConfigValue(ctx context.Context, name, defaultValue string) 
 	return out, err
 }
 
-// ServerVersion reports the connected metastore's version, read from the
-// "hive.metastore.version" configuration value, falling back to
-// "metastore.version" (as Hive itself does) when that is empty. It returns
-// an error wrapping ErrNotSupported if the server reports neither.
+// ServerVersion reports the connected metastore's version. It tries the
+// fb303 getVersion RPC first, then falls back to the
+// "hive.metastore.version" configuration value, then to "metastore.version"
+// (as Hive itself does) when getVersion errors or answers empty. It returns
+// an error wrapping ErrNotSupported if the server reports a version from
+// none of the three.
 func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) {
-	v, err := c.GetConfigValue(ctx, "hive.metastore.version", "")
-	if err != nil {
+	var v string
+	err := c.read(ctx, "getVersion", func(ctx context.Context, cn *conn) error {
+		s, err := cn.getVersion(ctx)
+		if err != nil {
+			return err
+		}
+		v = s
+		return nil
+	})
+	if err != nil && !isUnknownMethod(err) {
 		return HiveVersion{}, err
+	}
+	if v == "" {
+		v, err = c.GetConfigValue(ctx, "hive.metastore.version", "")
+		if err != nil {
+			return HiveVersion{}, err
+		}
 	}
 	if v == "" {
 		v, err = c.GetConfigValue(ctx, "metastore.version", "")

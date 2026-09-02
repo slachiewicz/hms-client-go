@@ -22,6 +22,7 @@ func TestNew_ConnectsAndReadsVersion(t *testing.T) {
 	v, err := c.ServerVersion(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, hms.HiveVersion{Major: 4, Minor: 0, Patch: 1, Raw: "4.0.1"}, v)
+	assert.Contains(t, srv.Calls(), "getVersion", "ServerVersion must try the fb303 getVersion RPC")
 }
 
 func TestNew_RefusedEndpoint(t *testing.T) {
@@ -207,24 +208,29 @@ func TestClient_GetConfigValue(t *testing.T) {
 
 func TestServerVersion_Hive23FallsBackToHiveMetastoreVersion(t *testing.T) {
 	t.Parallel()
-	srv := hmstest.Start(t, hmstest.Hive23)
+	// WithoutRPC("getVersion") simulates a server whose fb303 service
+	// lacks getVersion, so ServerVersion must fall back to the
+	// "hive.metastore.version" get_config_value key (Start no longer
+	// seeds either config key itself; see versionString).
+	srv := hmstest.Start(t, hmstest.Hive23, hmstest.WithoutRPC("getVersion"))
+	srv.Store().Config["hive.metastore.version"] = "2.3.9"
 	c := mustNew(t, srv.URI())
 
 	v, err := c.ServerVersion(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, v.Major)
 	assert.Equal(t, 3, v.Minor)
+	assert.NotContains(t, srv.Calls(), "getVersion")
 }
 
 func TestServerVersion_NeitherConfigValueSet(t *testing.T) {
 	t.Parallel()
-	srv := hmstest.Start(t, hmstest.Hive40)
+	// WithoutRPC("getVersion") simulates a server whose fb303 service
+	// lacks getVersion; Start no longer seeds either get_config_value
+	// fallback key itself, so with getVersion also gone, all three
+	// sources ServerVersion tries report nothing.
+	srv := hmstest.Start(t, hmstest.Hive40, hmstest.WithoutRPC("getVersion"))
 	c := mustNew(t, srv.URI())
-
-	// Clear the config values Start seeded, simulating a server that
-	// reports neither.
-	srv.Store().Config["hive.metastore.version"] = ""
-	srv.Store().Config["metastore.version"] = ""
 
 	_, err := c.ServerVersion(context.Background())
 	require.ErrorIs(t, err, hms.ErrNotSupported)

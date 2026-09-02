@@ -260,6 +260,15 @@ func (h *handler) GetStatus(_ context.Context) (fb303.FbStatus, error) {
 	return fb303.FbStatus_ALIVE, nil
 }
 
+// GetVersion reports the emulated Hive Metastore version string (e.g.
+// "4.0.1"), the same value Start seeds under versionString. It is the
+// fb303 RPC (*Client).ServerVersion tries first, ahead of the
+// "hive.metastore.version"/"metastore.version" get_config_value fallback.
+func (h *handler) GetVersion(_ context.Context) (string, error) {
+	h.rec.record("getVersion", nil)
+	return versionString(h.v), nil
+}
+
 // GetConfigValue returns the stored config value for name, or defaultValue
 // when unset.
 func (h *handler) GetConfigValue(_ context.Context, name, defaultValue string) (string, error) {

@@ -72,8 +72,11 @@ func removedRPCs(v Version) []string {
 	}
 }
 
-// versionString is the "hive.metastore.version" config value Start seeds
-// for the emulated version.
+// versionString is the version string the emulated version reports from
+// the fb303 getVersion RPC (see handler.GetVersion). Start no longer seeds
+// this under "hive.metastore.version"/"metastore.version": a test wanting
+// the get_config_value fallback path must seed those keys itself (see
+// TestServerVersion_NeitherConfigValueSet in client_test.go).
 func versionString(v Version) string {
 	switch v {
 	case Hive23:
@@ -118,7 +121,6 @@ func Start(t testing.TB, v Version, opts ...Option) *Server {
 	}
 
 	store := NewStore()
-	store.Config["hive.metastore.version"] = versionString(v)
 	rec := &recorder{}
 
 	proc := hive_metastore.NewThriftHiveMetastoreProcessor(&handler{v: v, store: store, rec: rec})
