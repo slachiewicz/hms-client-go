@@ -2,6 +2,10 @@ package hms_test
 
 import (
 	"context"
+	"crypto/tls"
+	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -157,6 +161,29 @@ func TestNew_MaxRetriesClamped(t *testing.T) {
 	}
 }
 
+// TestNew_ConnectTimeoutDefaultsToTimeout covers config.clamp's default for
+// WithConnectTimeout (SPEC §5.1): left unset (or set to 0), it resolves to
+// WithTimeout's value rather than staying 0 (which would mean "no dial-side
+// timeout" -- a silent behavior change for callers who only ever tuned
+// WithTimeout).
+func TestNew_ConnectTimeoutDefaultsToTimeout(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+
+	c := mustNew(t, srv.URI(), hms.WithTimeout(7*time.Second))
+	assert.Equal(t, 7*time.Second, hms.ClientConnectTimeout(c))
+}
+
+// TestNew_ConnectTimeoutExplicit covers WithConnectTimeout overriding the
+// WithTimeout-derived default.
+func TestNew_ConnectTimeoutExplicit(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+
+	c := mustNew(t, srv.URI(), hms.WithTimeout(7*time.Second), hms.WithConnectTimeout(3*time.Second))
+	assert.Equal(t, 3*time.Second, hms.ClientConnectTimeout(c))
+}
+
 // TestClient_ContextExpiredMidRPCDiscardsConn covers the fix for do()
 // releasing a conn whose fn failed only because the caller's own ctx was
 // already past its deadline: fn's error classifies as ErrUnavailable (via
@@ -194,6 +221,90 @@ func TestClient_ContextExpiredMidRPCDiscardsConn(t *testing.T) {
 	_, err = c.GetAllDatabases(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), hms.ClientLiveConns(c, 0))
+}
+
+// TestNew_SetUgi_FirstCallOnConnection covers SPEC §3.1: over binary NOSASL,
+// a configured WithUser (and WithUserGroups) makes newConn issue set_ugi
+// once a connection dials, before any caller-initiated RPC on it.
+func TestNew_SetUgi_FirstCallOnConnection(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	mustNew(t, srv.URI(), hms.WithUser("alice"), hms.WithUserGroups("eng"))
+
+	// New's own eager dial is the only thing that has run on this
+	// connection so far, so set_ugi must be both present and first.
+	calls := srv.Calls()
+	require.NotEmpty(t, calls)
+	assert.Equal(t, "set_ugi", calls[0])
+	assert.Equal(t, hmstest.SetUgiArgs{User: "alice", Groups: []string{"eng"}}, srv.LastArgs("set_ugi"))
+}
+
+// TestNew_SetUgi_OnePerConnection covers the fix's per-conn scope: each
+// newly dialed connection issues its own set_ugi, not just the first one in
+// the pool. WithPoolSize(2) lets a second conn dial without waiting for the
+// first (already on loan) to be released, so two sequential acquires
+// deterministically produce two dials and thus two set_ugi calls, without
+// needing an actual goroutine race to force it.
+func TestNew_SetUgi_OnePerConnection(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c, err := hms.New(context.Background(), srv.URI(), hms.WithUser("alice"), hms.WithPoolSize(2))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	cn0, err := hms.ClientAcquire(c, context.Background(), 0)
+	require.NoError(t, err)
+	cn1, err := hms.ClientAcquire(c, context.Background(), 0)
+	require.NoError(t, err)
+	hms.ClientRelease(c, 0, cn0)
+	hms.ClientRelease(c, 0, cn1)
+
+	count := 0
+	for _, m := range srv.Calls() {
+		if m == "set_ugi" {
+			count++
+		}
+	}
+	assert.Equal(t, 2, count, "each of the pool's two dialed connections must issue its own set_ugi")
+}
+
+// TestNew_SetUgi_NotCalledWithoutUser covers the fix's default behavior:
+// with no WithUser configured, newConn never issues set_ugi.
+func TestNew_SetUgi_NotCalledWithoutUser(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+
+	_, err := c.GetAllDatabases(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, srv.Calls(), "set_ugi")
+}
+
+// TestConfigWantsSetUgi covers config.wantsSetUgi's gating (SPEC §3.1):
+// set_ugi is wanted only with a configured WithUser and no WithPlainAuth.
+// This is exercised directly, via export_test.go's ConfigWantsSetUgi,
+// rather than through a live New() call: hmstest's fake server does not
+// implement the SASL PLAIN handshake (see internal/transport/sasl.go), so
+// WithPlainAuth against it fails at dial, before ever reaching the point
+// this gate lives at -- that would prove nothing about the gate itself.
+func TestConfigWantsSetUgi(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts []hms.Option
+		want bool
+	}{
+		{"WithUser alone wants set_ugi", []hms.Option{hms.WithUser("alice")}, true},
+		{"no WithUser does not want set_ugi", nil, false},
+		{"WithPlainAuth suppresses set_ugi even with WithUser", []hms.Option{hms.WithUser("alice"), hms.WithPlainAuth("bob", "pw")}, false},
+		{"WithPlainAuth alone does not want set_ugi", []hms.Option{hms.WithPlainAuth("bob", "pw")}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, hms.ConfigWantsSetUgi(tt.opts...))
+		})
+	}
 }
 
 func TestClient_GetConfigValue(t *testing.T) {
@@ -303,4 +414,122 @@ func TestHiveVersion_String(t *testing.T) {
 	v, err := hms.ParseHiveVersion("4.0.1")
 	require.NoError(t, err)
 	assert.Equal(t, "4.0.1", v.String())
+}
+
+// TestNew_MisconfiguredAuth covers the caller mistakes that must not be
+// mistaken for an outage: New validates the binary transport's SASL
+// configuration before it dials, so each of these is ErrInvalidOperation
+// rather than the ErrUnavailable every dial failure classifies as. The
+// endpoint is never contacted, which is also why an unroutable address is
+// safe to name here.
+func TestNew_MisconfiguredAuth(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	krb5Conf := filepath.Join(dir, "krb5.conf")
+	require.NoError(t, os.WriteFile(krb5Conf, []byte(
+		"[libdefaults]\n default_realm = EXAMPLE.COM\n\n[realms]\n EXAMPLE.COM = {\n  kdc = 127.0.0.1:88\n }\n"), 0o600))
+
+	tests := []struct {
+		name string
+		opts []hms.Option
+	}{
+		{
+			name: "two SASL mechanisms at once",
+			opts: []hms.Option{
+				hms.WithPlainAuth("alice", "s3cret"),
+				hms.WithKerberos("alice@EXAMPLE.COM", filepath.Join(dir, "alice.keytab")),
+			},
+		},
+		{
+			name: "keytab that is not there",
+			opts: []hms.Option{
+				hms.WithKrb5Config(krb5Conf),
+				hms.WithKerberos("alice@EXAMPLE.COM", filepath.Join(dir, "absent.keytab")),
+			},
+		},
+		{
+			name: "credential cache that is not there",
+			opts: []hms.Option{
+				hms.WithKrb5Config(krb5Conf),
+				hms.WithKerberos("alice@EXAMPLE.COM", filepath.Join(dir, "absent.ccache")),
+			},
+		},
+		{
+			name: "krb5.conf that is not there",
+			opts: []hms.Option{
+				hms.WithKrb5Config(filepath.Join(dir, "absent.conf")),
+				hms.WithKerberos("alice@EXAMPLE.COM"),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := hms.New(context.Background(), "thrift://127.0.0.1:1", tc.opts...)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+			assert.NotErrorIs(t, err, hms.ErrUnavailable)
+		})
+	}
+}
+
+// TestNew_TLSWithHTTPClient covers the other silent downgrade New must
+// refuse: NewHTTP uses a caller-supplied *http.Client as-is, so WithTLS
+// would never reach the wire for an "https://" endpoint. The combination
+// is only a mistake there -- over "http://" there is no TLS to configure,
+// and over "thrift://" the supplied client is inert -- so those two still
+// construct a Client.
+func TestNew_TLSWithHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		uris    string
+		wantErr bool
+	}{
+		{name: "https rejects the combination", uris: "https://127.0.0.1:1/metastore", wantErr: true},
+		{name: "http has no TLS to ignore", uris: "http://127.0.0.1:1/metastore"},
+		{name: "thrift ignores the http client, not the TLS config", uris: "thrift://127.0.0.1:1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, err := hms.New(context.Background(), tc.uris,
+				hms.WithHTTPClient(&http.Client{}),
+				hms.WithTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+				assert.NotErrorIs(t, err, hms.ErrUnavailable)
+				assert.Contains(t, err.Error(), "WithTLS cannot be combined with WithHTTPClient")
+				return
+			}
+			// Nothing is listening on either address, so New may still
+			// fail; what it must not do is reject the configuration.
+			if err != nil {
+				assert.NotErrorIs(t, err, hms.ErrInvalidOperation)
+				return
+			}
+			_ = c.Close()
+		})
+	}
+}
+
+// TestNew_KerberosIgnoredOverHTTP is the other side of
+// TestNew_MisconfiguredAuth: WithKerberos has no effect over the HTTP
+// transport, so credentials that cannot be read there are inert rather
+// than a caller mistake. Whether New reaches the endpoint at all is beside
+// the point; what it must not do is reject the client as invalid.
+func TestNew_KerberosIgnoredOverHTTP(t *testing.T) {
+	t.Parallel()
+	c, err := hms.New(context.Background(), "http://127.0.0.1:1/metastore",
+		hms.WithKerberos("alice@EXAMPLE.COM", "/nonexistent/alice.keytab"))
+	if err != nil {
+		assert.NotErrorIs(t, err, hms.ErrInvalidOperation)
+		return
+	}
+	_ = c.Close()
 }

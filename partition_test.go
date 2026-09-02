@@ -264,6 +264,62 @@ func TestAlterPartitions(t *testing.T) {
 	}
 }
 
+// TestAddPartitions_DoesNotCarrySnapshot pins two create-path rules at
+// once (SPEC §5.4, §5.5): a Partition read from one table and added to
+// another lands in the table AddPartitions names -- its own
+// DatabaseName/TableName never override the call's arguments -- and it does
+// not carry the source partition's server-assigned fields (WriteId,
+// Privileges) with it, since the round-trip fidelity snapshot is scoped to
+// AlterPartitions.
+func TestAddPartitions_DoesNotCarrySnapshot(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	for _, name := range []string{"a", "b"} {
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{
+			DatabaseName:  "db",
+			TableName:     name,
+			PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		}))
+	}
+
+	// Seeded straight into the store, so the source partition carries the
+	// fields hms.Partition has no field for -- exactly what a real server
+	// would return from GetPartitions.
+	seed := hive_metastore.NewPartition()
+	seed.Values = []string{"2024-01-01"}
+	seed.DbName = "db"
+	seed.TableName = "a"
+	seed.CatName = ptrTo("hive")
+	seed.Parameters = map[string]string{"x": "1"}
+	seed.WriteId = 5
+	seed.Privileges = &hive_metastore.PrincipalPrivilegeSet{
+		UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+			"alice": {{Privilege: "SELECT"}},
+		},
+	}
+	srv.SeedPartitions("hive", "db", "a", []*hive_metastore.Partition{seed})
+
+	fromA, err := c.GetPartitions(ctx, "db", "a", -1)
+	require.NoError(t, err)
+	require.Len(t, fromA, 1)
+	require.NotNil(t, hms.PartitionRaw(fromA[0]), "GetPartitions must snapshot what it read")
+
+	require.NoError(t, c.AddPartitions(ctx, "db", "b", fromA, false))
+
+	req, ok := srv.LastArgs("add_partitions_req").(*hive_metastore.AddPartitionsRequest)
+	require.True(t, ok, "add_partitions_req args have unexpected type %T", srv.LastArgs("add_partitions_req"))
+	require.Len(t, req.Parts, 1)
+	sent := req.Parts[0]
+	assert.Equal(t, "db", sent.DbName)
+	assert.Equal(t, "b", sent.TableName, "the partition must land in the table the call names, not the one it was read from")
+	assert.Equal(t, "1", sent.Parameters["x"], "a modelled field still travels")
+	assert.Equal(t, int64(-1), sent.WriteId, "an added partition's write id is unassigned, not the source's")
+	assert.Nil(t, sent.Privileges, "the source partition's privileges must not define the new one")
+}
+
 func TestDropPartition(t *testing.T) {
 	t.Parallel()
 	t.Run("ifExists false on missing partition is not found", func(t *testing.T) {
@@ -314,4 +370,318 @@ func TestDropPartition(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, got)
 	})
+}
+
+// setupPartitionedTable creates "db"."t", partitioned by "dt" and "region",
+// with three partitions, and returns their partition names in creation
+// order ("dt=2024-01-01/region=eu", ...).
+func setupPartitionedTable(t *testing.T, c *hms.Client, ctx context.Context) []string {
+	t.Helper()
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName: "db",
+		TableName:    "t",
+		PartitionKeys: []*hms.FieldSchema{
+			{Name: "dt", Type: "string"},
+			{Name: "region", Type: "string"},
+		},
+	}))
+	values := [][]string{
+		{"2024-01-01", "eu"},
+		{"2024-01-02", "us"},
+		{"2024-01-03", "eu"},
+	}
+	names := make([]string, len(values))
+	for i, v := range values {
+		require.NoError(t, c.AddPartitions(ctx, "db", "t", []*hms.Partition{{Values: v}}, false))
+		names[i] = "dt=" + v[0] + "/region=" + v[1]
+	}
+	return names
+}
+
+func TestGetPartitionsByNames(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+
+			names := setupPartitionedTable(t, c, ctx)
+
+			got, err := c.GetPartitionsByNames(ctx, "db", "t", []string{names[0], names[2]})
+			require.NoError(t, err)
+			require.Len(t, got, 2)
+			gotValues := [][]string{got[0].Values, got[1].Values}
+			assert.Contains(t, gotValues, []string{"2024-01-01", "eu"})
+			assert.Contains(t, gotValues, []string{"2024-01-03", "eu"})
+
+			// A name the server doesn't recognize is silently skipped,
+			// like GetTables does for an unknown table name.
+			got2, err := c.GetPartitionsByNames(ctx, "db", "t", []string{names[0], "dt=nope/region=nope"})
+			require.NoError(t, err)
+			assert.Len(t, got2, 1)
+
+			calls := srv.Calls()
+			if v == hmstest.Hive40 {
+				assert.Contains(t, calls, "get_partitions_by_names_req")
+				assert.NotContains(t, calls, "get_partitions_by_names")
+			} else {
+				assert.NotContains(t, calls, "get_partitions_by_names_req")
+				assert.Contains(t, calls, "get_partitions_by_names")
+			}
+		})
+	}
+}
+
+// TestGetPartitionsByNames_Chunked mirrors TestAddPartitions_Chunked: with
+// a chunk size of 2, five names are sent as three
+// get_partitions_by_names_req requests, and the returned partitions are
+// the concatenation of every chunk's results.
+func TestGetPartitionsByNames_Chunked(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI(), hms.WithChunkSize(2))
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName:  "db",
+		TableName:     "t",
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+	}))
+	dates := []string{"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"}
+	names := make([]string, len(dates))
+	for i, d := range dates {
+		require.NoError(t, c.AddPartitions(ctx, "db", "t", []*hms.Partition{{Values: []string{d}}}, false))
+		names[i] = "dt=" + d
+	}
+
+	got, err := c.GetPartitionsByNames(ctx, "db", "t", names)
+	require.NoError(t, err)
+	assert.Len(t, got, 5)
+
+	n := 0
+	for _, call := range srv.Calls() {
+		if call == "get_partitions_by_names_req" {
+			n++
+		}
+	}
+	assert.Equal(t, 3, n)
+}
+
+// TestGetPartitionsByNames_FallbackCached mirrors
+// TestGetPartitions_FallbackCached: get_partitions_by_names_req is deleted
+// outright from the fake server's processor map on Hive23/Hive31 (see
+// removedRPCs), so both the discovering first call and the cached second
+// call go straight to the legacy RPC; only the resulting wire call is
+// observable here, not the discovery itself.
+func TestGetPartitionsByNames_FallbackCached(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI(), hms.WithPoolSize(1))
+			ctx := context.Background()
+
+			require.NoError(t, c.CreateTable(ctx, &hms.Table{
+				DatabaseName:  "db",
+				TableName:     "t",
+				PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+			}))
+			require.NoError(t, c.AddPartitions(ctx, "db", "t", []*hms.Partition{{Values: []string{"2024-01-01"}}}, false))
+			names := []string{"dt=2024-01-01"}
+
+			baseline := len(srv.Calls())
+			_, err := c.GetPartitionsByNames(ctx, "db", "t", names)
+			require.NoError(t, err)
+			afterFirst := srv.Calls()[baseline:]
+
+			baseline2 := len(srv.Calls())
+			_, err = c.GetPartitionsByNames(ctx, "db", "t", names)
+			require.NoError(t, err)
+			afterSecond := srv.Calls()[baseline2:]
+
+			if v == hmstest.Hive40 {
+				assert.Equal(t, []string{"get_partitions_by_names_req"}, afterFirst)
+				assert.Equal(t, []string{"get_partitions_by_names_req"}, afterSecond)
+			} else {
+				assert.Equal(t, []string{"get_partitions_by_names"}, afterFirst)
+				assert.Equal(t, []string{"get_partitions_by_names"}, afterSecond)
+			}
+		})
+	}
+}
+
+func TestGetPartitionsByFilter(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+			setupPartitionedTable(t, c, ctx)
+
+			single, err := c.GetPartitionsByFilter(ctx, "db", "t", "dt = '2024-01-01'", -1)
+			require.NoError(t, err)
+			require.Len(t, single, 1)
+			assert.Equal(t, []string{"2024-01-01", "eu"}, single[0].Values)
+
+			multi, err := c.GetPartitionsByFilter(ctx, "db", "t", "region = 'eu' and dt = '2024-01-03'", -1)
+			require.NoError(t, err)
+			require.Len(t, multi, 1)
+			assert.Equal(t, []string{"2024-01-03", "eu"}, multi[0].Values)
+
+			eu, err := c.GetPartitionsByFilter(ctx, "db", "t", "region = 'eu'", -1)
+			require.NoError(t, err)
+			assert.Len(t, eu, 2)
+
+			limited, err := c.GetPartitionsByFilter(ctx, "db", "t", "region = 'eu'", 1)
+			require.NoError(t, err)
+			assert.Len(t, limited, 1)
+
+			assert.Contains(t, srv.Calls(), "get_partitions_by_filter")
+			assert.NotContains(t, srv.Calls(), "get_partitions_by_filter_req")
+		})
+	}
+}
+
+// TestGetPartitionsByFilter_UnsupportedGrammar covers the fake server's
+// documented limitation (internal/hmstest/handler.go parsePartitionFilter):
+// only "key = 'value'" terms joined by "and" are supported, so an OR
+// expression is rejected with a MetaException, classified as ErrMeta.
+func TestGetPartitionsByFilter_UnsupportedGrammar(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+	setupPartitionedTable(t, c, ctx)
+
+	_, err := c.GetPartitionsByFilter(ctx, "db", "t", "dt = '2024-01-01' or region = 'us'", -1)
+	require.ErrorIs(t, err, hms.ErrMeta)
+}
+
+func TestGetPartitionNamesByValues(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+			setupPartitionedTable(t, c, ctx)
+
+			// A fully specified prefix matches exactly one partition.
+			exact, err := c.GetPartitionNamesByValues(ctx, "db", "t", []string{"2024-01-01", "eu"}, -1)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"dt=2024-01-01/region=eu"}, exact)
+
+			// An empty trailing value wildcards that position.
+			byDate, err := c.GetPartitionNamesByValues(ctx, "db", "t", []string{"2024-01-03", ""}, -1)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"dt=2024-01-03/region=eu"}, byDate)
+
+			byRegion, err := c.GetPartitionNamesByValues(ctx, "db", "t", []string{"", "eu"}, -1)
+			require.NoError(t, err)
+			assert.Len(t, byRegion, 2)
+
+			limited, err := c.GetPartitionNamesByValues(ctx, "db", "t", []string{"", "eu"}, 1)
+			require.NoError(t, err)
+			assert.Len(t, limited, 1)
+
+			calls := srv.Calls()
+			if v == hmstest.Hive40 {
+				assert.Contains(t, calls, "get_partition_names_ps_req")
+				assert.NotContains(t, calls, "get_partition_names_ps")
+			} else {
+				assert.NotContains(t, calls, "get_partition_names_ps_req")
+				assert.Contains(t, calls, "get_partition_names_ps")
+			}
+		})
+	}
+}
+
+// TestGetPartitionNamesByValues_FallbackCached mirrors
+// TestGetPartitionsByNames_FallbackCached for get_partition_names_ps_req.
+func TestGetPartitionNamesByValues_FallbackCached(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI(), hms.WithPoolSize(1))
+			ctx := context.Background()
+			setupPartitionedTable(t, c, ctx)
+
+			baseline := len(srv.Calls())
+			_, err := c.GetPartitionNamesByValues(ctx, "db", "t", []string{"2024-01-01", "eu"}, -1)
+			require.NoError(t, err)
+			afterFirst := srv.Calls()[baseline:]
+
+			baseline2 := len(srv.Calls())
+			_, err = c.GetPartitionNamesByValues(ctx, "db", "t", []string{"2024-01-01", "eu"}, -1)
+			require.NoError(t, err)
+			afterSecond := srv.Calls()[baseline2:]
+
+			if v == hmstest.Hive40 {
+				assert.Equal(t, []string{"get_partition_names_ps_req"}, afterFirst)
+				assert.Equal(t, []string{"get_partition_names_ps_req"}, afterSecond)
+			} else {
+				assert.Equal(t, []string{"get_partition_names_ps"}, afterFirst)
+				assert.Equal(t, []string{"get_partition_names_ps"}, afterSecond)
+			}
+		})
+	}
+}
+
+func TestAlterDatabase(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+
+			require.NoError(t, c.CreateDatabase(ctx, &hms.Database{
+				Name:       "db",
+				Parameters: map[string]string{"k": "v1"},
+			}))
+
+			altered := &hms.Database{
+				Name:       "db",
+				Parameters: map[string]string{"k": "v2"},
+				OwnerName:  "alice",
+			}
+			require.NoError(t, c.AlterDatabase(ctx, "db", altered))
+
+			got, err := c.GetDatabase(ctx, "db")
+			require.NoError(t, err)
+			assert.Equal(t, "v2", got.Parameters["k"])
+			assert.Equal(t, "alice", got.OwnerName)
+
+			args, ok := srv.LastArgs("alter_database").(hmstest.AlterDatabaseArgs)
+			require.True(t, ok)
+			assert.Equal(t, "v2", args.Db.Parameters["k"])
+			// CreateTime is read-only and never written by AlterDatabase
+			// (see databaseToThrift).
+			assert.Nil(t, args.Db.CreateTime)
+		})
+	}
+}
+
+func TestAlterDatabase_MissingIsNotFound(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+
+	err := c.AlterDatabase(context.Background(), "nope", &hms.Database{Name: "nope"})
+	require.ErrorIs(t, err, hms.ErrNotFound)
 }

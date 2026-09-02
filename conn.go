@@ -2,6 +2,7 @@ package hms
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -72,26 +73,89 @@ type conn struct {
 	getConfigValue func(ctx context.Context, name, defaultValue string) (string, error)
 	getStatus      func(ctx context.Context) (fb303.FbStatus, error)
 	getVersion     func(ctx context.Context) (string, error)
+
+	// setUgi is bound on every conn (binary and HTTP alike, per AGENTS.md
+	// invariant #5), but newConn only ever calls it for a binary NOSASL
+	// dial with a configured user (config.wantsSetUgi); see newConn.
+	setUgi func(ctx context.Context, userName string, groupNames []string) ([]string, error)
+
+	alterDatabase func(ctx context.Context, dbname string, db *hive_metastore.Database) error
+
+	getPartitionsByNames    func(ctx context.Context, dbName, tblName string, names []string) ([]*hive_metastore.Partition, error)
+	getPartitionsByNamesReq func(ctx context.Context, req *hive_metastore.GetPartitionsByNamesRequest) (*hive_metastore.GetPartitionsByNamesResult_, error)
+	getPartitionsByFilter   func(ctx context.Context, dbName, tblName, filter string, maxParts int16) ([]*hive_metastore.Partition, error)
+	getPartitionNamesPs     func(ctx context.Context, dbName, tblName string, partVals []string, maxParts int16) ([]string, error)
+	getPartitionNamesPsReq  func(ctx context.Context, req *hive_metastore.GetPartitionNamesPsRequest) (*hive_metastore.GetPartitionNamesPsResponse, error)
+
+	getNextNotification           func(ctx context.Context, req *hive_metastore.NotificationEventRequest) (*hive_metastore.NotificationEventResponse, error)
+	getCurrentNotificationEventId func(ctx context.Context) (*hive_metastore.CurrentNotificationEventId, error)
+
+	getTableStatisticsReq func(ctx context.Context, req *hive_metastore.TableStatsRequest) (*hive_metastore.TableStatsResult_, error)
+
+	openTxns  func(ctx context.Context, req *hive_metastore.OpenTxnRequest) (*hive_metastore.OpenTxnsResponse, error)
+	commitTxn func(ctx context.Context, req *hive_metastore.CommitTxnRequest) error
+	abortTxn  func(ctx context.Context, req *hive_metastore.AbortTxnRequest) error
+	heartbeat func(ctx context.Context, req *hive_metastore.HeartbeatRequest) error
+	lock      func(ctx context.Context, req *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error)
+	checkLock func(ctx context.Context, req *hive_metastore.CheckLockRequest) (*hive_metastore.LockResponse, error)
+	unlock    func(ctx context.Context, req *hive_metastore.UnlockRequest) error
+}
+
+// dialHookKey is the context key WithDialHookForTest (export_test.go) uses
+// to attach a test-only hook to a single call's ctx, so it applies only to
+// the dial that call triggers rather than every dial any parallel test
+// might be racing at the same time (a package-level hook variable would not
+// be safe for that, since every test in this package runs with
+// t.Parallel()).
+type dialHookKey struct{}
+
+// dialHookFromContext returns the hook ctx carries via dialHookKey, or nil.
+func dialHookFromContext(ctx context.Context) func() {
+	fn, _ := ctx.Value(dialHookKey{}).(func())
+	return fn
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
 // into cn's func fields. The generated ThriftHiveMetastoreClient (g below)
 // is local to this function and is never stored, per AGENTS.md invariant
-// #5.
-func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, error) {
+// #5. The outcome (success or failure, including a set_ugi failure that
+// closes the conn again below) is logged at slog.LevelDebug against ep's
+// URI (SPEC §5.10).
+func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *conn, outErr error) {
+	uri := endpointURI(ep)
+	defer func() {
+		if outErr != nil {
+			cfg.logger.Debug("dial failed", "endpoint", uri, "err", outErr)
+		} else {
+			cfg.logger.Debug("dial succeeded", "endpoint", uri)
+		}
+	}()
+
+	// Test-only: see dialHookFromContext. Runs before any real dial work,
+	// so a test can hold this call open for as long as it needs to
+	// exercise a race against a concurrent Close, without a real slow (or
+	// fake) server.
+	if fn := dialHookFromContext(ctx); fn != nil {
+		fn()
+	}
+
 	var tc *transport.Conn
 	var err error
 	switch ep.Scheme {
 	case transport.SchemeThrift:
 		tc, err = transport.DialBinary(ctx, ep.Host, transport.BinaryConfig{
-			Timeout:       cfg.timeout,
-			PlainUser:     cfg.plainUser,
-			PlainPassword: cfg.plainPassword,
+			Timeout:        cfg.timeout,
+			ConnectTimeout: cfg.connectTimeout,
+			TLS:            cfg.tlsConfig,
+			PlainUser:      cfg.plainUser,
+			PlainPassword:  cfg.plainPassword,
+			Kerberos:       krbConfig(cfg),
 		})
 	default:
 		tc, err = transport.NewHTTP(ctx, ep.URL, transport.HTTPConfig{
 			Client:      cfg.httpClient,
 			Timeout:     cfg.timeout,
+			TLS:         cfg.tlsConfig,
 			BearerToken: cfg.bearerToken,
 			User:        cfg.user,
 			Headers:     cfg.httpHeaders,
@@ -105,7 +169,7 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 	g := hive_metastore.NewThriftHiveMetastoreClient(tc.Client)
 	fb := fb303.NewFacebookServiceClient(tc.Client)
 
-	return &conn{
+	cn := &conn{
 		close: tc.Close,
 
 		getCatalogs:   g.GetCatalogs,
@@ -137,7 +201,141 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 		getConfigValue: g.GetConfigValue,
 		getStatus:      fb.GetStatus,
 		getVersion:     fb.GetVersion,
-	}, nil
+
+		setUgi: g.SetUgi,
+
+		alterDatabase: g.AlterDatabase,
+
+		getPartitionsByNames:    g.GetPartitionsByNames,
+		getPartitionsByNamesReq: g.GetPartitionsByNamesReq,
+		getPartitionsByFilter:   g.GetPartitionsByFilter,
+		getPartitionNamesPs:     g.GetPartitionNamesPs,
+		getPartitionNamesPsReq:  g.GetPartitionNamesPsReq,
+
+		getNextNotification:           g.GetNextNotification,
+		getCurrentNotificationEventId: g.GetCurrentNotificationEventId,
+
+		getTableStatisticsReq: g.GetTableStatisticsReq,
+
+		openTxns:  g.OpenTxns,
+		commitTxn: g.CommitTxn,
+		abortTxn:  g.AbortTxn,
+		heartbeat: g.Heartbeat,
+		lock:      g.Lock,
+		checkLock: g.CheckLock,
+		unlock:    g.Unlock,
+	}
+
+	// set_ugi establishes the caller's identity over binary NOSASL (SPEC
+	// §3.1): issued once, right here, so it is unconditionally the first
+	// call any caller ever observes on this conn. It is never issued over
+	// HTTP (identity there is the "x-actor-username" header, set per
+	// request) nor when SASL PLAIN auth is configured (WithPlainAuth
+	// already establishes identity during the handshake DialBinary just
+	// completed). A failure closes cn and surfaces as newConn's own error,
+	// so the caller's dial-failure path -- including HA failover -- applies
+	// exactly as it would for the dial itself.
+	if ep.Scheme == transport.SchemeThrift && cfg.wantsSetUgi() {
+		if _, err := cn.setUgi(ctx, cfg.user, cfg.userGroups); err != nil {
+			_ = cn.close()
+			return nil, err
+		}
+	}
+
+	return cn, nil
+}
+
+// krbConfig returns the transport-level Kerberos configuration for cfg, or
+// nil when WithKerberos was never called, in which case DialBinary uses
+// NOSASL or SASL PLAIN as before.
+func krbConfig(cfg *config) *transport.KerberosConfig {
+	if !cfg.kerberos {
+		return nil
+	}
+	return &transport.KerberosConfig{
+		Principal:        cfg.krbPrincipal,
+		Keytab:           cfg.krbKeytab,
+		CCache:           cfg.krbCCache,
+		ServicePrincipal: cfg.krbService,
+		Krb5Conf:         cfg.krbConf,
+		Session:          cfg.krbSession,
+	}
+}
+
+// newKerberosSession loads the caller's Kerberos credentials once for the
+// whole Client (SPEC §3.1), so every connection it dials shares them
+// instead of each dial building -- and leaking the renewal goroutine of --
+// a gokrb5 client of its own. It returns nil when WithKerberos was never
+// called or no endpoint is binary, the same two cases in which validateAuth
+// ignores the Kerberos configuration entirely: a session nothing would
+// authenticate with is not worth loading credentials for. New stores the
+// result on the config every newConn reads, and Client.Close closes it.
+func newKerberosSession(cfg *config, eps []transport.Endpoint) (*transport.KerberosSession, error) {
+	krb := krbConfig(cfg)
+	if krb == nil || !hasBinaryEndpoint(eps) {
+		return nil, nil
+	}
+	return transport.NewKerberosSession(*krb)
+}
+
+// hasBinaryEndpoint reports whether any endpoint uses the binary TCP
+// transport, the only one the SASL mechanisms apply to.
+func hasBinaryEndpoint(eps []transport.Endpoint) bool {
+	for _, ep := range eps {
+		if ep.Scheme == transport.SchemeThrift {
+			return true
+		}
+	}
+	return false
+}
+
+// validateAuth reports a caller mistake in the binary transport's
+// authentication configuration: two SASL mechanisms configured at once, or
+// Kerberos credentials that cannot be read at all (a keytab, credential
+// cache, or krb5.conf that is missing or unreadable). New calls it before
+// dialing so those surface as ErrInvalidOperation, which is what they are,
+// rather than as the ErrUnavailable a failed dial would produce and so
+// look like an outage. DialBinary keeps its own mutual-exclusion check as
+// a backstop for callers that reach the transport directly.
+//
+// It applies only to a binary endpoint: neither option has any effect over
+// HTTP, so an unreadable keytab there is inert rather than a mistake.
+func validateAuth(cfg *config, eps []transport.Endpoint) error {
+	if !hasBinaryEndpoint(eps) {
+		return nil
+	}
+	if cfg.plainUser != "" && cfg.kerberos {
+		return errors.New("hms: WithPlainAuth and WithKerberos are mutually exclusive")
+	}
+	if krb := krbConfig(cfg); krb != nil {
+		return krb.Validate()
+	}
+	return nil
+}
+
+// validateTransport reports a caller mistake in the HTTP transport's TLS
+// configuration: WithTLS and WithHTTPClient both set for an "https://"
+// endpoint. NewHTTP uses a caller-supplied client as-is -- its own
+// Transport's TLS configuration governs -- so WithTLS would be silently
+// ignored there, which is exactly the kind of quiet downgrade (a custom
+// RootCAs or client certificate that never reaches the server) this
+// package must not perform. New calls it before dialing so it surfaces as
+// ErrInvalidOperation.
+//
+// It applies only to an "https://" endpoint: over "http://" there is no
+// TLS for WithTLS to configure, and over "thrift://" WithHTTPClient is
+// inert, so neither combination hides anything.
+func validateTransport(cfg *config, eps []transport.Endpoint) error {
+	if cfg.tlsConfig == nil || cfg.httpClient == nil {
+		return nil
+	}
+	for _, ep := range eps {
+		if ep.Scheme == transport.SchemeHTTPS {
+			return errors.New("hms: WithTLS cannot be combined with WithHTTPClient; " +
+				"set TLSClientConfig on the supplied client's Transport instead")
+		}
+	}
+	return nil
 }
 
 // useLegacy reports whether method previously observed UNKNOWN_METHOD on

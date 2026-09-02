@@ -21,11 +21,18 @@
 //   - HMS_USER (optional): forwarded as hms.WithUser, for a server that
 //     authenticates the caller (e.g. the HTTP-mode job, which runs as
 //     "ci").
+//   - HMS_KRB5_URIS, HMS_KRB5_PRINCIPAL, HMS_KRB5_KEYTAB (optional): a
+//     Kerberized endpoint and the identity to reach it with, for
+//     TestKerberos. No matrix job sets them yet; see envKrb5URIs.
 package integration_test
 
 import (
+	"compress/gzip"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -50,6 +57,26 @@ const envExpectVersion = "HMS_EXPECT_VERSION"
 // envUser is the environment variable naming the principal to authenticate
 // as, forwarded via hms.WithUser. See the package doc comment.
 const envUser = "HMS_USER"
+
+// envTLSURIs names the endpoint(s) of a metastore configured with
+// metastore.use.SSL=true (SPEC §3.1), for TestTLS. None of the matrix
+// images enable it yet (PLAN.md Slice 9 tracks a TLS-enabled leg as a
+// follow-up), so this is always empty today and TestTLS always skips; it
+// exists so that job has a test ready to enable once it lands.
+const envTLSURIs = "HMS_TLS_URIS"
+
+// envKrb5URIs names the endpoint(s) of a Kerberized metastore (SPEC §3.1,
+// KERBEROS), for TestKerberos, and envKrb5Principal the client principal
+// to authenticate as. No matrix image runs a KDC yet (PLAN.md Slice 14
+// tracks a Kerberized leg as a follow-up), so these are always empty today
+// and TestKerberos always skips; the test exists so that job has one ready
+// to enable once the KDC sidecar lands. The credentials come from the
+// ambient KRB5CCNAME credential cache unless envKrb5Keytab names a keytab.
+const (
+	envKrb5URIs      = "HMS_KRB5_URIS"
+	envKrb5Principal = "HMS_KRB5_PRINCIPAL"
+	envKrb5Keytab    = "HMS_KRB5_KEYTAB"
+)
 
 // dialTimeout bounds how long New (and thus every test's setup) waits to
 // connect before failing, distinct from each RPC's own context below.
@@ -137,9 +164,35 @@ func textStorage(location string, cols []*hms.FieldSchema) *hms.StorageDescripto
 	}
 }
 
+// decodeNotificationMessage returns ev.Message as plain text, undoing the
+// gzip+base64 envelope a real metastore wraps it in when ev.MessageFormat
+// is "gzip(json-2.0)" (Hive's GzipJSONMessageEncoder, the default message
+// factory since Hive 4 -- verified by decompiling
+// org.apache.hadoop.hive.metastore.messaging.json.gzip.Serializer from
+// hive-standalone-metastore-server-4.2.1.jar: MessageFactory.getInstance
+// registers it as "metastore.event.message.factory"'s default). SPEC.md
+// §5.7 deliberately exposes Message/MessageFormat as opaque strings rather
+// than decoding them in the client, so this stays test-only rather than
+// becoming exported API; any other MessageFormat (e.g. Hive 2/3's
+// "json-0.2") is returned unchanged.
+func decodeNotificationMessage(t *testing.T, ev hms.NotificationEvent) string {
+	t.Helper()
+	if ev.MessageFormat != "gzip(json-2.0)" {
+		return ev.Message
+	}
+	raw, err := base64.StdEncoding.DecodeString(ev.Message)
+	require.NoError(t, err, "base64-decoding notification message")
+	zr, err := gzip.NewReader(strings.NewReader(string(raw)))
+	require.NoError(t, err, "opening gzip notification message")
+	defer func() { _ = zr.Close() }()
+	decoded, err := io.ReadAll(zr)
+	require.NoError(t, err, "reading gzip notification message")
+	return string(decoded)
+}
+
 // TestDatabases_CRUD covers CreateDatabase/GetDatabase/GetAllDatabases/
-// DropDatabase, ErrAlreadyExists on a duplicate create, and ErrNotFound on
-// a get/drop after the database is gone (SPEC.md §5.3).
+// AlterDatabase/DropDatabase, ErrAlreadyExists on a duplicate create, and
+// ErrNotFound on a get/drop after the database is gone (SPEC.md §5.3).
 func TestDatabases_CRUD(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
@@ -166,6 +219,18 @@ func TestDatabases_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, names, name)
 
+	// AlterDatabase (1.0 addition, SPEC.md §5.3): change a parameter and
+	// the owner, and read them back.
+	altered := *got
+	altered.Parameters = map[string]string{"created_by": "hms-client-go-integration", "updated_by": "hms-client-go-integration"}
+	altered.OwnerName = "hms-client-go-integration"
+	require.NoError(t, c.AlterDatabase(ctx, name, &altered))
+
+	gotAltered, err := c.GetDatabase(ctx, name)
+	require.NoError(t, err)
+	assert.Equal(t, "hms-client-go-integration", gotAltered.Parameters["updated_by"])
+	assert.Equal(t, "hms-client-go-integration", gotAltered.OwnerName)
+
 	require.NoError(t, c.DropDatabase(ctx, name, false, false, false))
 
 	_, err = c.GetDatabase(ctx, name)
@@ -179,10 +244,18 @@ func TestDatabases_CRUD(t *testing.T) {
 // TestTables_FormatBuildersAndLifecycle round-trips NewIcebergTable,
 // NewDeltaTable, and NewHudiTable through CreateTable/GetTable (SPEC.md §6),
 // then exercises AlterTable (a parameter change) and DropTable's ifExists
-// semantics.
+// semantics. It also asserts OwnerType defaults to PrincipalUser on create
+// (SPEC.md §5.4, "1.0 addition"), and, on 4.x only, a smoke test that a
+// further GetTable -> AlterTable round trip that changes nothing leaves the
+// Iceberg table's modelled Parameters, Storage.SerDe, and TableType intact.
+// This package is external to hms (no access to the raw/TableRaw internals
+// package hms's own convert_internal_test.go exercises against the fake
+// server), so it cannot assert survival of a field hms.Table does not
+// model; that guarantee is the white-box tests' job, not this one's.
 func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
+	_, expectVersion := requireHMSEnv(t)
 	ctx := context.Background()
 
 	dbName := uniqueName("it_tbldb_")
@@ -199,6 +272,42 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hms.IcebergSerDe, gotIceberg.Storage.SerDe.SerializationLib)
 	assert.Equal(t, "ICEBERG", gotIceberg.Parameters[hms.ParamTableType])
+	assert.Equal(t, hms.PrincipalUser, gotIceberg.OwnerType, "OwnerType defaults to PrincipalUser on create")
+
+	// GetTableColumnStatistics (SPEC.md §5.8, 1.0 addition, read-only): a
+	// freshly created table has no computed statistics yet on any
+	// supported version, so this asserts the get_table_statistics_req RPC
+	// path itself works everywhere -- an empty result and no error -- not
+	// any particular statistic value.
+	stats, err := c.GetTableColumnStatistics(ctx, dbName, "iceberg_tbl", []string{"id", "name"})
+	require.NoError(t, err)
+	assert.Empty(t, stats)
+
+	if expectVersion == "4.0" || expectVersion == "4.2" {
+		// Smoke test: a GetTable -> AlterTable round trip that changes
+		// nothing must not disturb Parameters, Storage.SerDe, or
+		// TableType. This does not exercise round-trip fidelity itself
+		// (SPEC.md §5.4) -- every field checked here is one hms.Table
+		// already models and would round-trip even without the internal
+		// snapshot; see convert_internal_test.go's
+		// TestTableRoundTrip_PreservesUnmodelledFields and
+		// TestAlterTable_PreservesUnmodelledFields for that.
+		wantParams := make(map[string]string, len(gotIceberg.Parameters))
+		for k, v := range gotIceberg.Parameters {
+			wantParams[k] = v
+		}
+		require.NoError(t, c.AlterTable(ctx, dbName, "iceberg_tbl", gotIceberg))
+		afterFidelity, err := c.GetTable(ctx, dbName, "iceberg_tbl")
+		require.NoError(t, err)
+		// Hive 4 adds its own statistics parameters (numFiles, totalSize,
+		// numFilesErasureCoded) on alter_table, so compare as a subset: every
+		// parameter the client sent must come back unchanged.
+		for k, v := range wantParams {
+			assert.Equal(t, v, afterFidelity.Parameters[k], "parameter %q", k)
+		}
+		assert.Equal(t, gotIceberg.Storage.SerDe, afterFidelity.Storage.SerDe)
+		assert.Equal(t, gotIceberg.TableType, afterFidelity.TableType)
+	}
 
 	delta := hms.NewDeltaTable(dbName, "delta_tbl", "file:///tmp/"+dbName+"/delta_tbl", cols)
 	require.NoError(t, c.CreateTable(ctx, delta))
@@ -281,6 +390,35 @@ func TestPartitions_AddGetAlterDrop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, names, partitionCount)
 
+	// GetPartitionsByNames (1.0 addition, SPEC.md §5.5): look up a subset
+	// of partitions by their computed names.
+	wantNames := names[:5]
+	byNames, err := c.GetPartitionsByNames(ctx, dbName, tableName, wantNames)
+	require.NoError(t, err)
+	assert.Len(t, byNames, 5)
+	gotByNames := make(map[string]bool, len(byNames))
+	for _, p := range byNames {
+		require.Len(t, p.Values, 1)
+		gotByNames["dt="+p.Values[0]] = true
+	}
+	for _, n := range wantNames {
+		assert.True(t, gotByNames[n], "GetPartitionsByNames missing %s", n)
+	}
+
+	// GetPartitionsByFilter (1.0 addition, SPEC.md §5.5): a Hive
+	// partition-filter expression on the "dt" key created above.
+	byFilter, err := c.GetPartitionsByFilter(ctx, dbName, tableName, fmt.Sprintf("dt = '%s'", parts[0].Values[0]), -1)
+	require.NoError(t, err)
+	require.Len(t, byFilter, 1)
+	assert.Equal(t, parts[0].Values, byFilter[0].Values)
+
+	// GetPartitionNamesByValues (1.0 addition, SPEC.md §5.5): "dt" is this
+	// table's only partition key, so a full value is itself the whole
+	// "prefix".
+	byValues, err := c.GetPartitionNamesByValues(ctx, dbName, tableName, []string{parts[1].Values[0]}, -1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dt=" + parts[1].Values[0]}, byValues)
+
 	altered := []*hms.Partition{all[0]}
 	altered[0].Parameters = map[string]string{"altered_by": "hms-client-go-integration"}
 	require.NoError(t, c.AlterPartitions(ctx, dbName, tableName, altered))
@@ -340,6 +478,35 @@ func TestCatalogs(t *testing.T) {
 	dbNames, err := c.GetAllDatabases(ctx, hms.InCatalog(catName))
 	require.NoError(t, err)
 	assert.Contains(t, dbNames, dbName)
+}
+
+// TestIdentity covers SPEC.md §3.1's set_ugi identity over binary NOSASL:
+// dial's own hms.WithUser("ci") (see the dial helper and HMS_USER) must not
+// break CreateDatabase/DropDatabase against any supported server version. A
+// server that fills a created database's owner from the connection's UGI
+// (observed on Hive 4.x) additionally reports OwnerName as HMS_USER; a
+// server that does not (observed on Hive 2.3/3.1, which leave it unset)
+// only has the success of the round trip asserted, since there is nothing
+// else here for those versions to prove set_ugi actually ran.
+func TestIdentity(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	_, expectVersion := requireHMSEnv(t)
+	ctx := context.Background()
+
+	user := os.Getenv(envUser)
+	require.NotEmpty(t, user, "%s must be set for TestIdentity", envUser)
+
+	name := uniqueName("it_identity_db_")
+	createDB(t, c, ctx, name, "")
+
+	got, err := c.GetDatabase(ctx, name)
+	require.NoError(t, err)
+	assert.Equal(t, name, got.Name)
+
+	if expectVersion == "4.0" || expectVersion == "4.2" {
+		assert.Equal(t, user, got.OwnerName, "Hive 4.x fills a created database's owner from the set_ugi identity")
+	}
 }
 
 // TestFallbacks covers SPEC.md §2.3 Rules 3-4: on a server lacking
@@ -404,4 +571,177 @@ func TestServerVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, expectMajor, strconv.Itoa(v.Major))
 	assert.GreaterOrEqual(t, v.Minor, 0)
+}
+
+// TestNotifications covers SPEC.md §5.7's notification polling on every
+// supported version: CurrentNotificationID taken before a CreateTable call
+// must be strictly less than the ID of the CREATE_TABLE event that call
+// produces, and GetNextNotifications(sinceID, 100, nil) must return that
+// event with the created table's name in its Message. The real
+// metastore's message body is JSON carrying (at least) "db" and "table"
+// keys on every supported version; this only checks the table name appears
+// in Message rather than parsing it, since the exact JSON shape is a Hive
+// implementation detail this package does not otherwise depend on.
+func TestNotifications(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	ctx := context.Background()
+
+	dbName := uniqueName("it_notifdb_")
+	createDB(t, c, ctx, dbName, "")
+
+	sinceID, err := c.CurrentNotificationID(ctx)
+	require.NoError(t, err)
+
+	tableName := "it_notif_tbl"
+	table := &hms.Table{
+		DatabaseName: dbName,
+		TableName:    tableName,
+		TableType:    hms.TableTypeManaged,
+		Storage:      textStorage("file:///tmp/"+dbName+"/"+tableName, []*hms.FieldSchema{{Name: "id", Type: "bigint"}}),
+	}
+	require.NoError(t, c.CreateTable(ctx, table))
+
+	events, err := c.GetNextNotifications(ctx, sinceID, 100, nil)
+	require.NoError(t, err)
+
+	// A metastore with no notification listener answers both calls
+	// successfully and reports nothing at all: CurrentNotificationID stays
+	// 0 because NOTIFICATION_SEQUENCE was never advanced, and the event log
+	// is empty. That is a server configuration this test cannot assert
+	// against, not a client defect -- the listener is registered with
+	// metastore.transactional.event.listeners (hive.metastore.transactional
+	// .event.listeners before Hive 3), which the integration workflow sets
+	// when the image has the hcatalog server extensions to load it from.
+	if sinceID == 0 && len(events) == 0 {
+		t.Skip("metastore has no DbNotificationListener configured (metastore.transactional.event.listeners)")
+	}
+
+	var found bool
+	for _, ev := range events {
+		assert.Greater(t, ev.ID, sinceID, "every returned event must be newer than sinceID")
+		if ev.Type == "CREATE_TABLE" && strings.Contains(decodeNotificationMessage(t, ev), tableName) {
+			found = true
+		}
+	}
+	assert.True(t, found, "no CREATE_TABLE event for %s.%s found in %d events after %d", dbName, tableName, len(events), sinceID)
+}
+
+// TestACID covers SPEC.md §5.9's minimal ACID surface against a real
+// metastore: open a transaction, lock SHARED_READ on the test db/table,
+// confirm CheckLock reports the same ACQUIRED state Lock did, and commit;
+// a second transaction exercises the abort path instead. Neither subtest
+// calls Unlock on the transactional lock: a real metastore ties a lock
+// acquired with TxnID set to that transaction's lifecycle and releases it
+// automatically on commit_txn/abort_txn, rejecting an explicit unlock on
+// it with TxnOpenException ("Unlocking locks associated with transaction
+// not permitted") -- verified against a real Hive 4.2.1 server, which
+// returned exactly that once the OperationType fix below (acid.go's
+// lockOperationType) let the lock RPC itself succeed. Unlock's own
+// contract (releasing a lock taken without a transaction) is exercised by
+// TestACID_Heartbeat_TxnOnlyAndLockOnly and friends in acid_test.go
+// against the in-process fake server. open_txns/lock/check_lock/
+// commit_txn/abort_txn all exist on every supported version (Hive 2.3+,
+// SPEC §5.9), so this is not version-gated.
+func TestACID(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	ctx := context.Background()
+
+	dbName := uniqueName("it_aciddb_")
+	createDB(t, c, ctx, dbName, "")
+	const tableName = "it_acid_tbl"
+
+	t.Run("commit", func(t *testing.T) {
+		txnID, err := c.OpenTransaction(ctx, "hms-client-go-integration", "localhost")
+		require.NoError(t, err)
+		assert.Greater(t, txnID, int64(0))
+
+		resp, err := c.Lock(ctx, hms.LockRequest{
+			Components: []hms.LockComponent{
+				{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: dbName, Table: tableName},
+			},
+			TxnID: txnID,
+			User:  "hms-client-go-integration",
+			Host:  "localhost",
+		})
+		require.NoError(t, err)
+		require.Equal(t, hms.LockStateAcquired, resp.State)
+		require.Greater(t, resp.LockID, int64(0))
+
+		checked, err := c.CheckLock(ctx, resp.LockID)
+		require.NoError(t, err)
+		assert.Equal(t, hms.LockStateAcquired, checked.State)
+		assert.Equal(t, resp.LockID, checked.LockID)
+
+		require.NoError(t, c.CommitTransaction(ctx, txnID))
+	})
+
+	t.Run("abort", func(t *testing.T) {
+		txnID, err := c.OpenTransaction(ctx, "hms-client-go-integration", "localhost")
+		require.NoError(t, err)
+
+		resp, err := c.Lock(ctx, hms.LockRequest{
+			Components: []hms.LockComponent{
+				{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: dbName, Table: tableName},
+			},
+			TxnID: txnID,
+			User:  "hms-client-go-integration",
+			Host:  "localhost",
+		})
+		require.NoError(t, err)
+		require.Equal(t, hms.LockStateAcquired, resp.State)
+
+		require.NoError(t, c.AbortTransaction(ctx, txnID))
+
+		err = c.CommitTransaction(ctx, txnID)
+		require.ErrorIs(t, err, hms.ErrInvalidOperation, "committing an aborted transaction must fail")
+	})
+}
+
+// TestTLS connects to a metastore configured with metastore.use.SSL=true
+// via hms.WithTLS (SPEC §3.1) and confirms a basic RPC round-trips over
+// the encrypted socket. It skips unless HMS_TLS_URIS is set; see
+// envTLSURIs's doc comment.
+func TestTLS(t *testing.T) {
+	t.Parallel()
+	uris := os.Getenv(envTLSURIs)
+	if uris == "" {
+		t.Skipf("%s is not set; skipping TLS integration test (see PLAN.md Slice 9)", envTLSURIs)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	c, err := hms.New(ctx, uris, hms.WithTLS(&tls.Config{}))
+	require.NoError(t, err, "connecting to %s over TLS", uris)
+	t.Cleanup(func() { _ = c.Close() })
+
+	_, err = c.ServerVersion(context.Background())
+	require.NoError(t, err)
+}
+
+// TestKerberos connects to a Kerberized metastore with hms.WithKerberos,
+// which authenticates over SASL GSSAPI at QOP auth (SPEC §3.1), and
+// confirms a basic RPC round-trips over the resulting connection. It skips
+// unless HMS_KRB5_URIS is set; see envKrb5URIs's doc comment.
+func TestKerberos(t *testing.T) {
+	t.Parallel()
+	uris := os.Getenv(envKrb5URIs)
+	if uris == "" {
+		t.Skipf("%s is not set; skipping Kerberos integration test (see PLAN.md Slice 14)", envKrb5URIs)
+	}
+
+	opts := []hms.Option{hms.WithKerberos(os.Getenv(envKrb5Principal))}
+	if kt := os.Getenv(envKrb5Keytab); kt != "" {
+		opts = []hms.Option{hms.WithKerberos(os.Getenv(envKrb5Principal), kt)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	c, err := hms.New(ctx, uris, opts...)
+	require.NoError(t, err, "connecting to %s with Kerberos", uris)
+	t.Cleanup(func() { _ = c.Close() })
+
+	_, err = c.ServerVersion(context.Background())
+	require.NoError(t, err)
 }

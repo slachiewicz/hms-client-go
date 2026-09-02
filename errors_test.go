@@ -2,6 +2,8 @@ package hms_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +34,18 @@ func TestWrapError(t *testing.T) {
 		{"invalid object", &hive_metastore.InvalidObjectException{Message: "obj"}, hms.ErrInvalidOperation},
 		{"invalid input", &hive_metastore.InvalidInputException{Message: "in"}, hms.ErrInvalidOperation},
 		{"meta", &hive_metastore.MetaException{Message: "boom"}, hms.ErrMeta},
+		// ACID exceptions (SPEC §5.9/§7): NoSuchTxnException and
+		// NoSuchLockException are "object not found" for a txn/lock id,
+		// the same shape as NoSuchObjectException above;
+		// TxnAbortedException and TxnOpenException are a violated RPC
+		// precondition, the same shape as InvalidOperationException.
+		{"no such transaction", &hive_metastore.NoSuchTxnException{Message: "txn 1"}, hms.ErrNotFound},
+		{"no such lock", &hive_metastore.NoSuchLockException{Message: "lock 1"}, hms.ErrNotFound},
+		{"transaction aborted", &hive_metastore.TxnAbortedException{Message: "txn 1 aborted"}, hms.ErrInvalidOperation},
+		{"transaction open", &hive_metastore.TxnOpenException{Message: "txn 1 open"}, hms.ErrInvalidOperation},
+		// ConfigValSecurityException (SPEC §7): get_config_value on a
+		// key outside the hive/mapred/hdfs namespaces.
+		{"config value security", &hive_metastore.ConfigValSecurityException{Message: "key not allowed"}, hms.ErrInvalidOperation},
 		{"unknown method", thrift.NewTApplicationException(thrift.UNKNOWN_METHOD, "get_partitions_req"), hms.ErrNotSupported},
 		// The frame-desync class of TApplicationException means the
 		// shared connection's framing is corrupted, not merely that this
@@ -48,6 +62,12 @@ func TestWrapError(t *testing.T) {
 		{"deadline", context.DeadlineExceeded, hms.ErrUnavailable},
 		{"canceled", context.Canceled, hms.ErrUnavailable},
 		{"thrift transport exception", thrift.NewTTransportException(thrift.END_OF_FILE, "eof"), hms.ErrUnavailable},
+		// TLS handshake failures (WithTLS, SPEC §3.1/§3.2) implement
+		// neither net.Error nor thrift.TTransportException; SPEC §7
+		// classifies a connection failure as ErrUnavailable, same as a
+		// plain dial error.
+		{"tls certificate verification error", &tls.CertificateVerificationError{Err: errors.New("x509: certificate signed by unknown authority")}, hms.ErrUnavailable},
+		{"x509 hostname error", x509.HostnameError{Certificate: &x509.Certificate{}, Host: "metastore.example.com"}, hms.ErrUnavailable},
 		// classify must pass through an error that already wraps one of
 		// this package's own sentinels (e.g. ErrNotSupported returned
 		// directly by resolveCat's catalog probe) unchanged, rather than
@@ -84,6 +104,59 @@ func TestWrapError_NoDoublePrefix(t *testing.T) {
 	require.Error(t, outer)
 	assert.Same(t, inner, outer)
 	assert.Equal(t, 1, strings.Count(outer.Error(), "create_database: "))
+}
+
+// TestMessage covers G2: Message(err) must return the server-side
+// exception's Message field, not the Go struct dump its own Error() method
+// produces (e.g. "NoSuchObjectException({Message:db x not found})"),
+// whether the exception is the error directly or wrapped further down the
+// chain; a thrift.TApplicationException, which has no Message field, falls
+// back to its own (already clean) Error() text; anything else falls back
+// to its own Error() text too.
+func TestMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"no such object extracts Message field", &hive_metastore.NoSuchObjectException{Message: "db x not found"}, "db x not found"},
+		{"meta exception extracts Message field", &hive_metastore.MetaException{Message: "boom"}, "boom"},
+		{"txn aborted extracts Message field", &hive_metastore.TxnAbortedException{Message: "txn 1 aborted"}, "txn 1 aborted"},
+		{"no such transaction extracts Message field", &hive_metastore.NoSuchTxnException{Message: "no such txn 1"}, "no such txn 1"},
+		{"txn open extracts Message field", &hive_metastore.TxnOpenException{Message: "txn 1 already open"}, "txn 1 already open"},
+		{"no such lock extracts Message field", &hive_metastore.NoSuchLockException{Message: "no such lock 1"}, "no such lock 1"},
+		{"config value security extracts Message field", &hive_metastore.ConfigValSecurityException{Message: "key not allowed"}, "key not allowed"},
+		{
+			"exception wrapped further down the chain still extracts Message field",
+			fmt.Errorf("get_table_req: %w", &hive_metastore.NoSuchObjectException{Message: "db x not found"}),
+			"db x not found",
+		},
+		{
+			"application exception falls back to its own Error text",
+			thrift.NewTApplicationException(thrift.UNKNOWN_METHOD, "get_partitions_req"),
+			thrift.NewTApplicationException(thrift.UNKNOWN_METHOD, "get_partitions_req").Error(),
+		},
+		{"plain error falls back to its own Error text", errors.New("boom"), "boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, hms.Message(tt.in))
+		})
+	}
+}
+
+// TestHmsError_ErrorIsClean covers hmsError.Error() using Message(): the
+// text after "<op>: " must be the exception's own Message field, never the
+// Go struct dump its default Error()/String() would print.
+func TestHmsError_ErrorIsClean(t *testing.T) {
+	t.Parallel()
+	err := hms.WrapError("get_table_req", &hive_metastore.NoSuchObjectException{Message: "db x not found"})
+	require.Error(t, err)
+	assert.Equal(t, "get_table_req: db x not found", err.Error())
+	assert.NotContains(t, err.Error(), "NoSuchObjectException(")
 }
 
 func TestIsUnknownMethod(t *testing.T) {

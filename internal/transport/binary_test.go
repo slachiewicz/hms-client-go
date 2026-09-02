@@ -2,9 +2,16 @@ package transport_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"syscall"
 	"testing"
@@ -270,18 +277,18 @@ func TestDialBinary_SaslHandshakeRespectsContextDeadline(t *testing.T) {
 		"want error wrapping context.DeadlineExceeded or a net timeout, got %v", err)
 }
 
-// TestDialBinary_SaslHandshakeRespectsTimeoutFallback is
+// TestDialBinary_SaslHandshakeRespectsConnectTimeoutFallback is
 // TestDialBinary_SaslHandshakeRespectsContextDeadline's counterpart for
-// BinaryConfig.Timeout, when ctx carries no deadline of its own.
-func TestDialBinary_SaslHandshakeRespectsTimeoutFallback(t *testing.T) {
+// BinaryConfig.ConnectTimeout, when ctx carries no deadline of its own.
+func TestDialBinary_SaslHandshakeRespectsConnectTimeoutFallback(t *testing.T) {
 	t.Parallel()
 	addr := startSilentServer(t)
 
 	start := time.Now()
 	_, err := transport.DialBinary(context.Background(), addr, transport.BinaryConfig{
-		Timeout:       100 * time.Millisecond,
-		PlainUser:     "alice",
-		PlainPassword: "s3cret",
+		ConnectTimeout: 100 * time.Millisecond,
+		PlainUser:      "alice",
+		PlainPassword:  "s3cret",
 	})
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), time.Second)
@@ -290,4 +297,173 @@ func TestDialBinary_SaslHandshakeRespectsTimeoutFallback(t *testing.T) {
 	isTimeout := errors.As(err, &netErr) && netErr.Timeout()
 	assert.True(t, errors.Is(err, context.DeadlineExceeded) || isTimeout,
 		"want error wrapping context.DeadlineExceeded or a net timeout, got %v", err)
+}
+
+// generateTestCert returns a fresh self-signed ECDSA certificate valid for
+// host (as an IP SAN) and the *x509.CertPool a client must trust to accept
+// it, for the TLS tests below.
+func generateTestCert(t *testing.T, host string) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: host},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		IPAddresses:           []net.IP{net.ParseIP(host)},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	require.NoError(t, err)
+
+	leaf, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}, pool
+}
+
+// startFB303TLSServer is startFB303Server's TLS counterpart: it serves the
+// same fb303 handler over a tls.NewListener-wrapped TCP listener, so
+// DialBinary's TLS path is proven against a real TLS handshake and a real
+// fb303 round trip, not a mock. thrift's own thrift.TSSLServerSocket
+// (lib/go/thrift v0.24.0, ssl_server_socket.go) is deliberately not used
+// here: its interrupted field is read by Accept and written by Interrupt
+// with no synchronization, a genuine data race in the vendored library
+// that -race catches the moment a TLS-serving TSimpleServer is Stop()'d --
+// this hand-rolled accept loop sidesteps it by closing the net.Listener
+// directly (a documented-safe way to unblock a concurrent Accept) instead.
+func startFB303TLSServer(t *testing.T, sleep time.Duration, cert tls.Certificate) string {
+	t.Helper()
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ln := tls.NewListener(raw, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})
+	t.Cleanup(func() { _ = ln.Close() })
+
+	proc := fb303.NewFacebookServiceProcessor(&fbHandler{sleep: sleep})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				trans := thrift.NewTBufferedTransport(thrift.NewTSocketFromConnConf(conn, nil), bufferSizeForTest)
+				proto := thrift.NewTBinaryProtocolConf(trans, nil)
+				for {
+					ok, err := proc.Process(context.Background(), proto, proto)
+					if err != nil || !ok {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// bufferSizeForTest mirrors transport.bufferSize (unexported), so the
+// hand-rolled TLS server above buffers the same as DialBinary's real
+// client-side transport.
+const bufferSizeForTest = 8192
+
+// TestDialBinary_TLSRoundTrip proves BinaryConfig.TLS drives a real TLS
+// handshake before the binary protocol layer, end to end through a real
+// fb303 GetStatus call.
+func TestDialBinary_TLSRoundTrip(t *testing.T) {
+	t.Parallel()
+	cert, pool := generateTestCert(t, "127.0.0.1")
+	addr := startFB303TLSServer(t, 0, cert)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout:        5 * time.Second,
+		ConnectTimeout: 5 * time.Second,
+		TLS:            &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"},
+	})
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	status, err := fb303.NewFacebookServiceClient(conn.Client).GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, fb303.FbStatus_ALIVE, status)
+}
+
+// TestDialBinary_TLSServerNameMismatch proves a ServerName that does not
+// match the server's certificate fails the handshake promptly (well before
+// ConnectTimeout would elapse), rather than DialBinary silently accepting
+// an unverified connection or hanging.
+func TestDialBinary_TLSServerNameMismatch(t *testing.T) {
+	t.Parallel()
+	cert, pool := generateTestCert(t, "127.0.0.1")
+	addr := startFB303TLSServer(t, 0, cert)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout:        5 * time.Second,
+		ConnectTimeout: 5 * time.Second,
+		TLS:            &tls.Config{RootCAs: pool, ServerName: "not-the-cert-name.invalid"},
+	})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+}
+
+// TestDialBinary_TLSHandshakeRespectsContextCancellation proves a ctx
+// cancellation during the TLS handshake unblocks DialBinary promptly,
+// against a server that accepts the TCP connection but never sends
+// anything (so the handshake would otherwise block forever reading the
+// server's TLS response).
+func TestDialBinary_TLSHandshakeRespectsContextCancellation(t *testing.T) {
+	t.Parallel()
+	_, pool := generateTestCert(t, "127.0.0.1")
+	addr := startSilentServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout: 5 * time.Second,
+		TLS:     &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"},
+	})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+}
+
+// TestDialBinary_TLSHandshakeRespectsConnectTimeoutFallback proves
+// ConnectTimeout alone (ctx carrying no deadline of its own) bounds a TLS
+// handshake against a server that accepts the connection but never
+// completes it.
+func TestDialBinary_TLSHandshakeRespectsConnectTimeoutFallback(t *testing.T) {
+	t.Parallel()
+	_, pool := generateTestCert(t, "127.0.0.1")
+	addr := startSilentServer(t)
+
+	start := time.Now()
+	_, err := transport.DialBinary(context.Background(), addr, transport.BinaryConfig{
+		Timeout:        5 * time.Second,
+		ConnectTimeout: 100 * time.Millisecond,
+		TLS:            &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"},
+	})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
 }

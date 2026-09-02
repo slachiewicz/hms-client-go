@@ -63,7 +63,7 @@ func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ..
 // GetTables returns the tables named in tableNames that exist in database
 // dbName, in request order, silently skipping any name the server does not
 // know. Requests are chunked to at most the client's chunk size (see
-// withChunkSize; default 1000) names each (SPEC §5.4).
+// WithChunkSize; default 1000) names each (SPEC §5.4).
 func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []string, opts ...CatalogOption) ([]*Table, error) {
 	var out []*Table
 	err := c.read(ctx, "get_table_objects_by_name_req", func(ctx context.Context, cn *conn) error {
@@ -96,14 +96,10 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 }
 
 // CreateTable creates table. A non-empty table.CatalogName overrides the
-// client's default catalog for this call.
+// client's default catalog for this call (SPEC §5.0).
 func (c *Client) CreateTable(ctx context.Context, table *Table) error {
 	return c.call(ctx, "create_table", func(ctx context.Context, cn *conn) error {
-		var opts []CatalogOption
-		if table.CatalogName != "" {
-			opts = append(opts, InCatalog(table.CatalogName))
-		}
-		cat, err := c.resolveCat(ctx, cn, opts)
+		cat, err := c.resolveCatFor(ctx, cn, table.CatalogName, nil)
 		if err != nil {
 			return err
 		}
@@ -113,14 +109,17 @@ func (c *Client) CreateTable(ctx context.Context, table *Table) error {
 
 // AlterTable replaces the table named tableName in database dbName with
 // newTable, which may rename it when newTable.TableName differs from
-// tableName.
+// tableName. A non-empty newTable.CatalogName overrides the client's
+// default catalog for this call, the same way CreateTable's table.
+// CatalogName does; opts' InCatalog, if passed, takes precedence over both
+// (SPEC §5.0).
 func (c *Client) AlterTable(ctx context.Context, dbName, tableName string, newTable *Table, opts ...CatalogOption) error {
 	return c.call(ctx, "alter_table", func(ctx context.Context, cn *conn) error {
-		cat, err := c.resolveCat(ctx, cn, opts)
+		cat, err := c.resolveCatFor(ctx, cn, newTable.CatalogName, opts)
 		if err != nil {
 			return err
 		}
-		return cn.alterTable(ctx, qualifyDBName(cat, dbName), tableName, tableToThrift(newTable, cat))
+		return cn.alterTable(ctx, qualifyDBName(cat, dbName), tableName, tableToThriftFrom(newTable, cat))
 	})
 }
 

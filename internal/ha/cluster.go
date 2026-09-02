@@ -110,10 +110,16 @@ func (c *Cluster) Pick() (idx int, ok bool) {
 // active endpoint advances to the next one, in pick order, that is not
 // currently cooling. If every other endpoint is also cooling, the active
 // endpoint is left unchanged (Pick will report ok=false until one recovers).
-func (c *Cluster) MarkFailed(idx int) {
+//
+// It returns true only when this call is a real failed/healthy transition,
+// i.e. idx was not already cooling: a caller logging a failover event (SPEC
+// §5.10) uses this to log once per actual transition rather than once per
+// failed attempt against an endpoint that is already known down.
+func (c *Cluster) MarkFailed(idx int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
+	transitioned := !c.coolingAt(idx, now)
 
 	ceiling := c.level[idx]
 	if ceiling <= 0 {
@@ -133,21 +139,29 @@ func (c *Cluster) MarkFailed(idx int) {
 		p := (pos + i) % len(c.order)
 		if e := c.order[p]; !c.coolingAt(e, now) {
 			c.pos = p
-			return
+			return transitioned
 		}
 	}
 	// Every endpoint (including idx itself) is cooling; leave pos as is.
+	return transitioned
 }
 
 // MarkHealthy clears idx's cooldown and resets its backoff ceiling, so its
 // next failure starts again at minBackoff. Both the successful-call path in
 // Client.call and the recovery probe call this once they have confirmed an
 // endpoint is usable again.
-func (c *Cluster) MarkHealthy(idx int) {
+//
+// It returns true only when idx was actually cooling beforehand -- a real
+// failed-to-healthy transition -- so a caller logging this (SPEC §5.10)
+// does not log once per successful call on an endpoint that was already
+// healthy.
+func (c *Cluster) MarkHealthy(idx int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	transitioned := c.coolingAt(idx, c.now())
 	c.coolUntil[idx] = time.Time{}
 	c.level[idx] = 0
+	return transitioned
 }
 
 // Cooling returns the indexes of every endpoint currently in cooldown, in

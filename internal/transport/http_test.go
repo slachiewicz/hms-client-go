@@ -2,6 +2,8 @@ package transport_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -234,4 +236,67 @@ func TestNewHTTP_ContextTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for GetStatus to return after context deadline")
 	}
+}
+
+// TestNewHTTP_TLSRoundTrip proves HTTPConfig.TLS's RootCAs is applied to
+// the default client's cloned Transport, so a request to an
+// httptest.NewTLSServer (whose certificate is not in the system trust
+// store) succeeds when it is trusted and only then.
+func TestNewHTTP_TLSRoundTrip(t *testing.T) {
+	t.Parallel()
+	rec := &recordedRequest{}
+	srv := httptest.NewTLSServer(fb303HTTPHandler(rec))
+	t.Cleanup(srv.Close)
+
+	eps, err := transport.ParseEndpoints(srv.URL)
+	require.NoError(t, err)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = callGetStatus(ctx, t, eps[0].URL, transport.HTTPConfig{UserAgent: "test-agent", TLS: &tls.Config{RootCAs: pool}})
+	require.NoError(t, err)
+}
+
+// TestNewHTTP_TLSUntrustedCertFails proves that without the server's
+// certificate in RootCAs, the request fails instead of silently trusting
+// an unverified server.
+func TestNewHTTP_TLSUntrustedCertFails(t *testing.T) {
+	t.Parallel()
+	rec := &recordedRequest{}
+	srv := httptest.NewTLSServer(fb303HTTPHandler(rec))
+	t.Cleanup(srv.Close)
+
+	eps, err := transport.ParseEndpoints(srv.URL)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = callGetStatus(ctx, t, eps[0].URL, transport.HTTPConfig{UserAgent: "test-agent"})
+	require.Error(t, err)
+}
+
+// TestNewHTTP_TLSIgnoredWhenClientSupplied proves a caller-supplied Client
+// wins over HTTPConfig.TLS: TLS is ignored, so the connection uses
+// whatever Transport the caller's Client already carries (here, the
+// httptest server's own, which already trusts its certificate).
+func TestNewHTTP_TLSIgnoredWhenClientSupplied(t *testing.T) {
+	t.Parallel()
+	rec := &recordedRequest{}
+	srv := httptest.NewTLSServer(fb303HTTPHandler(rec))
+	t.Cleanup(srv.Close)
+
+	eps, err := transport.ParseEndpoints(srv.URL)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = callGetStatus(ctx, t, eps[0].URL, transport.HTTPConfig{
+		UserAgent: "test-agent",
+		Client:    srv.Client(),
+		TLS:       &tls.Config{RootCAs: x509.NewCertPool()}, // would reject the server's cert if it were honored
+	})
+	require.NoError(t, err)
 }

@@ -2,6 +2,8 @@ package hms
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -39,8 +41,68 @@ type hmsError struct {
 	cause    error
 }
 
-func (e *hmsError) Error() string   { return e.op + ": " + e.cause.Error() }
+func (e *hmsError) Error() string   { return e.op + ": " + Message(e.cause) }
 func (e *hmsError) Unwrap() []error { return []error{e.sentinel, e.cause} }
+
+// Message returns the clearest available description of err's underlying
+// cause, without the Go struct dump a generated Thrift exception's own
+// Error() produces (e.g. "NoSuchObjectException({Message:db x not
+// found})"): the Message field of a generated exception found anywhere in
+// err's tree (every exception type classify maps to a sentinel -- the five
+// object-level exceptions plus the four ACID ones added for SPEC §5.9's
+// transaction/lock RPCs); failing that, a thrift.TApplicationException's
+// own Error() text (already clean: just its message and type); failing
+// that, err's own Error() text. It returns "" for a nil err. hmsError.Error()
+// uses this to build "<op>: <message>"; it is exported so a caller holding
+// only the sentinel error (via errors.Is) can still recover the original
+// server text via errors.As-free code, e.g. hms.Message(err).
+func Message(err error) string {
+	if err == nil {
+		return ""
+	}
+	var (
+		noSuch     *hive_metastore.NoSuchObjectException
+		exists     *hive_metastore.AlreadyExistsException
+		invOp      *hive_metastore.InvalidOperationException
+		invObj     *hive_metastore.InvalidObjectException
+		invIn      *hive_metastore.InvalidInputException
+		meta       *hive_metastore.MetaException
+		noSuchTxn  *hive_metastore.NoSuchTxnException
+		txnAborted *hive_metastore.TxnAbortedException
+		txnOpen    *hive_metastore.TxnOpenException
+		noSuchLock *hive_metastore.NoSuchLockException
+		cfgSec     *hive_metastore.ConfigValSecurityException
+		appErr     thrift.TApplicationException
+	)
+	switch {
+	case errors.As(err, &noSuch):
+		return noSuch.Message
+	case errors.As(err, &exists):
+		return exists.Message
+	case errors.As(err, &invOp):
+		return invOp.Message
+	case errors.As(err, &invObj):
+		return invObj.Message
+	case errors.As(err, &invIn):
+		return invIn.Message
+	case errors.As(err, &meta):
+		return meta.Message
+	case errors.As(err, &noSuchTxn):
+		return noSuchTxn.Message
+	case errors.As(err, &txnAborted):
+		return txnAborted.Message
+	case errors.As(err, &txnOpen):
+		return txnOpen.Message
+	case errors.As(err, &noSuchLock):
+		return noSuchLock.Message
+	case errors.As(err, &cfgSec):
+		return cfgSec.Message
+	case errors.As(err, &appErr):
+		return appErr.Error()
+	default:
+		return err.Error()
+	}
+}
 
 // wrapError wraps an error with operation context and maps it to a sentinel
 // error. If err already is an *hmsError -- typically because the call site
@@ -77,15 +139,32 @@ func wrapAs(op string, sentinel, err error) error {
 // classify maps Thrift exceptions and transport errors to sentinel error types.
 func classify(err error) error {
 	var (
-		noSuch    *hive_metastore.NoSuchObjectException
-		exists    *hive_metastore.AlreadyExistsException
-		invOp     *hive_metastore.InvalidOperationException
-		invObj    *hive_metastore.InvalidObjectException
-		invIn     *hive_metastore.InvalidInputException
-		meta      *hive_metastore.MetaException
-		appErr    thrift.TApplicationException
-		transport thrift.TTransportException
-		netErr    net.Error
+		noSuch     *hive_metastore.NoSuchObjectException
+		exists     *hive_metastore.AlreadyExistsException
+		invOp      *hive_metastore.InvalidOperationException
+		invObj     *hive_metastore.InvalidObjectException
+		invIn      *hive_metastore.InvalidInputException
+		meta       *hive_metastore.MetaException
+		noSuchTxn  *hive_metastore.NoSuchTxnException
+		txnAborted *hive_metastore.TxnAbortedException
+		txnOpen    *hive_metastore.TxnOpenException
+		noSuchLock *hive_metastore.NoSuchLockException
+		cfgSec     *hive_metastore.ConfigValSecurityException
+		appErr     thrift.TApplicationException
+		transport  thrift.TTransportException
+		netErr     net.Error
+
+		// TLS handshake failures (WithTLS, SPEC §3.1/§3.2): none of these
+		// implement net.Error or thrift.TTransportException, so without an
+		// explicit case below they would fall through to the ErrMeta
+		// default even though SPEC §7 classifies a connection failure as
+		// ErrUnavailable, same as a plain dial error.
+		hostnameErr     x509.HostnameError
+		unknownAuthErr  x509.UnknownAuthorityError
+		certInvalidErr  x509.CertificateInvalidError
+		certVerifyErr   *tls.CertificateVerificationError
+		recordHeaderErr tls.RecordHeaderError
+		alertErr        tls.AlertError
 	)
 	switch {
 	case errors.As(err, &noSuch):
@@ -96,6 +175,24 @@ func classify(err error) error {
 		return ErrInvalidOperation
 	case errors.As(err, &meta):
 		return ErrMeta
+	// NoSuchTxnException and NoSuchLockException (SPEC §5.9/§7) mean the
+	// caller's txn or lock id is unknown to the metastore, the same
+	// "object not found" shape as NoSuchObjectException above.
+	// TxnAbortedException and TxnOpenException mean the RPC's own
+	// preconditions were violated (committing an already-aborted
+	// transaction; opening one when the metastore does not expect it),
+	// the same shape as InvalidOperationException above -- none of the
+	// four carries a sentinel of its own.
+	case errors.As(err, &noSuchTxn), errors.As(err, &noSuchLock):
+		return ErrNotFound
+	case errors.As(err, &txnAborted), errors.As(err, &txnOpen):
+		return ErrInvalidOperation
+	// ConfigValSecurityException (SPEC §7): get_config_value rejects a key
+	// outside the hive/mapred/hdfs namespaces it treats as safe to
+	// expose. That is a caller mistake about which key it asked for, the
+	// same shape as InvalidOperationException above.
+	case errors.As(err, &cfgSec):
+		return ErrInvalidOperation
 	case isUnknownMethod(err):
 		return ErrNotSupported
 	case isDesyncError(err):
@@ -104,7 +201,9 @@ func classify(err error) error {
 		return ErrMeta
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
 		errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
-		errors.As(err, &transport), errors.As(err, &netErr):
+		errors.As(err, &transport), errors.As(err, &netErr),
+		errors.As(err, &hostnameErr), errors.As(err, &unknownAuthErr), errors.As(err, &certInvalidErr),
+		errors.As(err, &certVerifyErr), errors.As(err, &recordHeaderErr), errors.As(err, &alertErr):
 		return ErrUnavailable
 	// The remaining cases pass an error through unchanged when it already
 	// is (or wraps) one of this package's own sentinels, e.g. ErrNotSupported

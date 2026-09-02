@@ -64,9 +64,13 @@ func removedRPCs(v Version) []string {
 		return []string{
 			"get_catalogs", "get_catalog", "create_catalog", "drop_catalog",
 			"alter_partitions_req", "get_partitions_req",
+			"get_partitions_by_names_req", "get_partition_names_ps_req",
 		}
 	case Hive31:
-		return []string{"alter_partitions_req", "get_partitions_req"}
+		return []string{
+			"alter_partitions_req", "get_partitions_req",
+			"get_partitions_by_names_req", "get_partition_names_ps_req",
+		}
 	default:
 		return nil
 	}
@@ -219,6 +223,66 @@ func (s *Server) LastArgs(method string) any {
 // Store returns the server's in-memory state.
 func (s *Server) Store() *Store {
 	return s.store
+}
+
+// SeedTable installs tbl directly into the store under its own CatName (or
+// "hive" when CatName is nil), DbName, and TableName, bypassing CreateTable
+// and the hms package's own converters entirely. It exists for a test that
+// needs a table carrying fields hms.Table has no field for (e.g.
+// Privileges, RewriteEnabled, Id, TxnId, AccessType, SkewedInfo), which
+// CreateTable's hms.Table -> hive_metastore.Table conversion has no way to
+// express; a direct write to Store().Tables would race the store's own
+// lock against a concurrently running handler goroutine (t.Parallel), so
+// this takes it instead.
+func (s *Server) SeedTable(t *hive_metastore.Table) {
+	catName := "hive"
+	if t.CatName != nil && *t.CatName != "" {
+		catName = *t.CatName
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.Tables[tblKey(catName, t.DbName, t.TableName)] = t
+}
+
+// SeedPartitions installs parts directly into the store under the table
+// named by catName (or "hive" when empty), dbName, and tblName, bypassing
+// AddPartitions and the hms package's own converters entirely -- the same
+// rationale as SeedTable, for a partition carrying a field hms.Partition
+// has no field for (e.g. Privileges, WriteId).
+func (s *Server) SeedPartitions(catName, dbName, tblName string, parts []*hive_metastore.Partition) {
+	if catName == "" {
+		catName = "hive"
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.Partitions[tblKey(catName, dbName, tblName)] = parts
+}
+
+// SeedColumnStats installs stats directly into the store under the table
+// named by db and tbl in the default "hive" catalog, keyed the same way as
+// SeedTable/SeedPartitions -- this fake server implements no write path
+// for column statistics at all (GetTableColumnStatistics is read-only in
+// 1.0; SPEC §5.8), so every test that wants GetTableStatisticsReq to have
+// something to return must seed it this way.
+func (s *Server) SeedColumnStats(db, tbl string, stats ...*hive_metastore.ColumnStatisticsObj) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.ColumnStats[tblKey("hive", db, tbl)] = stats
+}
+
+// SeedDatabase installs db directly into the store under its own
+// CatalogName (or "hive" when nil/empty) and Name, bypassing CreateDatabase
+// and the hms package's own converters entirely -- the same rationale as
+// SeedTable, for a database carrying a field hms.Database has no field for
+// (e.g. Privileges, Type, ConnectorName, RemoteDbname, ManagedLocationUri).
+func (s *Server) SeedDatabase(db *hive_metastore.Database) {
+	catName := "hive"
+	if db.CatalogName != nil && *db.CatalogName != "" {
+		catName = *db.CatalogName
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.Databases[dbKey(catName, db.Name)] = db
 }
 
 // Panics returns, in the order they occurred, the messages recorded by

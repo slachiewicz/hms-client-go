@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,19 @@ type Client struct {
 	// for it.
 	probeCancel context.CancelFunc
 	probeDone   chan struct{}
+
+	// inFlightDials counts acquire's own dials (newConn calls made to grow
+	// a pool, as opposed to a conn merely taken from idle) that have started
+	// but not yet returned. acquire.Add(1)s it only under mu, and only after
+	// confirming closed is still false in that same critical section, so a
+	// dial can never start once Close has flipped closed; it Done()s once
+	// newConn returns, success or failure. Close waits on it, after
+	// draining every pool and the probe goroutine, before releasing the
+	// Kerberos session those dials authenticate with -- otherwise a dial
+	// already past that check could still be inside DialBinary's GSSAPI
+	// handshake, reading cfg.krbSession, when Close's krbSession.Close()
+	// (gokrb5 Destroy) mutates it out from under that read.
+	inFlightDials sync.WaitGroup
 }
 
 // New connects to the Hive Metastore endpoint(s) named by uris (a single
@@ -90,6 +104,26 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
 
+	// A misconfigured SASL mechanism is a caller mistake too, and must not
+	// reach the dial loop below, whose every failure classifies as
+	// ErrUnavailable. See validateAuth.
+	if err := validateAuth(cfg, eps); err != nil {
+		return nil, wrapAs("New", ErrInvalidOperation, err)
+	}
+	// So is a WithTLS the HTTP transport would silently ignore. See
+	// validateTransport.
+	if err := validateTransport(cfg, eps); err != nil {
+		return nil, wrapAs("New", ErrInvalidOperation, err)
+	}
+
+	// The caller's Kerberos credentials are loaded once here, not once per
+	// dial: the gokrb5 client behind them runs a session-renewal goroutine
+	// that only Close stops (SPEC §3.1). Every conn this Client dials reads
+	// the session off cfg (see krbConfig), and Close releases it.
+	if cfg.krbSession, err = newKerberosSession(cfg, eps); err != nil {
+		return nil, wrapAs("New", ErrInvalidOperation, err)
+	}
+
 	cluster := ha.New(len(eps), cfg.randomOrder, time.Now)
 	pools := make([]*endpointPool, len(eps))
 	for i := range pools {
@@ -113,7 +147,7 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		}
 		cn, err := newConn(ctx, eps[idx], cfg)
 		if err != nil {
-			cluster.MarkFailed(idx)
+			c.markFailed(idx, "dial")
 			lastErr = err
 			continue
 		}
@@ -123,6 +157,9 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		break
 	}
 	if !dialed {
+		// No Client is returned, so nothing will ever call Close to
+		// release the session this New just built.
+		cfg.krbSession.Close()
 		return nil, wrapError("New", errors.Join(ErrUnavailable, lastErr))
 	}
 
@@ -134,8 +171,67 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
+// markFailed marks endpoint idx failed on the cluster, from every call site
+// that observes a failure worth cooling an endpoint down for: New's initial
+// dial loop and do's own retry loop. It logs at slog.LevelInfo only when
+// this is a real transition -- idx was not already cooling (Cluster.
+// MarkFailed's bool) -- so a burst of failed attempts against an endpoint
+// that is already known down produces one Info line, not one per attempt; a
+// repeat failure while already cooling logs at slog.LevelDebug instead
+// (SPEC §5.10).
+func (c *Client) markFailed(idx int, reason string) {
+	ep := endpointURI(c.endpoints[idx])
+	if c.cluster.MarkFailed(idx) {
+		c.cfg.logger.Info("endpoint marked failed", "endpoint", ep, "reason", reason)
+	} else {
+		c.cfg.logger.Debug("endpoint still failed", "endpoint", ep, "reason", reason)
+	}
+}
+
+// markHealthy marks endpoint idx healthy on the cluster, from every call
+// site that observes an endpoint working again: do's own success path, do's
+// error path for an error the endpoint actually answered with (a
+// NoSuchObjectException is a working metastore, not an outage), and
+// probeCooling's successful getStatus probe. It logs at slog.LevelInfo only
+// when this is a real transition -- idx was actually cooling beforehand
+// (Cluster.MarkHealthy's bool) -- so every successful call against an
+// endpoint that was already healthy produces no Info line at all (SPEC
+// §5.10).
+func (c *Client) markHealthy(idx int, reason string) {
+	ep := endpointURI(c.endpoints[idx])
+	if c.cluster.MarkHealthy(idx) {
+		c.cfg.logger.Info("endpoint marked healthy", "endpoint", ep, "reason", reason)
+	}
+}
+
+// observe invokes the configured WithRPCObserver function, if any, with the
+// completed attempt's RPCInfo (SPEC §5.10). It runs synchronously on do's
+// own goroutine, as the observer contract requires; a panic escaping f is
+// recovered and logged at slog.LevelError rather than propagated to do's
+// caller, so a misbehaving observer cannot fail an otherwise successful
+// RPC.
+func (c *Client) observe(op string, idx, attempt int, dur time.Duration, err error) {
+	if c.cfg.observer == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			c.cfg.logger.Error("observer panicked", "method", op, "recovered", r)
+		}
+	}()
+	c.cfg.observer(RPCInfo{
+		Method:   op,
+		Endpoint: endpointURI(c.endpoints[idx]),
+		Attempt:  attempt,
+		Duration: dur,
+		Err:      err,
+	})
+}
+
 // Close releases every pooled connection, stops the recovery-probe
-// goroutine, and marks the client closed. Every caller -- concurrent or
+// goroutine, releases the Kerberos credentials New loaded when
+// WithKerberos was configured (which stops their renewal goroutine), and
+// marks the client closed. Every caller -- concurrent or
 // sequential, whichever call actually does the closing or not -- waits
 // for the probe goroutine to have exited before returning. Any call still
 // in flight completes normally; its connection is closed rather than
@@ -160,8 +256,8 @@ func (c *Client) Close() error {
 	close(c.closeCh)
 
 	var errs []error
-	for _, p := range c.pools {
-		drainPool(p, &errs)
+	for idx, p := range c.pools {
+		drainPool(p, &errs, c.cfg.logger, endpointURI(c.endpoints[idx]))
 	}
 	c.mu.Unlock()
 
@@ -171,12 +267,28 @@ func (c *Client) Close() error {
 	if c.probeDone != nil {
 		<-c.probeDone
 	}
+	// Wait for every dial acquire started before it observed closed (see
+	// acquire): one of those may still be inside DialBinary's GSSAPI
+	// handshake, reading cfg.krbSession, and krbSession.Close() below
+	// (gokrb5 Destroy) mutates that session unlocked. No dial can start
+	// after this point -- acquire's own closed check and this Wait() run
+	// under the same mu-guarded ordering as the closed flag itself -- so
+	// this Wait() is bounded by dials already racing this Close, not by
+	// every future acquire call.
+	c.inFlightDials.Wait()
+	// Last, once no pooled conn, no probe, and no in-flight dial can still
+	// use these credentials: closing the Kerberos session stops the
+	// gokrb5 client's session-renewal goroutine (SPEC §3.1). It is a
+	// no-op when WithKerberos was never configured, and idempotent, so
+	// the already-closed path above needs no counterpart.
+	c.cfg.krbSession.Close()
 	return errors.Join(errs...)
 }
 
 // drainPool closes every conn currently idle in p, appending any close
-// error to errs. Client.mu must be held.
-func drainPool(p *endpointPool, errs *[]error) {
+// error to errs and logging each close at slog.LevelDebug against ep.
+// Client.mu must be held.
+func drainPool(p *endpointPool, errs *[]error, logger *slog.Logger, ep string) {
 	for {
 		select {
 		case cn := <-p.idle:
@@ -184,6 +296,7 @@ func drainPool(p *endpointPool, errs *[]error) {
 				*errs = append(*errs, err)
 			}
 			p.live.Add(-1)
+			logger.Debug("conn closed", "endpoint", ep)
 		default:
 			return
 		}
@@ -215,7 +328,28 @@ func (c *Client) acquire(ctx context.Context, idx int) (*conn, error) {
 			break
 		}
 		if p.live.CompareAndSwap(cur, cur+1) {
+			// Re-check closed and register this dial as in-flight in the
+			// same critical section: this is the only gate that matters
+			// for the Kerberos-session race (the early check above is
+			// just a fast path), since it is the last point before
+			// newConn may start reading cfg.krbSession. If Close's own
+			// mu.Lock() below (which sets closed and then drains the
+			// pools) already ran, this loses the race cleanly -- no dial,
+			// no wg registration, so Close never has to wait for it; if
+			// it did not, inFlightDials.Add(1) is visible to Close's
+			// later Wait() no matter how the two goroutines interleave
+			// from here on.
+			c.mu.Lock()
+			if c.closed {
+				c.mu.Unlock()
+				p.live.Add(-1)
+				return nil, errClosed
+			}
+			c.inFlightDials.Add(1)
+			c.mu.Unlock()
+
 			cn, err := newConn(ctx, c.endpoints[idx], &c.cfg)
+			c.inFlightDials.Done()
 			if err != nil {
 				p.live.Add(-1)
 				return nil, err
@@ -248,17 +382,20 @@ func (c *Client) release(idx int, cn *conn) {
 		c.mu.Unlock()
 		_ = cn.close()
 		p.live.Add(-1)
+		c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "client closed")
 		return
 	}
 	select {
 	case p.idle <- cn:
 		c.mu.Unlock()
+		c.cfg.logger.Debug("conn released", "endpoint", endpointURI(c.endpoints[idx]))
 		return
 	default:
 	}
 	c.mu.Unlock()
 	_ = cn.close()
 	p.live.Add(-1)
+	c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "pool full")
 }
 
 // discard closes cn without returning it to endpoint idx's pool, for use
@@ -267,6 +404,7 @@ func (c *Client) release(idx int, cn *conn) {
 func (c *Client) discard(idx int, cn *conn) {
 	_ = cn.close()
 	c.pools[idx].live.Add(-1)
+	c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "unavailable")
 }
 
 // call runs fn as a non-idempotent RPC (create_*, add_partitions*, drop_*,
@@ -298,7 +436,12 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 // do returns immediately rather than calling MarkFailed on endpoints that
 // may be perfectly healthy.
 //
-// Once fn has started, two decisions are made separately. Whether the conn
+// Once fn has started, an error that does not classify as ErrUnavailable
+// marks the endpoint healthy on its way out: the endpoint answered, which
+// is what health means here, so a cooling endpoint that rejects a request
+// on its merits has demonstrably recovered.
+//
+// Two further decisions are made separately. Whether the conn
 // is discarded rather than released back to its pool depends only on
 // whether classify(err) is ErrUnavailable: the connection's state on the
 // wire is unknown regardless of why fn failed, including when fn failed
@@ -313,16 +456,36 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 // Attempts are bounded by cfg.maxRetries (clamped to at least 1 by
 // config.clamp). When every endpoint is cooling, do returns ErrUnavailable
 // joined with the last error observed.
+//
+// The WithRPCObserver function (if any) is invoked once per attempt,
+// synchronously, with that attempt's RPCInfo -- Attempt is 1-based and
+// counts every attempt this loop makes against an endpoint, including one
+// that failed to acquire a connection and so never reached fn (SPEC
+// §5.10); see observe. For such an attempt Err is the acquire/dial failure
+// and Duration is the time spent in acquire; otherwise both describe fn
+// itself. A dial/acquire failure and a retry decision are logged at
+// slog.LevelDebug through
+// WithLogger's logger; the endpoint transitions this loop drives (marked
+// failed, marked healthy) are logged at slog.LevelInfo by markFailed and
+// markHealthy themselves.
 func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx context.Context, cn *conn) error) error {
 	var last error
+	rpcAttempt := 0
 	for attempt := 0; attempt < c.cfg.maxRetries; attempt++ {
 		idx, ok := c.cluster.Pick()
 		if !ok {
 			return wrapError(op, errors.Join(ErrUnavailable, last))
 		}
 
+		rpcAttempt++
+		start := time.Now()
 		cn, err := c.acquire(ctx, idx)
 		if err != nil {
+			// An attempt that never got a connection is still an
+			// attempt against this endpoint, and its failure is the one
+			// an observer most wants to see; Duration is the time spent
+			// trying to get that connection (SPEC §5.10).
+			c.observe(op, idx, rpcAttempt, time.Since(start), err)
 			if ctx.Err() != nil || errors.Is(err, errClosed) {
 				// ctx's own cancellation/deadline, or the client
 				// being closed, is not evidence idx is unhealthy;
@@ -332,28 +495,38 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 				// it.
 				return wrapError(op, err)
 			}
-			c.cluster.MarkFailed(idx)
+			c.markFailed(idx, "dial")
 			last = err
+			c.cfg.logger.Debug("retrying on next endpoint", "method", op, "endpoint", endpointURI(c.endpoints[idx]), "err", err)
 			continue // dial failures are always retryable
 		}
 
+		start = time.Now()
 		err = fn(ctx, cn)
+		c.observe(op, idx, rpcAttempt, time.Since(start), err)
+
 		if err == nil {
 			c.release(idx, cn)
-			c.cluster.MarkHealthy(idx)
+			c.markHealthy(idx, op)
 			return nil
 		}
 		if errors.Is(classify(err), ErrUnavailable) {
 			c.discard(idx, cn)
 			if ctx.Err() == nil {
-				c.cluster.MarkFailed(idx)
+				c.markFailed(idx, op)
 				last = err
 				if idempotent {
+					c.cfg.logger.Debug("retrying on next endpoint", "method", op, "endpoint", endpointURI(c.endpoints[idx]), "err", err)
 					continue
 				}
 			}
 		} else {
+			// The endpoint answered -- with a MetaException, a
+			// NoSuchObjectException, whatever fn asked for -- so it is
+			// healthy however unwelcome the answer was; a cooling
+			// endpoint that answers this way has recovered.
 			c.release(idx, cn)
+			c.markHealthy(idx, op)
 		}
 		return wrapError(op, err)
 	}
@@ -383,18 +556,24 @@ func (c *Client) recoveryProbe(ctx context.Context) {
 // marks that endpoint healthy and hands the freshly dialed conn to its
 // pool (or closes it if the pool is already full or the client has been
 // closed in the meantime); a failed probe leaves the endpoint cooling and
-// closes the conn, if one was even dialed.
+// closes the conn, if one was even dialed. Every probe's outcome is logged
+// at slog.LevelDebug (SPEC §5.10); a successful one additionally gets
+// markHealthy's slog.LevelInfo "endpoint marked healthy" log.
 func (c *Client) probeCooling(ctx context.Context) {
 	for _, idx := range c.cluster.Cooling() {
+		ep := endpointURI(c.endpoints[idx])
 		cn, err := newConn(ctx, c.endpoints[idx], &c.cfg)
 		if err != nil {
+			c.cfg.logger.Debug("probe failed", "endpoint", ep, "err", err)
 			continue
 		}
 		if _, err := cn.getStatus(ctx); err != nil {
 			_ = cn.close()
+			c.cfg.logger.Debug("probe failed", "endpoint", ep, "err", err)
 			continue
 		}
-		c.cluster.MarkHealthy(idx)
+		c.cfg.logger.Debug("probe succeeded", "endpoint", ep)
+		c.markHealthy(idx, "probe")
 
 		p := c.pools[idx]
 		c.mu.Lock()
@@ -420,21 +599,37 @@ func (c *Client) probeCooling(ctx context.Context) {
 	}
 }
 
-// resolveCat resolves the effective catalog for one call: a per-call
-// InCatalog option overrides WithCatalog, which defaults to "hive" (SPEC
-// §5.1). It returns nil when the effective catalog is "hive" and cn's
-// server does not support catalogs, so the caller never writes a catName
-// field on the wire to such a server (SPEC §2.3 Rule 1); it returns
-// ErrNotSupported when a non-default catalog is requested against such a
-// server; otherwise it returns a pointer to the effective catalog name.
-// Any error from the underlying catalog-support probe other than
-// UNKNOWN_METHOD propagates unclassified.
+// resolveCat resolves the effective catalog for one call from opts alone:
+// a per-call InCatalog option overrides WithCatalog, which defaults to
+// "hive" (SPEC §5.1). It is resolveCatFor with an empty structCat, for the
+// majority of calls that take no struct carrying its own CatalogName field.
+// See resolveCatFor for the full precedence order and every other aspect of
+// this behavior.
 func (c *Client) resolveCat(ctx context.Context, cn *conn, opts []CatalogOption) (*string, error) {
+	return c.resolveCatFor(ctx, cn, "", opts)
+}
+
+// resolveCatFor resolves the effective catalog for one call, in precedence
+// order highest first: a per-call InCatalog option (opts), then structCat
+// (a create/alter call's own struct.CatalogName field, e.g.
+// CreateDatabase's db.CatalogName or AlterTable's newTable.CatalogName;
+// empty means the struct did not set one), then WithCatalog, then "hive"
+// (SPEC §5.0). It returns nil when the effective catalog is "hive" and
+// cn's server does not support catalogs, so the caller never writes a
+// catName field on the wire to such a server (SPEC §2.3 Rule 1); it
+// returns ErrNotSupported when a non-default catalog is requested against
+// such a server; otherwise it returns a pointer to the effective catalog
+// name. Any error from the underlying catalog-support probe other than
+// UNKNOWN_METHOD propagates unclassified.
+func (c *Client) resolveCatFor(ctx context.Context, cn *conn, structCat string, opts []CatalogOption) (*string, error) {
 	var co catalogOpts
 	for _, o := range opts {
 		o(&co)
 	}
 	effective := c.cfg.catalog
+	if structCat != "" {
+		effective = structCat
+	}
 	if co.catalog != "" {
 		effective = co.catalog
 	}
@@ -678,11 +873,7 @@ func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOp
 // entirely rather than working around it.
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 	return c.call(ctx, "create_database", func(ctx context.Context, cn *conn) error {
-		var opts []CatalogOption
-		if db.CatalogName != "" {
-			opts = append(opts, InCatalog(db.CatalogName))
-		}
-		cat, err := c.resolveCat(ctx, cn, opts)
+		cat, err := c.resolveCatFor(ctx, cn, db.CatalogName, nil)
 		if err != nil {
 			return err
 		}
@@ -712,6 +903,29 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 		}
 
 		return cn.createDatabase(ctx, databaseToThrift(toCreate, cat))
+	})
+}
+
+// AlterDatabase replaces the mutable properties (Description, LocationURI,
+// Parameters, OwnerName, OwnerType) of the database named name with db's
+// (SPEC §5.3, 1.0 addition); AlterDatabase itself never writes a
+// db.CreateTime of its own (see databaseToThriftFrom), though a db that carries
+// a round-trip fidelity snapshot -- i.e. one GetDatabase itself returned --
+// echoes the original, server-assigned CreateTime back rather than clearing
+// it, which is harmless since the field is immutable; a field neither this
+// package's Database nor this doc comment mentions (Privileges, Type,
+// ConnectorName, RemoteDbname, ManagedLocationUri) survives the same way
+// (SPEC §5.4 "Round-trip fidelity"). A non-empty db.CatalogName overrides
+// the client's default catalog for this call, the same way CreateDatabase's
+// db.CatalogName does; opts' InCatalog, if passed, takes precedence over
+// both (SPEC §5.0).
+func (c *Client) AlterDatabase(ctx context.Context, name string, db *Database, opts ...CatalogOption) error {
+	return c.call(ctx, "alter_database", func(ctx context.Context, cn *conn) error {
+		cat, err := c.resolveCatFor(ctx, cn, db.CatalogName, opts)
+		if err != nil {
+			return err
+		}
+		return cn.alterDatabase(ctx, qualifyDBName(cat, name), databaseToThriftFrom(db, cat))
 	})
 }
 
