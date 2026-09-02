@@ -28,11 +28,14 @@ hms-client-go/
 │       ├── ci.yml                 # gofmt, vet, unit tests, golangci-lint, govulncheck
 │       └── integration.yml        # Docker matrix: Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1
 ├── client.go                      # package hms: Client, New, Close
+├── conn.go                        # One live connection: bound RPC func fields, UNKNOWN_METHOD fallback cache, catalog probe (SPEC §2.3)
 ├── options.go                     # Functional options (see SPEC §5.1)
 ├── types.go                       # Clean Go structs (Catalog, Database, Table, Partition, ...)
 ├── convert.go                     # Thrift <-> hms type mapping (the only file importing gen/ types into hms)
+├── table.go                       # Table operations (SPEC §5.4)
+├── partition.go                   # Partition operations (SPEC §5.5)
 ├── errors.go                      # Sentinel errors & exception unwrapping (SPEC §7)
-├── fallback.go                    # UNKNOWN_METHOD detection and legacy RPC fallback (SPEC §2.3)
+├── version.go                     # Module version (debug.ReadBuildInfo) and the HTTP User-Agent string
 ├── formats.go                     # Iceberg / Delta / Hudi table builders (SPEC §6)
 ├── idl/                           # Committed Thrift IDL (Hive 4.0.1 + fb303) for reproducible generation
 │   ├── hive_metastore.thrift
@@ -47,8 +50,6 @@ hms-client-go/
 │   │   ├── binary.go              # TCP dial + optional SASL PLAIN + buffered binary protocol
 │   │   ├── sasl.go                # SASL PLAIN client framing
 │   │   └── http.go                # THttpClient wrapper: default path, headers, auth
-│   ├── pool/
-│   │   └── pool.go                # Connection pool, idle health checks
 │   └── ha/
 │       └── cluster.go             # Endpoint list, cooldown, sticky-active failover
 ├── test/
