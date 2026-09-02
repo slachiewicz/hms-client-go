@@ -80,10 +80,16 @@ func New(n int, random bool, now func() time.Time) *Cluster {
 	}
 }
 
-// Pick returns the sticky active endpoint's index, skipping over any
-// endpoint still cooling down. It reports ok=false when every endpoint is
-// cooling. The active endpoint does not change merely by being picked; it
-// changes only via MarkFailed.
+// Pick returns the active endpoint's index. If the active endpoint is
+// currently cooling, Pick itself advances the active endpoint to the
+// first one, in pick order, that is not cooling -- which may be an
+// endpoint whose earlier cooldown has simply elapsed on its own, with no
+// intervening MarkHealthy -- so Pick alone, not only MarkFailed, can move
+// which endpoint is active; once an endpoint is found not cooling, calling
+// Pick again leaves it active until something (MarkFailed, or the next
+// Pick finding it cooling again) moves it. Pick reports ok=false, leaving
+// the active endpoint's position unchanged, only when every endpoint is
+// cooling.
 func (c *Cluster) Pick() (idx int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

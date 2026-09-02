@@ -18,7 +18,7 @@ var defaultChunkSize = 1000
 // default "hive").
 func (c *Client) GetAllTables(ctx context.Context, dbName string, opts ...CatalogOption) ([]string, error) {
 	var names []string
-	err := c.call(ctx, "GetAllTables", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_all_tables", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -36,7 +36,7 @@ func (c *Client) GetAllTables(ctx context.Context, dbName string, opts ...Catalo
 // GetTable returns the table named tableName in database dbName.
 func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ...CatalogOption) (*Table, error) {
 	var out *Table
-	err := c.call(ctx, "GetTable", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_table_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -57,7 +57,7 @@ func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ..
 // §5.4).
 func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []string, opts ...CatalogOption) ([]*Table, error) {
 	var out []*Table
-	err := c.call(ctx, "GetTables", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_table_objects_by_name_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -89,7 +89,7 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 // CreateTable creates table. A non-empty table.CatalogName overrides the
 // client's default catalog for this call.
 func (c *Client) CreateTable(ctx context.Context, table *Table) error {
-	return c.call(ctx, "CreateTable", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "create_table", func(ctx context.Context, cn *conn) error {
 		var opts []CatalogOption
 		if table.CatalogName != "" {
 			opts = append(opts, InCatalog(table.CatalogName))
@@ -106,7 +106,7 @@ func (c *Client) CreateTable(ctx context.Context, table *Table) error {
 // newTable, which may rename it when newTable.TableName differs from
 // tableName.
 func (c *Client) AlterTable(ctx context.Context, dbName, tableName string, newTable *Table, opts ...CatalogOption) error {
-	return c.call(ctx, "AlterTable", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "alter_table", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -119,7 +119,7 @@ func (c *Client) AlterTable(ctx context.Context, dbName, tableName string, newTa
 // is forwarded to the server. With ifExists true, a missing table is not an
 // error.
 func (c *Client) DropTable(ctx context.Context, dbName, tableName string, deleteData, ifExists bool, opts ...CatalogOption) error {
-	return c.call(ctx, "DropTable", func(ctx context.Context, cn *conn) error {
+	return c.call(ctx, "drop_table", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err

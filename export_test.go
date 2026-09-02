@@ -39,11 +39,14 @@ func ClientAcquire(c *Client, ctx context.Context, idx int) (*conn, error) {
 func ClientRelease(c *Client, idx int, cn *conn) { c.release(idx, cn) }
 func ClientLiveConns(c *Client, idx int) int32   { return c.pools[idx].live.Load() }
 
-// ClientMarkFailed exposes the Client's ha.Cluster to hms_test, since
-// Cluster is unexported (internal/ha). Task 11's recovery probe test uses
-// it to force an endpoint into cooldown without needing to actually kill
-// its server.
+// ClientMarkFailed and ClientPick expose the Client's ha.Cluster to
+// hms_test, since Cluster is unexported (internal/ha). ClientMarkFailed
+// forces an endpoint into cooldown without needing to actually kill its
+// server (the recovery-probe test); ClientPick observes which endpoint the
+// cluster considers active (fix round 1's cancelled-caller test, which
+// must confirm cancellation alone never moved it).
 func ClientMarkFailed(c *Client, idx int) { c.cluster.MarkFailed(idx) }
+func ClientPick(c *Client) (int, bool)    { return c.cluster.Pick() }
 
 // WithProbeIntervalForTest overrides the recovery probe's tick interval
 // (default 30s), so ha_test.go can bound its waits to well under a second.

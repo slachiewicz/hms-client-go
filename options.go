@@ -12,6 +12,11 @@ const (
 	defaultMaxRetries    = 3
 	defaultPoolSize      = 4
 	defaultProbeInterval = 30 * time.Second
+	// minProbeInterval is the floor clamp enforces on probeInterval: a
+	// zero or negative value would panic inside time.NewTicker
+	// (recoveryProbe) instead of merely misbehaving, unlike poolSize or
+	// maxRetries's clamps below.
+	minProbeInterval = time.Millisecond
 )
 
 // config accumulates the effect of every Option passed to New.
@@ -46,15 +51,19 @@ func newConfig() *config {
 // clamp enforces every config field's usable minimum after every Option
 // has run, so a caller-supplied value that would otherwise misbehave (a
 // zero or negative WithPoolSize hangs New/acquire forever; a zero or
-// negative WithMaxRetries would let Task 11's retry loop skip the RPC
-// entirely) instead degrades to the smallest value that still works. See
-// WithPoolSize and WithMaxRetries.
+// negative WithMaxRetries would let the retry loop skip the RPC entirely;
+// a zero or negative probeInterval would panic inside time.NewTicker)
+// instead degrades to the smallest value that still works. See
+// WithPoolSize, WithMaxRetries, and withProbeInterval.
 func (cfg *config) clamp() {
 	if cfg.poolSize < 1 {
 		cfg.poolSize = 1
 	}
 	if cfg.maxRetries < 1 {
 		cfg.maxRetries = 1
+	}
+	if cfg.probeInterval < minProbeInterval {
+		cfg.probeInterval = minProbeInterval
 	}
 }
 

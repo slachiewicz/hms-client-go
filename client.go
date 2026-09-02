@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -135,15 +134,25 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 }
 
 // Close releases every pooled connection, stops the recovery-probe
-// goroutine (waiting for it to exit), and marks the client closed. Any
-// call still in flight completes normally; its connection is closed rather
-// than returned to the pool once the call finishes (see release). A
-// goroutine blocked in acquire wakes immediately via closeCh. Close is
-// idempotent.
+// goroutine, and marks the client closed. Every caller -- concurrent or
+// sequential, whichever call actually does the closing or not -- waits
+// for the probe goroutine to have exited before returning. Any call still
+// in flight completes normally; its connection is closed rather than
+// returned to the pool once the call finishes (see release). A goroutine
+// blocked in acquire wakes immediately via closeCh. Close is idempotent.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+		// A concurrent (or later) call also waits for the probe
+		// goroutine to have exited, not just the first one: probeDone
+		// is closed exactly once by recoveryProbe itself, so reading
+		// from it here is safe (and immediate) no matter how many
+		// callers do it, or in what order relative to the first
+		// caller's own wait below.
+		if c.probeDone != nil {
+			<-c.probeDone
+		}
 		return nil
 	}
 	c.closed = true
@@ -259,19 +268,40 @@ func (c *Client) discard(idx int, cn *conn) {
 	c.pools[idx].live.Add(-1)
 }
 
-// call picks an endpoint via cluster, acquires a conn from its pool, and
-// runs fn against it, retrying on another endpoint per SPEC §4.2 point 3:
-// a dial failure is always retryable; once fn has started, a failure is
-// retried only when it classifies as ErrUnavailable, ctx is not yet done,
-// and op is idempotent (its wire name has the "get_" prefix used by every
-// read-only RPC). A non-idempotent op (create_*, add_partitions*, drop_*,
-// alter_*) that fails after fn started is returned immediately, without
-// trying another endpoint, since the request may already have reached the
-// server. Attempts are bounded by cfg.maxRetries (clamped to at least 1 by
-// config.clamp). When every endpoint is cooling, call returns
-// ErrUnavailable joined with the last error observed.
+// call runs fn as a non-idempotent RPC (create_*, add_partitions*, drop_*,
+// alter_*): an acquire/dial failure retries on another endpoint, but once
+// fn has started, any failure -- including one that classifies as
+// ErrUnavailable -- is returned immediately without trying another
+// endpoint, since the request may already have reached the server. Use
+// read instead for a get_* (idempotent, read-only) RPC.
 func (c *Client) call(ctx context.Context, op string, fn func(ctx context.Context, cn *conn) error) error {
-	idempotent := strings.HasPrefix(op, "get_")
+	return c.do(ctx, op, false, fn)
+}
+
+// read runs fn as an idempotent, read-only RPC (get_*): like call, an
+// acquire/dial failure retries on another endpoint; additionally, once fn
+// has started, a failure that classifies as ErrUnavailable is also retried
+// on another endpoint, as long as ctx is not yet done, since re-issuing a
+// read cannot duplicate a server-side effect. Use call instead for any RPC
+// with a side effect the server might already have applied.
+func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Context, cn *conn) error) error {
+	return c.do(ctx, op, true, fn)
+}
+
+// do is the retry loop shared by call and read: it picks an endpoint via
+// cluster, acquires a conn from its pool, and runs fn against it, retrying
+// on another endpoint per SPEC §4.2 point 3. A dial/acquire failure is
+// retryable unless ctx is already done or the client has been closed
+// (errClosed): either means every remaining endpoint would fail the same
+// way for a reason that has nothing to do with that endpoint's health, so
+// do returns immediately rather than calling MarkFailed on endpoints that
+// may be perfectly healthy. Once fn has started, a failure is retried only
+// when idempotent is true, it classifies as ErrUnavailable, and ctx is not
+// yet done; otherwise it is returned immediately. Attempts are bounded by
+// cfg.maxRetries (clamped to at least 1 by config.clamp). When every
+// endpoint is cooling, do returns ErrUnavailable joined with the last
+// error observed.
+func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx context.Context, cn *conn) error) error {
 	var last error
 	for attempt := 0; attempt < c.cfg.maxRetries; attempt++ {
 		idx, ok := c.cluster.Pick()
@@ -281,6 +311,15 @@ func (c *Client) call(ctx context.Context, op string, fn func(ctx context.Contex
 
 		cn, err := c.acquire(ctx, idx)
 		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, errClosed) {
+				// ctx's own cancellation/deadline, or the client
+				// being closed, is not evidence idx is unhealthy;
+				// marking it failed here would needlessly cool down
+				// (and, over repeated calls like this, exhaust) an
+				// otherwise-fine endpoint for a reason unrelated to
+				// it.
+				return wrapError(op, err)
+			}
 			c.cluster.MarkFailed(idx)
 			last = err
 			continue // dial failures are always retryable
@@ -350,13 +389,19 @@ func (c *Client) probeCooling(ctx context.Context) {
 			_ = cn.close()
 			continue
 		}
+		// live is incremented before the send, not after: acquire's
+		// capacity check (p.live.Load() vs cfg.poolSize) must never
+		// observe this conn as neither counted nor yet in idle, or it
+		// could dial one more than poolSize permits in the window
+		// between the two.
+		p.live.Add(1)
 		select {
 		case p.idle <- cn:
-			p.live.Add(1)
 			c.mu.Unlock()
 		default:
 			c.mu.Unlock()
 			_ = cn.close()
+			p.live.Add(-1)
 		}
 	}
 }
@@ -415,7 +460,7 @@ func qualifyDBName(cat *string, name string) string {
 // defaultValue when it is unset.
 func (c *Client) GetConfigValue(ctx context.Context, name, defaultValue string) (string, error) {
 	var out string
-	err := c.call(ctx, "get_config_value", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_config_value", func(ctx context.Context, cn *conn) error {
 		v, err := cn.getConfigValue(ctx, name, defaultValue)
 		if err != nil {
 			return err
@@ -452,7 +497,7 @@ func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) {
 // predates catalogs (Hive 2.3).
 func (c *Client) GetCatalogs(ctx context.Context) ([]string, error) {
 	var names []string
-	err := c.call(ctx, "get_catalogs", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_catalogs", func(ctx context.Context, cn *conn) error {
 		resp, err := cn.getCatalogs(ctx)
 		if err != nil {
 			if isUnknownMethod(err) {
@@ -470,7 +515,7 @@ func (c *Client) GetCatalogs(ctx context.Context) ([]string, error) {
 // GetCatalog returns the catalog named name.
 func (c *Client) GetCatalog(ctx context.Context, name string) (*Catalog, error) {
 	var out *Catalog
-	err := c.call(ctx, "get_catalog", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_catalog", func(ctx context.Context, cn *conn) error {
 		resp, err := cn.getCatalog(ctx, &hive_metastore.GetCatalogRequest{Name: name})
 		if err != nil {
 			return err
@@ -511,7 +556,7 @@ func (c *Client) DropCatalog(ctx context.Context, name string, ifExists bool) er
 // RPC.
 func (c *Client) GetAllDatabases(ctx context.Context, opts ...CatalogOption) ([]string, error) {
 	var names []string
-	err := c.call(ctx, "get_all_databases", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_all_databases", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
@@ -534,7 +579,7 @@ func (c *Client) GetAllDatabases(ctx context.Context, opts ...CatalogOption) ([]
 // GetDatabase returns the database named name.
 func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOption) (*Database, error) {
 	var out *Database
-	err := c.call(ctx, "get_database", func(ctx context.Context, cn *conn) error {
+	err := c.read(ctx, "get_database", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
