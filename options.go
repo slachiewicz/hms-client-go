@@ -46,6 +46,8 @@ type config struct {
 	krbPrincipal string
 	krbKeytab    string
 	krbCCache    string
+	krbService   string
+	krbConf      string
 
 	tlsConfig *tls.Config
 }
@@ -244,6 +246,24 @@ func WithKerberos(principal string, keytabOrCCache ...string) Option {
 			}
 		}
 	}
+}
+
+// WithKerberosServicePrincipal overrides the metastore's own principal,
+// which WithKerberos otherwise derives as "hive/<host>" from the endpoint
+// being dialed (SPEC §5.1). Use it when the metastore runs under a
+// principal whose service class or host part differs from the address the
+// client connects to, as it does behind a load balancer or when
+// hive.metastore.kerberos.principal names an alias. It has no effect
+// without WithKerberos.
+func WithKerberosServicePrincipal(spn string) Option {
+	return func(c *config) { c.krbService = spn }
+}
+
+// WithKrb5Config overrides the Kerberos configuration file WithKerberos
+// reads, which is otherwise KRB5_CONFIG's value, falling back to
+// /etc/krb5.conf (SPEC §5.1). It has no effect without WithKerberos.
+func WithKrb5Config(path string) Option {
+	return func(c *config) { c.krbConf = path }
 }
 
 // WithTLS wraps the binary TCP socket in TLS, for a server configured with

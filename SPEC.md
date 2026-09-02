@@ -75,7 +75,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **Framing / Buffering**: `TBufferedTransport` (default buffer size: 8192 bytes). No `TFramedTransport`.
 * **Protocol**: `TBinaryProtocol` (strict write: true, strict read: true).
 * **Context propagation**:
-  * `WithConnectTimeout` (§5.1) bounds connection setup -- dialing (`net.Dialer.Timeout`), the TLS handshake (when `WithTLS` is set), and the SASL handshake (when `WithPlainAuth` is set) -- as a fallback applied when the caller's `ctx` carries no deadline of its own, exactly as `WithTimeout` bounds each later per-call I/O. It defaults to `WithTimeout`'s value, so a caller who only ever tunes `WithTimeout` gets the same effective behavior as before `WithConnectTimeout` existed.
+  * `WithConnectTimeout` (§5.1) bounds connection setup -- dialing (`net.Dialer.Timeout`), the TLS handshake (when `WithTLS` is set), and the SASL handshake (when `WithPlainAuth` or `WithKerberos` is set, excepting the KDC round trips noted under `KERBEROS` below) -- as a fallback applied when the caller's `ctx` carries no deadline of its own, exactly as `WithTimeout` bounds each later per-call I/O. It defaults to `WithTimeout`'s value, so a caller who only ever tunes `WithTimeout` gets the same effective behavior as before `WithConnectTimeout` existed.
   * Binding happens in the `thrift.TClient` wrapper, `internal/transport.ContextClient`, not at the protocol layer: its `Call` is the single choke point every RPC passes through. Before delegating to the wrapped client, it sets the raw `net.Conn`'s deadline from `ctx.Deadline()`, falling back to the configured socket timeout when the context carries none, and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })` to cut that deadline short on cancellation; the stop handle is released when `Call` returns.
   * The `thrift.TSocket` handed to Thrift is constructed over a `deadlineShield` wrapping the same `net.Conn`: `SetDeadline`/`SetReadDeadline`/`SetWriteDeadline` on it are no-ops, so `TSocket`'s own per-read/write deadline resets (driven by its `TConfiguration.SocketTimeout`, left at 0) never fight `ContextClient` for ownership of the connection's deadline.
   * `ContextClient` does not exist yet during the SASL handshake (§3.1 Authentication), since it wraps the client built on top of the fully assembled transport. `DialBinary` gives the handshake the same deadline/cancel treatment directly against the raw `net.Conn` for its duration, then clears the deadline before `ContextClient` takes over.
@@ -83,7 +83,12 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **Authentication**:
   * `NOSASL` / `NONE`: raw binary protocol, the default. When `WithUser` (and optionally `WithUserGroups`) is set and no SASL auth is configured, the client calls `set_ugi(user, groups)` once per newly dialed connection, mirroring the Java `HiveMetaStoreClient`'s behavior under `hive.metastore.execute.setugi` (§5.1).
   * `LDAP` / `CUSTOM`: SASL `PLAIN` framing (RFC 4616 initial response `\0user\0password`), 1-byte-status/4-byte-length-prefixed negotiation frames followed by 4-byte-length-prefixed data frames (the Java `TSaslTransport` wire format). The client implements the SASL negotiation handshake in pure Go (`internal/transport/sasl.go`); see the context-propagation bullet above for how the handshake gets its deadline.
-  * `KERBEROS`: SASL GSSAPI (QOP `auth`) over the same socket, using a pure-Go Kerberos implementation (`gokrb5`) rather than native C Kerberos, keeping the zero-Cgo invariant. Selected with `WithKerberos`; see §5.1.
+  * `KERBEROS`: SASL GSSAPI (RFC 4752) over the same socket, in the same `TSaslTransport` framing as `PLAIN`, using a pure-Go Kerberos implementation (`gokrb5`) rather than native C Kerberos, keeping the zero-Cgo invariant. Selected with `WithKerberos`; see §5.1. It is mutually exclusive with `WithPlainAuth`, and configuring both is rejected by `New` as `ErrInvalidOperation`, as are Kerberos credentials that cannot be read at all.
+    * **Handshake**: three rounds -- an AP_REQ initial context token with the mutual-required option; the server's AP_REP, whose `EncAPRepPart` must echo the authenticator's timestamp (this is what proves the server holds the service key, and a server that answers `COMPLETE` before it is rejected rather than trusted); then the security-layer negotiation. When the AP_REP carries an acceptor subkey, that key -- not the ticket session key -- signs the negotiation's wrap tokens.
+    * **Service principal**: `hive/<host>` for the endpoint host being dialed, matching `hive.metastore.kerberos.principal`'s default; the realm comes from `krb5.conf`'s `domain_realm` mapping. `WithKerberosServicePrincipal` overrides it, for a metastore reached through a load balancer or an alias.
+    * **QOP**: `auth` only -- no security layer, so the data frames after the handshake are the plain length-prefixed frames `PLAIN` uses, with no per-frame wrapping. A server that does not offer `auth` (`hadoop.rpc.protection` set to `integrity` or `privacy`) fails the handshake rather than being silently downgraded to; the client advertises a maximum receive size of 0, since with no security layer nothing is ever wrapped.
+    * **Credentials**: a keytab or a credential cache, per `WithKerberos` in §5.1. Only `FILE:` credential caches are readable; `KRB5CCNAME` naming a `DIR:`, `KEYRING:`, or `KCM:` cache is reported rather than misread as a path.
+    * **Timeouts**: `WithConnectTimeout` and the caller's `ctx` bound the SASL frames on the metastore socket, and cancelling `ctx` also abandons an in-flight KDC exchange. It does not *bound* that exchange: the AS and TGS round trips run against the KDC over `gokrb5`'s own sockets, under `krb5.conf`'s `kdc_timeout`, which is the one piece of connection setup `WithConnectTimeout` does not reach.
   * **TLS**: `WithTLS(cfg *tls.Config)` wraps the dialed socket in `tls.Client` and completes its handshake -- bound to `ctx`/`WithConnectTimeout` exactly as the SASL handshake is (see the context-propagation bullet above) -- before the SASL/binary protocol layers are attached, for a server configured with `metastore.use.SSL=true`. `ContextClient` still owns deadlines on the raw `net.Conn`, not the `tls.Conn`: `(*tls.Conn).SetDeadline` and its `Read`/`Write` counterparts delegate straight to the underlying conn, so a deadline set on the raw conn already bounds the TLS conn's I/O. See §5.1.
 
 ### 3.2. Thrift-over-HTTP/HTTPS Transport (`http://` / `https://`)
@@ -158,10 +163,19 @@ func WithUser(name string) Option               // x-actor-username over HTTP; s
 func WithUserGroups(groups ...string) Option    // set_ugi groups over binary NOSASL; repeated calls append; no effect over HTTP or non-NOSASL binary auth
 func WithPlainAuth(user, password string) Option // SASL PLAIN over binary TCP
 func WithKerberos(principal string, keytabOrCCache ...string) Option // SASL GSSAPI over binary TCP, pure Go (gokrb5); see §3.1
+func WithKerberosServicePrincipal(spn string) Option // overrides the metastore's principal; default "hive/<host>"
+func WithKrb5Config(path string) Option         // overrides KRB5_CONFIG / /etc/krb5.conf
 func WithTLS(cfg *tls.Config) Option            // thrift:// (metastore.use.SSL=true) and https:// (overrides the http.Client's TLS config); see §3.1, §3.2
 func WithLogger(l *slog.Logger) Option          // connection lifecycle, failover, and probe events at Debug/Info; see §5.10
 func WithRPCObserver(f func(RPCInfo)) Option    // per-RPC hook; see §5.10
 ```
+
+`WithKerberos` resolves its arguments as follows (§3.1, `KERBEROS`):
+
+* `principal` is the client principal, `"user"` or `"user@REALM"`; without a realm, `krb5.conf`'s `default_realm` applies. It is required with a keytab and ignored with a credential cache, whose client principal comes from the cache.
+* The optional second argument names the credentials: a path ending in `.keytab` is read as a keytab, anything else as a credential cache. Further arguments are ignored.
+* With no second argument, the credential cache named by `KRB5CCNAME` is used, falling back to `/tmp/krb5cc_<uid>`, so a caller who has run `kinit` need only name their principal.
+* The Kerberos configuration comes from `WithKrb5Config`, else `KRB5_CONFIG`, else `/etc/krb5.conf`.
 
 Per-call catalog override:
 

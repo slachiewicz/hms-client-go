@@ -117,3 +117,28 @@ func TestKrbConfigNilWithoutWithKerberos(t *testing.T) {
 	WithPlainAuth("alice", "s3cret")(cfg)
 	assert.Nil(t, krbConfig(cfg))
 }
+
+func TestWithKerberosOverrides(t *testing.T) {
+	t.Parallel()
+	cfg := newConfig()
+	WithKerberos("alice@EXAMPLE.COM")(cfg)
+	WithKerberosServicePrincipal("hive/lb.example.com@EXAMPLE.COM")(cfg)
+	WithKrb5Config("/opt/krb5.conf")(cfg)
+
+	krb := krbConfig(cfg)
+	if assert.NotNil(t, krb) {
+		assert.Equal(t, "hive/lb.example.com@EXAMPLE.COM", krb.ServicePrincipal)
+		assert.Equal(t, "/opt/krb5.conf", krb.Krb5Conf)
+	}
+}
+
+// TestKerberosOverridesInertWithoutWithKerberos records that the two
+// override options do nothing on their own: krbConfig still returns nil,
+// so no SASL mechanism is selected.
+func TestKerberosOverridesInertWithoutWithKerberos(t *testing.T) {
+	t.Parallel()
+	cfg := newConfig()
+	WithKerberosServicePrincipal("hive/lb.example.com")(cfg)
+	WithKrb5Config("/opt/krb5.conf")(cfg)
+	assert.Nil(t, krbConfig(cfg))
+}

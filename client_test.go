@@ -2,6 +2,8 @@ package hms_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -410,4 +412,79 @@ func TestHiveVersion_String(t *testing.T) {
 	v, err := hms.ParseHiveVersion("4.0.1")
 	require.NoError(t, err)
 	assert.Equal(t, "4.0.1", v.String())
+}
+
+// TestNew_MisconfiguredAuth covers the caller mistakes that must not be
+// mistaken for an outage: New validates the binary transport's SASL
+// configuration before it dials, so each of these is ErrInvalidOperation
+// rather than the ErrUnavailable every dial failure classifies as. The
+// endpoint is never contacted, which is also why an unroutable address is
+// safe to name here.
+func TestNew_MisconfiguredAuth(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	krb5Conf := filepath.Join(dir, "krb5.conf")
+	require.NoError(t, os.WriteFile(krb5Conf, []byte(
+		"[libdefaults]\n default_realm = EXAMPLE.COM\n\n[realms]\n EXAMPLE.COM = {\n  kdc = 127.0.0.1:88\n }\n"), 0o600))
+
+	tests := []struct {
+		name string
+		opts []hms.Option
+	}{
+		{
+			name: "two SASL mechanisms at once",
+			opts: []hms.Option{
+				hms.WithPlainAuth("alice", "s3cret"),
+				hms.WithKerberos("alice@EXAMPLE.COM", filepath.Join(dir, "alice.keytab")),
+			},
+		},
+		{
+			name: "keytab that is not there",
+			opts: []hms.Option{
+				hms.WithKrb5Config(krb5Conf),
+				hms.WithKerberos("alice@EXAMPLE.COM", filepath.Join(dir, "absent.keytab")),
+			},
+		},
+		{
+			name: "credential cache that is not there",
+			opts: []hms.Option{
+				hms.WithKrb5Config(krb5Conf),
+				hms.WithKerberos("alice@EXAMPLE.COM", filepath.Join(dir, "absent.ccache")),
+			},
+		},
+		{
+			name: "krb5.conf that is not there",
+			opts: []hms.Option{
+				hms.WithKrb5Config(filepath.Join(dir, "absent.conf")),
+				hms.WithKerberos("alice@EXAMPLE.COM"),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := hms.New(context.Background(), "thrift://127.0.0.1:1", tc.opts...)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+			assert.NotErrorIs(t, err, hms.ErrUnavailable)
+		})
+	}
+}
+
+// TestNew_KerberosIgnoredOverHTTP is the other side of
+// TestNew_MisconfiguredAuth: WithKerberos has no effect over the HTTP
+// transport, so credentials that cannot be read there are inert rather
+// than a caller mistake. Whether New reaches the endpoint at all is beside
+// the point; what it must not do is reject the client as invalid.
+func TestNew_KerberosIgnoredOverHTTP(t *testing.T) {
+	t.Parallel()
+	c, err := hms.New(context.Background(), "http://127.0.0.1:1/metastore",
+		hms.WithKerberos("alice@EXAMPLE.COM", "/nonexistent/alice.keytab"))
+	if err != nil {
+		assert.NotErrorIs(t, err, hms.ErrInvalidOperation)
+		return
+	}
+	_ = c.Close()
 }

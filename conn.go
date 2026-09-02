@@ -2,6 +2,7 @@ package hms
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -193,10 +194,43 @@ func krbConfig(cfg *config) *transport.KerberosConfig {
 		return nil
 	}
 	return &transport.KerberosConfig{
-		Principal: cfg.krbPrincipal,
-		Keytab:    cfg.krbKeytab,
-		CCache:    cfg.krbCCache,
+		Principal:        cfg.krbPrincipal,
+		Keytab:           cfg.krbKeytab,
+		CCache:           cfg.krbCCache,
+		ServicePrincipal: cfg.krbService,
+		Krb5Conf:         cfg.krbConf,
 	}
+}
+
+// validateAuth reports a caller mistake in the binary transport's
+// authentication configuration: two SASL mechanisms configured at once, or
+// Kerberos credentials that cannot be read at all (a keytab, credential
+// cache, or krb5.conf that is missing or unreadable). New calls it before
+// dialing so those surface as ErrInvalidOperation, which is what they are,
+// rather than as the ErrUnavailable a failed dial would produce and so
+// look like an outage. DialBinary keeps its own mutual-exclusion check as
+// a backstop for callers that reach the transport directly.
+//
+// It applies only to a binary endpoint: neither option has any effect over
+// HTTP, so an unreadable keytab there is inert rather than a mistake.
+func validateAuth(cfg *config, eps []transport.Endpoint) error {
+	binary := false
+	for _, ep := range eps {
+		if ep.Scheme == transport.SchemeThrift {
+			binary = true
+			break
+		}
+	}
+	if !binary {
+		return nil
+	}
+	if cfg.plainUser != "" && cfg.kerberos {
+		return errors.New("hms: WithPlainAuth and WithKerberos are mutually exclusive")
+	}
+	if krb := krbConfig(cfg); krb != nil {
+		return krb.Validate()
+	}
+	return nil
 }
 
 // useLegacy reports whether method previously observed UNKNOWN_METHOD on

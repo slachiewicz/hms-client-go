@@ -90,6 +90,13 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
 
+	// A misconfigured SASL mechanism is a caller mistake too, and must not
+	// reach the dial loop below, whose every failure classifies as
+	// ErrUnavailable. See validateAuth.
+	if err := validateAuth(cfg, eps); err != nil {
+		return nil, wrapAs("New", ErrInvalidOperation, err)
+	}
+
 	cluster := ha.New(len(eps), cfg.randomOrder, time.Now)
 	pools := make([]*endpointPool, len(eps))
 	for i := range pools {

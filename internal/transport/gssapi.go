@@ -216,13 +216,19 @@ type gssapiMech struct {
 // Name returns the SASL mechanism name sent in the START frame.
 func (*gssapiMech) Name() string { return "GSSAPI" }
 
+// Complete reports whether every round has run. Until it does, a COMPLETE
+// from the server is a protocol violation the driver rejects: a peer that
+// answered the AP_REQ with COMPLETE would otherwise skip the AP_REP, and
+// with it the proof that the peer holds the service key.
+func (m *gssapiMech) Complete() bool { return m.stage == gssStageDone }
+
 // Step advances the GSSAPI handshake by one round. See gssStage for the
 // rounds; only the last one is reported done, since the server answers it
 // with COMPLETE.
-func (m *gssapiMech) Step(_ context.Context, challenge []byte) ([]byte, bool, error) {
+func (m *gssapiMech) Step(ctx context.Context, challenge []byte) ([]byte, bool, error) {
 	switch m.stage {
 	case gssStageAPReq:
-		token, err := m.initialToken()
+		token, err := m.initialToken(ctx)
 		if err != nil {
 			return nil, false, err
 		}
@@ -251,10 +257,10 @@ func (m *gssapiMech) Step(_ context.Context, challenge []byte) ([]byte, bool, er
 
 // initialToken acquires the service ticket and returns the GSS-API initial
 // context token holding an AP_REQ with the mutual-required option set.
-func (m *gssapiMech) initialToken() ([]byte, error) {
-	tkt, key, err := m.init.ServiceTicket(m.spn)
+func (m *gssapiMech) initialToken(ctx context.Context) ([]byte, error) {
+	tkt, key, err := m.serviceTicket(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("hms: kerberos: no service ticket for %s: %w", m.spn, err)
+		return nil, err
 	}
 	m.sessionKey = key
 
@@ -289,6 +295,34 @@ func (m *gssapiMech) initialToken() ([]byte, error) {
 		return nil, fmt.Errorf("hms: kerberos: marshalling the AP_REQ: %w", err)
 	}
 	return krb5Token(tokIDAPReq, b)
+}
+
+// serviceTicket acquires the service ticket under ctx. The AS and TGS
+// exchanges it may run reach the KDC over gokrb5's own sockets, which
+// gokrb5 gives no way to bind a context to, so the exchange runs on its own
+// goroutine and ctx cancellation abandons it rather than waiting out
+// krb5.conf's kdc_timeout. The result channel is buffered so the abandoned
+// goroutine still finishes and is collected.
+func (m *gssapiMech) serviceTicket(ctx context.Context) (messages.Ticket, types.EncryptionKey, error) {
+	type acquired struct {
+		ticket messages.Ticket
+		key    types.EncryptionKey
+		err    error
+	}
+	done := make(chan acquired, 1)
+	go func() {
+		ticket, key, err := m.init.ServiceTicket(m.spn)
+		done <- acquired{ticket: ticket, key: key, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			return messages.Ticket{}, types.EncryptionKey{}, fmt.Errorf("hms: kerberos: no service ticket for %s: %w", m.spn, got.err)
+		}
+		return got.ticket, got.key, nil
+	case <-ctx.Done():
+		return messages.Ticket{}, types.EncryptionKey{}, ctx.Err()
+	}
 }
 
 // verifyAPRep checks the server's reply to the AP_REQ. The reply proves
@@ -355,10 +389,10 @@ func (m *gssapiMech) selectSecurityLayer(challenge []byte) ([]byte, error) {
 			"set the metastore's hadoop.rpc.protection to authentication", offer[0])
 	}
 	// The three size octets are the largest message this client can
-	// receive. RFC 4752 has the server ignore them once no security layer
-	// is selected, since nothing is wrapped after the handshake; the
-	// maximum is sent all the same, as Java's GssKrb5Client does.
-	return m.wrap([]byte{qopAuth, 0xFF, 0xFF, 0xFF})
+	// receive. Selecting no security layer means nothing is ever wrapped,
+	// so there is no such message and the field is zero, as Java's
+	// GssKrb5Client sends it.
+	return m.wrap([]byte{qopAuth, 0, 0, 0})
 }
 
 // wrap returns payload in a GSS-API wrap token signed with the context key
@@ -567,7 +601,9 @@ func newKrbClient(cfg KerberosConfig) (*client.Client, error) {
 
 	path := cfg.CCache
 	if path == "" {
-		path = defaultCCachePath()
+		if path, err = defaultCCachePath(); err != nil {
+			return nil, err
+		}
 	}
 	cc, err := credentials.LoadCCache(path)
 	if err != nil {
@@ -591,11 +627,53 @@ func splitPrincipal(principal, defaultRealm string) (user, realm string) {
 }
 
 // defaultCCachePath returns the credential cache to use when none was
-// configured: KRB5CCNAME when set (its "FILE:" prefix stripped, the form
-// the MIT tools write), otherwise /tmp/krb5cc_<uid>.
-func defaultCCachePath() string {
-	if v := os.Getenv("KRB5CCNAME"); v != "" {
-		return strings.TrimPrefix(v, "FILE:")
+// configured: KRB5CCNAME when set, otherwise /tmp/krb5cc_<uid>.
+//
+// KRB5CCNAME may name a cache type as well as a location ("FILE:/path",
+// "DIR:/path", "KEYRING:persistent:0", "KCM:"). Only FILE is readable
+// here, since gokrb5 parses the on-disk FILE format and nothing else, so
+// any other type is reported rather than silently misread as a path.
+func defaultCCachePath() (string, error) {
+	v := os.Getenv("KRB5CCNAME")
+	if v == "" {
+		return "/tmp/krb5cc_" + strconv.Itoa(os.Getuid()), nil
 	}
-	return "/tmp/krb5cc_" + strconv.Itoa(os.Getuid())
+	kind, rest, found := strings.Cut(v, ":")
+	if !found || !isCCacheType(kind) {
+		// No type prefix: the whole value is a path.
+		return v, nil
+	}
+	if !strings.EqualFold(kind, "FILE") {
+		return "", fmt.Errorf("hms: kerberos: KRB5CCNAME names credential cache type %q, "+
+			"which this client cannot read; use a FILE: cache, or name one with WithKerberos", kind)
+	}
+	return rest, nil
+}
+
+// isCCacheType reports whether s looks like a KRB5CCNAME cache type rather
+// than the first segment of a path: a run of letters, as every type MIT
+// defines is.
+func isCCacheType(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// Validate reports whether cfg can be used to authenticate: that its
+// Kerberos configuration and credentials are readable and that a principal
+// is present when one is required. It is what lets a caller mistake -- a
+// keytab path with a typo in it, say -- surface from hms.New as an invalid
+// operation, before any endpoint is dialed, instead of as a dial failure.
+func (cfg KerberosConfig) Validate() error {
+	if cfg.initiator != nil {
+		return nil
+	}
+	_, err := newKrbClient(cfg)
+	return err
 }

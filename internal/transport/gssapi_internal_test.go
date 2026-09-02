@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,8 @@ import (
 	"github.com/jcmturner/gokrb5/v8/credentials"
 	"github.com/jcmturner/gokrb5/v8/crypto"
 	"github.com/jcmturner/gokrb5/v8/gssapi"
+	"github.com/jcmturner/gokrb5/v8/iana/chksumtype"
+	"github.com/jcmturner/gokrb5/v8/iana/errorcode"
 	"github.com/jcmturner/gokrb5/v8/iana/etypeID"
 	"github.com/jcmturner/gokrb5/v8/iana/flags"
 	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
@@ -61,6 +64,12 @@ type krbFixture struct {
 	ticket     messages.Ticket
 	sessionKey types.EncryptionKey
 	spn        string
+	// block, when non-nil, holds ServiceTicket until it is closed, standing
+	// in for a KDC that never answers; entered is closed as ServiceTicket
+	// begins, so a test can cancel exactly while the acquisition is in
+	// flight.
+	block   chan struct{}
+	entered chan struct{}
 }
 
 // newKrbFixture builds a fixture whose service principal is "hive/<host>",
@@ -71,7 +80,11 @@ func newKrbFixture(t *testing.T, host string) *krbFixture {
 	kt := keytab.New()
 	require.NoError(t, kt.AddEntry(spn, testRealm, testServiceKey, time.Now(), 1, testEtype))
 
-	creds := credentials.New(testClientPrincipal, testRealm)
+	// gokrb5's replay cache is process-wide and keyed on the client
+	// principal and the authenticator's timestamp, so two subtests running
+	// in the same second under one principal would see the second AP_REQ
+	// rejected as a replay. Each test gets its own principal.
+	creds := credentials.New(testClientPrincipal+"-"+principalSafe(t.Name()), testRealm)
 	now := time.Now().UTC()
 	tkt, key, err := messages.NewTicket(
 		creds.CName(), creds.Domain(),
@@ -83,11 +96,23 @@ func newKrbFixture(t *testing.T, host string) *krbFixture {
 	return &krbFixture{keytab: kt, creds: creds, ticket: tkt, sessionKey: key, spn: spn}
 }
 
+// principalSafe turns a test name into something usable as the single
+// component of a Kerberos principal name.
+func principalSafe(name string) string {
+	return strings.NewReplacer("/", ".", " ", "_", "@", "_").Replace(name)
+}
+
 // Credentials satisfies initiator.
 func (f *krbFixture) Credentials() *credentials.Credentials { return f.creds }
 
 // ServiceTicket satisfies initiator, standing in for the TGS exchange.
 func (f *krbFixture) ServiceTicket(spn string) (messages.Ticket, types.EncryptionKey, error) {
+	if f.entered != nil {
+		close(f.entered)
+	}
+	if f.block != nil {
+		<-f.block
+	}
 	if spn != f.spn {
 		return messages.Ticket{}, types.EncryptionKey{}, fmt.Errorf("no ticket for %q, only %q", spn, f.spn)
 	}
@@ -139,6 +164,12 @@ type gssAcceptor struct {
 	rrc uint16
 	// corruptOffer flips a byte of the offer's payload after it is signed.
 	corruptOffer bool
+	// completeAfterAPReq answers the AP_REQ with COMPLETE, cutting the
+	// handshake short before the client has seen an AP_REP.
+	completeAfterAPReq bool
+	// krbError answers the AP_REQ with a KRB-ERROR token instead of an
+	// AP_REP.
+	krbError bool
 
 	// selected records the security layer the client chose. It is read
 	// only after the acceptor's goroutine has finished.
@@ -172,6 +203,16 @@ func (a *gssAcceptor) run(ctx context.Context, s *saslTransport) error {
 	}
 	if a.rejectWith != "" {
 		return s.sendNegotiate(ctx, saslBad, []byte(a.rejectWith))
+	}
+	if a.completeAfterAPReq {
+		return s.sendNegotiate(ctx, saslComplete, nil)
+	}
+	if a.krbError {
+		token, err := krbErrorToken(apReq)
+		if err != nil {
+			return err
+		}
+		return s.sendNegotiate(ctx, saslOK, token)
 	}
 
 	sessionKey := apReq.Ticket.DecryptedEncPart.Key
@@ -242,7 +283,48 @@ func (a *gssAcceptor) verifyAPReq(token []byte) (*messages.APReq, error) {
 	if !ok {
 		return nil, errors.New("AP_REQ verification failed")
 	}
+	if err := checkGSSChecksum(apReq.Authenticator.Cksum); err != nil {
+		return nil, err
+	}
 	return &apReq, nil
+}
+
+// checkGSSChecksum validates the RFC 4121 §4.1.1 checksum the
+// authenticator carries: checksum type 0x8003, a four octet length field
+// of 16, sixteen zero octets of channel bindings, and the context flags
+// this client asks for.
+func checkGSSChecksum(sum types.Checksum) error {
+	if sum.CksumType != chksumtype.GSSAPI {
+		return fmt.Errorf("authenticator checksum type is %d, want %d (GSSAPI)", sum.CksumType, chksumtype.GSSAPI)
+	}
+	if len(sum.Checksum) != 24 {
+		return fmt.Errorf("authenticator checksum is %d bytes, want 24", len(sum.Checksum))
+	}
+	if got := binary.LittleEndian.Uint32(sum.Checksum[:4]); got != 16 {
+		return fmt.Errorf("checksum length field is %d, want 16", got)
+	}
+	for i, b := range sum.Checksum[4:20] {
+		if b != 0 {
+			return fmt.Errorf("channel binding octet %d is 0x%02x, want 0", i, b)
+		}
+	}
+	want := uint32(gssapi.ContextFlagMutual | gssapi.ContextFlagInteg)
+	if got := binary.LittleEndian.Uint32(sum.Checksum[20:24]); got != want {
+		return fmt.Errorf("context flags are 0x%08x, want 0x%08x", got, want)
+	}
+	return nil
+}
+
+// krbErrorToken wraps a KRB-ERROR in a GSS-API token, as a server whose
+// own AP_REQ checks failed at the Kerberos level answers.
+func krbErrorToken(apReq *messages.APReq) ([]byte, error) {
+	kerr := messages.NewKRBError(apReq.Ticket.SName, apReq.Ticket.Realm,
+		errorcode.KRB_AP_ERR_BAD_INTEGRITY, "ticket integrity check failed")
+	b, err := kerr.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	return krb5Token(tokIDKRBError, b)
 }
 
 // apRepToken builds the AP_REP answering auth and returns it alongside the
@@ -442,7 +524,15 @@ func newTestListener(t *testing.T) (net.Listener, string) {
 // of the test.
 func drain(t *testing.T, errs <-chan error) {
 	t.Helper()
-	for range errs { //nolint:revive // the values are deliberately discarded
+	for {
+		select {
+		case _, ok := <-errs:
+			if !ok {
+				return
+			}
+		case <-time.After(testServerTimeout):
+			t.Fatal("the acceptor goroutine did not finish")
+		}
 	}
 }
 
@@ -534,6 +624,16 @@ func TestGSSAPIHandshakeFailures(t *testing.T) {
 			name:    "security layer offer fails verification",
 			bend:    func(a *gssAcceptor, _ *krbFixture) { a.corruptOffer = true },
 			wantErr: "failed verification",
+		},
+		{
+			name:    "server completes before mutual authentication",
+			bend:    func(a *gssAcceptor, _ *krbFixture) { a.completeAfterAPReq = true },
+			wantErr: "server completed before the mechanism finished",
+		},
+		{
+			name:    "server answers with a KRB-ERROR",
+			bend:    func(a *gssAcceptor, _ *krbFixture) { a.krbError = true },
+			wantErr: "the server rejected the AP_REQ",
 		},
 	}
 
@@ -642,16 +742,82 @@ func TestSplitPrincipal(t *testing.T) {
 	}
 }
 
-// TestDefaultCCachePath does not call t.Parallel: t.Setenv forbids it.
+// TestDefaultCCachePath does not call t.Parallel, in the parent or the
+// subtests: t.Setenv forbids it.
 func TestDefaultCCachePath(t *testing.T) {
-	t.Setenv("KRB5CCNAME", "FILE:/var/run/krb5cc_test")
-	assert.Equal(t, "/var/run/krb5cc_test", defaultCCachePath())
+	tests := []struct {
+		name    string
+		env     string
+		want    string
+		wantErr string
+	}{
+		{name: "unset falls back to the uid cache", env: "", want: fmt.Sprintf("/tmp/krb5cc_%d", os.Getuid())},
+		{name: "FILE type is stripped", env: "FILE:/var/run/krb5cc_test", want: "/var/run/krb5cc_test"},
+		{name: "lowercase FILE type is stripped", env: "file:/var/run/krb5cc_test", want: "/var/run/krb5cc_test"},
+		{name: "a bare path is a path", env: "/var/run/plain", want: "/var/run/plain"},
+		{name: "DIR is not readable", env: "DIR:/run/user/1000/krb5cc", wantErr: `type "DIR"`},
+		{name: "KEYRING is not readable", env: "KEYRING:persistent:1000", wantErr: `type "KEYRING"`},
+		{name: "KCM is not readable", env: "KCM:", wantErr: `type "KCM"`},
+	}
 
-	t.Setenv("KRB5CCNAME", "/var/run/plain")
-	assert.Equal(t, "/var/run/plain", defaultCCachePath())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KRB5CCNAME", tc.env)
+			got, err := defaultCCachePath()
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Contains(t, err.Error(), "cannot read")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
 
-	t.Setenv("KRB5CCNAME", "")
-	assert.Equal(t, fmt.Sprintf("/tmp/krb5cc_%d", os.Getuid()), defaultCCachePath())
+// TestGSSAPITicketAcquisitionHonoursContext proves the KDC round trip is
+// bound to the caller's context (AGENTS.md invariant 3): gokrb5 offers no
+// way to pass one down, so the mechanism runs the exchange on its own
+// goroutine and abandons it when ctx ends.
+func TestGSSAPITicketAcquisitionHonoursContext(t *testing.T) {
+	t.Parallel()
+	ln, host := newTestListener(t)
+	fixture := newKrbFixture(t, host)
+	// Released on cleanup so the abandoned goroutine finishes before the
+	// race detector checks for leaks.
+	fixture.block = make(chan struct{})
+	fixture.entered = make(chan struct{})
+	t.Cleanup(func() { close(fixture.block) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errs := serveGSSAPI(t, ln, &gssAcceptor{fixture: fixture, layers: qopAuth}, false)
+
+	dialed := make(chan error, 1)
+	go func() {
+		_, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
+			Kerberos: &KerberosConfig{initiator: fixture},
+		})
+		dialed <- err
+	}()
+
+	// Cancel only once the acquisition is under way, so the socket is
+	// connected and the acceptor is reading: the cancellation this asserts
+	// on is the one that interrupts the KDC exchange, not the dial.
+	select {
+	case <-fixture.entered:
+	case <-time.After(testServerTimeout):
+		t.Fatal("ticket acquisition never started")
+	}
+	cancel()
+	select {
+	case err := <-dialed:
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(testServerTimeout):
+		t.Fatal("DialBinary did not return after the context was cancelled")
+	}
+	drain(t, errs)
 }
 
 func TestNewSaslGSSAPICredentialErrors(t *testing.T) {

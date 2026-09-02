@@ -40,6 +40,15 @@ type saslMech interface {
 	// PLAIN, whose one-shot initial response the server answers directly)
 	// reports done false and never has Step called again.
 	Step(ctx context.Context, challenge []byte) (response []byte, done bool, err error)
+	// Complete reports that the mechanism has finished authenticating and
+	// that a COMPLETE from the server may therefore be believed. It is not
+	// the same as Step's done: SASL PLAIN is complete once it has sent its
+	// initial response even though that response goes out with status OK.
+	// The driver rejects a COMPLETE arriving before this holds, so a peer
+	// cannot cut a multi-round mechanism short -- answering GSSAPI's AP_REQ
+	// with COMPLETE would otherwise skip mutual authentication and still
+	// hand back a usable transport.
+	Complete() bool
 }
 
 // saslTransport wraps a thrift.TTransport with SASL framing: Open()
@@ -72,6 +81,7 @@ type SaslTransport interface {
 type plainMech struct {
 	user     string
 	password string
+	sent     bool
 }
 
 // Name returns the SASL mechanism name sent in the START frame.
@@ -83,8 +93,14 @@ func (m *plainMech) Step(_ context.Context, challenge []byte) ([]byte, bool, err
 	if challenge != nil {
 		return nil, false, errors.New("hms: sasl plain: unexpected challenge from the server")
 	}
+	m.sent = true
 	return []byte("\x00" + m.user + "\x00" + m.password), false, nil
 }
+
+// Complete reports whether the initial response has been sent. PLAIN has
+// exactly one round, so the server may answer it with COMPLETE; before it,
+// a COMPLETE is a protocol violation.
+func (m *plainMech) Complete() bool { return m.sent }
 
 // NewSaslPlain wraps inner in a SaslTransport that authenticates with SASL
 // PLAIN (RFC 4616) on Open, using the Java TSaslTransport wire format: every
@@ -138,6 +154,9 @@ func (s *saslTransport) OpenContext(ctx context.Context) error {
 		}
 		switch status {
 		case saslComplete:
+			if !s.mech.Complete() {
+				return fmt.Errorf("hms: sasl %s: server completed before the mechanism finished", name)
+			}
 			s.open = true
 			return nil
 		case saslBad, saslError:
