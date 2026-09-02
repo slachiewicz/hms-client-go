@@ -196,8 +196,11 @@ func newCommitTxnRequest(txnID int64) *hive_metastore.CommitTxnRequest {
 // wrapping commit_txn. commit_txn exists on every supported version (Hive
 // 2.3+). It returns hms.ErrNotFound for an unknown or already-committed
 // transaction id, and hms.ErrInvalidOperation if the transaction was
-// already aborted.
+// already aborted or txnID is negative.
 func (c *Client) CommitTransaction(ctx context.Context, txnID int64) error {
+	if err := checkID("commit_txn", "txnID", txnID); err != nil {
+		return err
+	}
 	return c.call(ctx, "commit_txn", func(ctx context.Context, cn *conn) error {
 		return cn.commitTxn(ctx, newCommitTxnRequest(txnID))
 	})
@@ -217,8 +220,12 @@ func newAbortTxnRequest(txnID int64) *hive_metastore.AbortTxnRequest {
 
 // AbortTransaction aborts the transaction opened as txnID (SPEC §5.9),
 // wrapping abort_txn. abort_txn exists on every supported version (Hive
-// 2.3+). It returns hms.ErrNotFound for an unknown transaction id.
+// 2.3+). It returns hms.ErrNotFound for an unknown transaction id, and
+// hms.ErrInvalidOperation for a negative one.
 func (c *Client) AbortTransaction(ctx context.Context, txnID int64) error {
+	if err := checkID("abort_txn", "txnID", txnID); err != nil {
+		return err
+	}
 	return c.call(ctx, "abort_txn", func(ctx context.Context, cn *conn) error {
 		return cn.abortTxn(ctx, newAbortTxnRequest(txnID))
 	})
@@ -245,9 +252,17 @@ func newHeartbeatRequest(txnID, lockID int64) *hive_metastore.HeartbeatRequest {
 // timeout, wrapping heartbeat (SPEC §5.9). Either id may be 0 to omit it
 // from the request (see newHeartbeatRequest): a caller heartbeating a bare
 // lock outside any transaction passes txnID 0, and one heartbeating a
-// transaction with no separate lock passes lockID 0. heartbeat exists on
+// transaction with no separate lock passes lockID 0; since 0 already means
+// "none", a negative id is a caller mistake and returns
+// hms.ErrInvalidOperation without issuing the RPC. heartbeat exists on
 // every supported version (Hive 2.3+).
 func (c *Client) Heartbeat(ctx context.Context, txnID, lockID int64) error {
+	if err := checkID("heartbeat", "txnID", txnID); err != nil {
+		return err
+	}
+	if err := checkID("heartbeat", "lockID", lockID); err != nil {
+		return err
+	}
 	return c.call(ctx, "heartbeat", func(ctx context.Context, cn *conn) error {
 		return cn.heartbeat(ctx, newHeartbeatRequest(txnID, lockID))
 	})
@@ -320,9 +335,27 @@ func lockStateFromThrift(s hive_metastore.LockState) LockState {
 	return LockState(v)
 }
 
+// checkID rejects a negative transaction or lock id before it reaches the
+// wire (SPEC §5.9): 0 means "none" on every id this package takes, so a
+// negative value is a caller mistake -- an uninitialised or arithmetic-gone
+// -wrong id -- not a request the server should be asked to look up. name is
+// the argument's own name, as the caller wrote it.
+func checkID(op, name string, id int64) error {
+	if id < 0 {
+		return wrapAs(op, ErrInvalidOperation, fmt.Errorf("hms: %s must not be negative, got %d", name, id))
+	}
+	return nil
+}
+
 // lockResponseFromThrift converts a wire LockResponse (as returned by lock
-// and check_lock) to this package's LockResponse.
+// and check_lock) to this package's LockResponse. A nil response (a server
+// that answered with neither a result nor an exception) converts to the
+// zero LockResponse, whose State is no LockState value at all, rather than
+// panicking on the caller's behalf.
 func lockResponseFromThrift(r *hive_metastore.LockResponse) LockResponse {
+	if r == nil {
+		return LockResponse{}
+	}
 	out := LockResponse{
 		LockID: r.Lockid,
 		State:  lockStateFromThrift(r.State),
@@ -338,9 +371,13 @@ func lockResponseFromThrift(r *hive_metastore.LockResponse) LockResponse {
 // LockStateAcquired when every component was granted immediately, or
 // LockStateWaiting when a conflicting lock already held on the same
 // resource (e.g. an EXCLUSIVE lock) means the caller must poll
-// CheckLock(ctx, resp.LockID) until it reports LockStateAcquired. lock
-// exists on every supported version (Hive 2.3+).
+// CheckLock(ctx, resp.LockID) until it reports LockStateAcquired. A
+// negative req.TxnID returns hms.ErrInvalidOperation (0 means "no
+// transaction"). lock exists on every supported version (Hive 2.3+).
 func (c *Client) Lock(ctx context.Context, req LockRequest) (LockResponse, error) {
+	if err := checkID("lock", "TxnID", req.TxnID); err != nil {
+		return LockResponse{}, err
+	}
 	var out LockResponse
 	err := c.call(ctx, "lock", func(ctx context.Context, cn *conn) error {
 		resp, err := cn.lock(ctx, newLockRequest(req))
@@ -368,8 +405,12 @@ func newCheckLockRequest(lockID int64) *hive_metastore.CheckLockRequest {
 // Lock, wrapping check_lock (SPEC §5.9); see LockResponse.State's doc
 // comment on Lock for the LockStateWaiting polling contract. check_lock
 // exists on every supported version (Hive 2.3+). It returns
-// hms.ErrNotFound for an unknown lockID.
+// hms.ErrNotFound for an unknown lockID, and hms.ErrInvalidOperation for a
+// negative one.
 func (c *Client) CheckLock(ctx context.Context, lockID int64) (LockResponse, error) {
+	if err := checkID("check_lock", "lockID", lockID); err != nil {
+		return LockResponse{}, err
+	}
 	var out LockResponse
 	err := c.call(ctx, "check_lock", func(ctx context.Context, cn *conn) error {
 		resp, err := cn.checkLock(ctx, newCheckLockRequest(lockID))
@@ -393,8 +434,12 @@ func newUnlockRequest(lockID int64) *hive_metastore.UnlockRequest {
 
 // Unlock releases a lock previously requested via Lock, wrapping unlock
 // (SPEC §5.9). unlock exists on every supported version (Hive 2.3+). It
-// returns hms.ErrNotFound for an unknown lockID.
+// returns hms.ErrNotFound for an unknown lockID, and
+// hms.ErrInvalidOperation for a negative one.
 func (c *Client) Unlock(ctx context.Context, lockID int64) error {
+	if err := checkID("unlock", "lockID", lockID); err != nil {
+		return err
+	}
 	return c.call(ctx, "unlock", func(ctx context.Context, cn *conn) error {
 		return cn.unlock(ctx, newUnlockRequest(lockID))
 	})

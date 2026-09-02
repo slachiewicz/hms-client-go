@@ -186,6 +186,52 @@ func TestACID_Heartbeat_TxnOnlyAndLockOnly(t *testing.T) {
 
 // TestLockLevel_LockType_LockState_String covers the enum String() methods
 // used in test failure output and any caller-side logging.
+// TestACID_NegativeIDsRejected covers SPEC §5.9's "0 means none": a
+// negative transaction or lock id is a caller mistake -- an uninitialised
+// or miscomputed id -- so it is ErrInvalidOperation, refused before any
+// RPC reaches the server, rather than an ErrNotFound for an id no server
+// could ever have issued.
+func TestACID_NegativeIDsRejected(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"commit", func() error { return c.CommitTransaction(ctx, -1) }},
+		{"abort", func() error { return c.AbortTransaction(ctx, -1) }},
+		{"heartbeat txn", func() error { return c.Heartbeat(ctx, -1, 0) }},
+		{"heartbeat lock", func() error { return c.Heartbeat(ctx, 0, -1) }},
+		{"lock", func() error {
+			_, err := c.Lock(ctx, hms.LockRequest{TxnID: -1})
+			return err
+		}},
+		{"check lock", func() error {
+			_, err := c.CheckLock(ctx, -1)
+			return err
+		}},
+		{"unlock", func() error { return c.Unlock(ctx, -1) }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.call()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+		})
+	}
+
+	// Registered as cleanup, not asserted inline: the parallel subtests
+	// above only run once this function has returned.
+	t.Cleanup(func() {
+		assert.Empty(t, srv.Calls(), "a rejected id must never reach the server")
+	})
+}
+
 func TestLockLevel_LockType_LockState_String(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "DB", hms.LockLevelDB.String())

@@ -176,7 +176,9 @@ func (c *Client) markFailed(idx int, reason string) {
 }
 
 // markHealthy marks endpoint idx healthy on the cluster, from every call
-// site that observes an endpoint working again: do's own success path and
+// site that observes an endpoint working again: do's own success path, do's
+// error path for an error the endpoint actually answered with (a
+// NoSuchObjectException is a working metastore, not an outage), and
 // probeCooling's successful getStatus probe. It logs at slog.LevelInfo only
 // when this is a real transition -- idx was actually cooling beforehand
 // (Cluster.MarkHealthy's bool) -- so every successful call against an
@@ -391,7 +393,12 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 // do returns immediately rather than calling MarkFailed on endpoints that
 // may be perfectly healthy.
 //
-// Once fn has started, two decisions are made separately. Whether the conn
+// Once fn has started, an error that does not classify as ErrUnavailable
+// marks the endpoint healthy on its way out: the endpoint answered, which
+// is what health means here, so a cooling endpoint that rejects a request
+// on its merits has demonstrably recovered.
+//
+// Two further decisions are made separately. Whether the conn
 // is discarded rather than released back to its pool depends only on
 // whether classify(err) is ErrUnavailable: the connection's state on the
 // wire is unknown regardless of why fn failed, including when fn failed
@@ -471,7 +478,12 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 				}
 			}
 		} else {
+			// The endpoint answered -- with a MetaException, a
+			// NoSuchObjectException, whatever fn asked for -- so it is
+			// healthy however unwelcome the answer was; a cooling
+			// endpoint that answers this way has recovered.
 			c.release(idx, cn)
+			c.markHealthy(idx, op)
 		}
 		return wrapError(op, err)
 	}

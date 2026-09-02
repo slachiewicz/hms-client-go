@@ -149,9 +149,10 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 	}
 
 	// SocketTimeout is intentionally 0: TSocket must not manage deadlines
-	// itself (see deadlineShield). ConnectTimeout still applies since Open()
-	// is never called on this TSocket (it is constructed from an already
-	// connected conn).
+	// itself (see deadlineShield). ConnectTimeout is carried here only for
+	// completeness -- TSocket applies it in Open(), which is never called
+	// on this TSocket (it is constructed from an already connected conn),
+	// so the dial timeout is the net.Dialer's above.
 	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.ConnectTimeout}
 	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{conn}, tcfg)
 

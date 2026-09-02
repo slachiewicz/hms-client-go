@@ -191,8 +191,8 @@ func TestNotifications_EmptyLogReturnsNil(t *testing.T) {
 // notificationFromThrift's conversion via a black-box observation: Message
 // carries the fixture's compact JSON body, MessageFormat is "json-0.2", and
 // CatalogName defaults to "hive" (SPEC §5.7; internal/hmstest/handler.go's
-// recordEvent never sets CatName, matching a 2.3/3.x server that has no
-// such field at all).
+// recordEvent never sets CatName, matching a Hive 2.3 server, whose
+// NotificationEvent has no such field at all -- 3.x onward does).
 func TestNotifications_ConvertsMessageAndCatalogDefault(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

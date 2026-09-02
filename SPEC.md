@@ -447,7 +447,7 @@ type LockResponse struct {
 }
 ```
 
-`OpenTransaction` wraps `open_txns` with `OpenTxnRequest{NumTxns: 1, User: user, Hostname: host}` and returns the single allocated `txn_ids[0]`. `Lock`, `CheckLock`, and `Unlock` wrap `lock`, `check_lock`, and `unlock` respectively; `Heartbeat` wraps `heartbeat` with `HeartbeatRequest{TxnId, LockId}` (either may be omitted by passing 0, matching the RPC's optional fields).
+`OpenTransaction` wraps `open_txns` with `OpenTxnRequest{NumTxns: 1, User: user, Hostname: host}` and returns the single allocated `txn_ids[0]`. `Lock`, `CheckLock`, and `Unlock` wrap `lock`, `check_lock`, and `unlock` respectively; `Heartbeat` wraps `heartbeat` with `HeartbeatRequest{TxnId, LockId}` (either may be omitted by passing 0, matching the RPC's optional fields). Since 0 means "none", a negative transaction or lock id is a caller mistake and is rejected with `ErrInvalidOperation` before any RPC is issued.
 
 `OpenTxnRequest.TxnType`, `LockRequest.ZeroWaitReadEnabled`/`ExclusiveCTAS`/`LocklessReadsEnabled`, and `LockResponse.ErrorMessage` are Hive 4.x-only wire additions, verified absent from both the 2.3.9 and 3.1.3 IDLs (`rel/release-2.3.9`/`rel/release-3.1.3` `hive_metastore.thrift` declare `OpenTxnRequest` with only `num_txns`/`user`/`hostname`/`agentInfo`, and `LockRequest`/`LockResponse` with only the fields listed in this section's Go types above). None of them has an exported equivalent; this package leaves them at their generated zero values, which a pre-4.x server's decoder never sees regardless (§2.3).
 

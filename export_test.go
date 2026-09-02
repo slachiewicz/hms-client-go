@@ -84,26 +84,16 @@ func TableRaw(t *Table) *hive_metastore.Table             { return t.raw }
 func PartitionRaw(p *Partition) *hive_metastore.Partition { return p.raw }
 func DatabaseRaw(d *Database) *hive_metastore.Database    { return d.raw }
 
-// StripTableRaw, StripPartitionRaw and StripDatabaseRaw return a shallow
-// copy of t/p/d with the round-trip fidelity snapshot cleared, for a
-// black-box test that compares a whole Table, Partition or Database for
-// equality (e.g. via testify's assert.Equal, which does not ignore
-// unexported fields) without wanting that server-populated, unexported
-// field to participate.
+// StripTableRaw and StripDatabaseRaw return a shallow copy of t/d with the
+// round-trip fidelity snapshot cleared, for a black-box test that compares
+// a whole Table or Database for equality (e.g. via testify's assert.Equal,
+// which does not ignore unexported fields) without wanting that
+// server-populated, unexported field to participate.
 func StripTableRaw(t *Table) *Table {
 	if t == nil {
 		return nil
 	}
 	cp := *t
-	cp.raw = nil
-	return &cp
-}
-
-func StripPartitionRaw(p *Partition) *Partition {
-	if p == nil {
-		return nil
-	}
-	cp := *p
 	cp.raw = nil
 	return &cp
 }

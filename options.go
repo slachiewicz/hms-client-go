@@ -176,9 +176,9 @@ func withProbeInterval(d time.Duration) Option {
 	return func(c *config) { c.probeInterval = d }
 }
 
-// WithChunkSize sets the per-request chunk size used by GetTables and
-// AddPartitions (SPEC §5.1, §5.4, §2.3 Rule 5). The default is 1000. A
-// value below 1 is clamped to 1.
+// WithChunkSize sets the per-request chunk size used by GetTables,
+// AddPartitions, and GetPartitionsByNames (SPEC §5.1, §5.4, §5.5, §2.3
+// Rule 5). The default is 1000. A value below 1 is clamped to 1.
 func WithChunkSize(n int) Option {
 	return func(c *config) { c.chunkSize = n }
 }
@@ -247,8 +247,8 @@ func WithPlainAuth(user, password string) Option {
 // no second argument the credential cache named by KRB5CCNAME is used,
 // falling back to /tmp/krb5cc_<uid>, so a caller who has already run kinit
 // need only name their principal. Further arguments are ignored. The
-// Kerberos configuration comes from KRB5_CONFIG, falling back to
-// /etc/krb5.conf.
+// Kerberos configuration comes from WithKrb5Config, falling back to
+// KRB5_CONFIG and then to /etc/krb5.conf.
 //
 // The metastore's own principal is "hive/<host>" for the endpoint host
 // being dialed, matching hive.metastore.kerberos.principal's default.

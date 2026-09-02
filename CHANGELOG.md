@@ -40,6 +40,8 @@ a release, so everything below is unreleased.
   (SPEC §3.1, §5.1).
 - Observability: `WithLogger` for connection lifecycle, failover, and recovery-probe events,
   and `WithRPCObserver` for a per-attempt `RPCInfo` hook (SPEC §5.10).
+- Lakehouse helper constants: `DeltaStorageHandler`, `ParamIcebergCatalog`,
+  `ParamSerializationFormat`, and `ParamPath` (SPEC §6).
 
 ### Changed
 
@@ -50,6 +52,13 @@ a release, so everything below is unreleased.
   classify as `hms.ErrUnavailable` instead of an unclassified error.
 - `ConfigValSecurityException` from `get_config_value` now maps to `hms.ErrInvalidOperation`
   instead of an unclassified error (SPEC §7).
+
+### Known issues
+
+- `govulncheck` reports GO-2026-5932 (`golang.org/x/crypto/openpgp` is unmaintained) in the
+  module requirements. `golang.org/x/crypto` is required only because `gokrb5` imports its
+  `md4` package; nothing here imports `openpgp`, so the symbol scan is clean, and the
+  advisory has no fixed version to move to.
 
 ### Removed / Breaking
 

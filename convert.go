@@ -854,18 +854,35 @@ func decimalFromThrift(d *hive_metastore.Decimal) *Decimal {
 	return &Decimal{Unscaled: out, Scale: d.Scale}
 }
 
-// epoch is the Unix epoch at UTC midnight, the base dateFromThrift adds
-// Date.DaysSinceEpoch to.
-var epoch = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+// secondsPerDay converts Date.DaysSinceEpoch to the Unix seconds
+// dateFromThrift builds its instant from.
+const secondsPerDay = 24 * 60 * 60
+
+// copyPtr returns a pointer to a copy of *p, so a converted value never
+// aliases the generated struct's own field (the same rule copyStringMap
+// and copyStrings apply to maps and slices). It returns nil for a nil
+// input.
+func copyPtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
 
 // dateFromThrift converts a generated Date (whole days since the Unix
 // epoch) to a UTC time.Time at that day's midnight. It returns nil for a
 // nil input.
+//
+// The day count is a Thrift i64 and stays one all the way to the instant:
+// int(d.DaysSinceEpoch) would narrow it on a 32-bit build, turning a
+// far-future or corrupt count into some other, plausible-looking date
+// rather than the out-of-range instant it is.
 func dateFromThrift(d *hive_metastore.Date) *time.Time {
 	if d == nil {
 		return nil
 	}
-	t := epoch.AddDate(0, 0, int(d.DaysSinceEpoch))
+	t := time.Unix(d.DaysSinceEpoch*secondsPerDay, 0).UTC()
 	return &t
 }
 
@@ -899,10 +916,10 @@ func columnStatisticsFromThrift(o *hive_metastore.ColumnStatisticsObj) ColumnSta
 		out.Boolean = &BooleanColumnStats{NumTrues: s.NumTrues, NumFalses: s.NumFalses, NumNulls: s.NumNulls}
 	case d.LongStats != nil:
 		s := d.LongStats
-		out.Long = &LongColumnStats{LowValue: s.LowValue, HighValue: s.HighValue, NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+		out.Long = &LongColumnStats{LowValue: copyPtr(s.LowValue), HighValue: copyPtr(s.HighValue), NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
 	case d.DoubleStats != nil:
 		s := d.DoubleStats
-		out.Double = &DoubleColumnStats{LowValue: s.LowValue, HighValue: s.HighValue, NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+		out.Double = &DoubleColumnStats{LowValue: copyPtr(s.LowValue), HighValue: copyPtr(s.HighValue), NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
 	case d.StringStats != nil:
 		s := d.StringStats
 		out.String = &StringColumnStats{MaxColLen: s.MaxColLen, AvgColLen: s.AvgColLen, NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
