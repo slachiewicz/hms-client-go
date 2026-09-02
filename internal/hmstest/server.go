@@ -258,6 +258,18 @@ func (s *Server) SeedPartitions(catName, dbName, tblName string, parts []*hive_m
 	s.store.Partitions[tblKey(catName, dbName, tblName)] = parts
 }
 
+// SeedColumnStats installs stats directly into the store under the table
+// named by db and tbl in the default "hive" catalog, keyed the same way as
+// SeedTable/SeedPartitions -- this fake server implements no write path
+// for column statistics at all (GetTableColumnStatistics is read-only in
+// 1.0; SPEC §5.8), so every test that wants GetTableStatisticsReq to have
+// something to return must seed it this way.
+func (s *Server) SeedColumnStats(db, tbl string, stats ...*hive_metastore.ColumnStatisticsObj) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.ColumnStats[tblKey("hive", db, tbl)] = stats
+}
+
 // SeedDatabase installs db directly into the store under its own
 // CatalogName (or "hive" when nil/empty) and Name, bypassing CreateDatabase
 // and the hms package's own converters entirely -- the same rationale as

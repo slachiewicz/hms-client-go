@@ -245,6 +245,15 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	assert.Equal(t, "ICEBERG", gotIceberg.Parameters[hms.ParamTableType])
 	assert.Equal(t, hms.PrincipalUser, gotIceberg.OwnerType, "OwnerType defaults to PrincipalUser on create")
 
+	// GetTableColumnStatistics (SPEC.md §5.8, 1.0 addition, read-only): a
+	// freshly created table has no computed statistics yet on any
+	// supported version, so this asserts the get_table_statistics_req RPC
+	// path itself works everywhere -- an empty result and no error -- not
+	// any particular statistic value.
+	stats, err := c.GetTableColumnStatistics(ctx, dbName, "iceberg_tbl", []string{"id", "name"})
+	require.NoError(t, err)
+	assert.Empty(t, stats)
+
 	if expectVersion == "4.0" || expectVersion == "4.2" {
 		// Smoke test: a GetTable -> AlterTable round trip that changes
 		// nothing must not disturb Parameters, Storage.SerDe, or

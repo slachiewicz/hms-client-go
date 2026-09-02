@@ -89,6 +89,8 @@ type conn struct {
 
 	getNextNotification           func(ctx context.Context, req *hive_metastore.NotificationEventRequest) (*hive_metastore.NotificationEventResponse, error)
 	getCurrentNotificationEventId func(ctx context.Context) (*hive_metastore.CurrentNotificationEventId, error)
+
+	getTableStatisticsReq func(ctx context.Context, req *hive_metastore.TableStatsRequest) (*hive_metastore.TableStatsResult_, error)
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
@@ -171,6 +173,8 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 
 		getNextNotification:           g.GetNextNotification,
 		getCurrentNotificationEventId: g.GetCurrentNotificationEventId,
+
+		getTableStatisticsReq: g.GetTableStatisticsReq,
 	}
 
 	// set_ugi establishes the caller's identity over binary NOSASL (SPEC

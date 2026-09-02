@@ -360,13 +360,14 @@ type ColumnStatistics struct {
     // Exactly one of the following is set, matching ColumnStatisticsData's
     // wire union (idl/hive_metastore.thrift): the field corresponding to
     // ColumnType's Hive category is non-nil, the rest are nil.
-    Boolean *BooleanColumnStats
-    Long    *LongColumnStats
-    Double  *DoubleColumnStats
-    String  *StringColumnStats
-    Binary  *BinaryColumnStats
-    Decimal *DecimalColumnStats
-    Date    *DateColumnStats
+    Boolean   *BooleanColumnStats
+    Long      *LongColumnStats
+    Double    *DoubleColumnStats
+    String    *StringColumnStats
+    Binary    *BinaryColumnStats
+    Decimal   *DecimalColumnStats
+    Date      *DateColumnStats
+    Timestamp *TimestampColumnStats
 }
 
 type BooleanColumnStats struct{ NumTrues, NumFalses, NumNulls int64 }
@@ -376,10 +377,13 @@ type StringColumnStats struct{ MaxColLen int64; AvgColLen float64; NumNulls, Num
 type BinaryColumnStats struct{ MaxColLen int64; AvgColLen float64; NumNulls int64 }
 type DecimalColumnStats struct{ LowValue, HighValue *Decimal; NumNulls, NumDistinct int64 }
 type DateColumnStats struct{ LowValue, HighValue *time.Time; NumNulls, NumDistinct int64 }
+type TimestampColumnStats struct{ LowValue, HighValue *time.Time; NumNulls, NumDistinct int64 }
 type Decimal struct{ Unscaled []byte; Scale int16 }
 ```
 
-`GetTableColumnStatistics` wraps `get_table_statistics_req` (`TableStatsRequest{DbName, TblName, ColNames: columns, CatName, Engine: "hive"}`) rather than the older per-call `get_table_column_statistics`, so the whole `columns` list is fetched in one round trip. Each `ColumnStatisticsObj` in the response's `statsObj` becomes one `ColumnStatistics` value; `ColumnStatisticsData`'s active union arm selects which of `Boolean`/`Long`/.../`Date` is populated. `TimestampColumnStatsData` (the union's 8th arm) has no exported field in 1.0 and is skipped. `histogram` and `bitVectors` (raw `binary` sketches) are not exposed.
+`GetTableColumnStatistics` wraps `get_table_statistics_req` (`TableStatsRequest{DbName, TblName, ColNames: columns, CatName, Engine: "hive"}`, built through the generated `NewTableStatsRequest()` so the non-pointer "optional with default" fields `Engine`/`ID` keep the IDL defaults `"hive"`/`-1` rather than the Go zero value) rather than the older per-call `get_table_column_statistics`, so the whole `columns` list is fetched in one round trip. An empty `columns` returns `(nil, nil)` without issuing the RPC. Each `ColumnStatisticsObj` in the response's `statsObj` becomes one `ColumnStatistics` value, in the server's own order (not necessarily `columns`' order); a column the server has no statistics for is simply absent from the result, not an error. `ColumnStatisticsData`'s active union arm selects which of `Boolean`/`Long`/.../`Timestamp` is populated -- unlike 1.0's first draft, `TimestampColumnStatsData` (the union's 8th arm) is modelled too, since the generated `ColumnStatisticsData` already carries `TimestampStats` and skipping it would silently drop a `timestamp`-typed column's statistics. `Decimal.Unscaled` is copied so the result never aliases the wire struct; `Date`/`Timestamp` convert the wire's `daysSinceEpoch`/`secondsSinceEpoch` fields to a UTC `time.Time` (`Date` at that day's midnight); every `LowValue`/`HighValue` pointer is nil-safe, independently of its sibling. `histogram` and `bitVectors` (raw `binary` sketches) are not exposed.
+
+`TableStatsRequest`'s fields differ across the IDL history (verified against `hive_metastore.thrift` at `rel/release-2.3.9`, `rel/release-3.1.3`, and the 4.2.1 IDL this client is generated from): 2.3.9 declares only `dbName`/`tblName`/`colNames`; 3.1.3 adds `catName`; 4.2.1 adds `validWriteIdList`/`engine`/`id`. `get_table_statistics_req` itself exists on every supported version (2.3+), so `GetTableColumnStatistics` calls it directly with no legacy fallback. On a Hive 2.3 server, the effective catalog resolves to `nil` exactly as every other catalog-scoped call resolves it (SPEC §5.0), so no `catName` field -- one that server's own IDL never declared -- is written to the wire; `engine`/`id` are likewise fields a pre-4.x server's IDL never declared, but its Thrift decoder silently skips a field it does not recognize (the same tolerance §5.7 documents for `NotificationEventRequest`), so sending the IDL defaults there is harmless.
 
 ### 5.9. ACID: Locks and Transactions
 

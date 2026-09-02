@@ -3,6 +3,7 @@ package hms
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -228,4 +229,206 @@ func TestPartitionRoundTrip_PreservesUnmodelledFields(t *testing.T) {
 
 	got := partitionToThrift(partitionFromThrift(seed), ptr("hive"), "db", "t")
 	assert.Equal(t, seed, got)
+}
+
+// int64p and float64p are convert_internal_test.go's local counterparts to
+// ptr (convert.go), for the pointer types column-stats fixtures need.
+func int64p(v int64) *int64       { return &v }
+func float64p(v float64) *float64 { return &v }
+
+// TestColumnStatisticsFromThrift covers every ColumnStatisticsData union
+// arm columnStatisticsFromThrift converts (SPEC §5.8), including a nil
+// LowValue/HighValue on each arm that has them, proving every pointer
+// field is nil-safe independently of its sibling.
+func TestColumnStatisticsFromThrift(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		obj  *hive_metastore.ColumnStatisticsObj
+		want ColumnStatistics
+	}{
+		{
+			name: "boolean",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "boolean",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					BooleanStats: &hive_metastore.BooleanColumnStatsData{NumTrues: 1, NumFalses: 2, NumNulls: 3},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "boolean", Boolean: &BooleanColumnStats{NumTrues: 1, NumFalses: 2, NumNulls: 3}},
+		},
+		{
+			name: "long with bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "bigint",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					LongStats: &hive_metastore.LongColumnStatsData{LowValue: int64p(1), HighValue: int64p(2), NumNulls: 3, NumDVs: 4},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "bigint", Long: &LongColumnStats{LowValue: int64p(1), HighValue: int64p(2), NumNulls: 3, NumDistinct: 4}},
+		},
+		{
+			name: "long nil bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "bigint",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					LongStats: &hive_metastore.LongColumnStatsData{NumNulls: 3, NumDVs: 4},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "bigint", Long: &LongColumnStats{NumNulls: 3, NumDistinct: 4}},
+		},
+		{
+			name: "double with bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "double",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					DoubleStats: &hive_metastore.DoubleColumnStatsData{LowValue: float64p(1.5), HighValue: float64p(2.5), NumNulls: 3, NumDVs: 4},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "double", Double: &DoubleColumnStats{LowValue: float64p(1.5), HighValue: float64p(2.5), NumNulls: 3, NumDistinct: 4}},
+		},
+		{
+			name: "double nil bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "double",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					DoubleStats: &hive_metastore.DoubleColumnStatsData{NumNulls: 3, NumDVs: 4},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "double", Double: &DoubleColumnStats{NumNulls: 3, NumDistinct: 4}},
+		},
+		{
+			name: "string",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "string",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					StringStats: &hive_metastore.StringColumnStatsData{MaxColLen: 10, AvgColLen: 5.5, NumNulls: 1, NumDVs: 2},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "string", String: &StringColumnStats{MaxColLen: 10, AvgColLen: 5.5, NumNulls: 1, NumDistinct: 2}},
+		},
+		{
+			name: "binary",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "binary",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					BinaryStats: &hive_metastore.BinaryColumnStatsData{MaxColLen: 10, AvgColLen: 5.5, NumNulls: 1},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "binary", Binary: &BinaryColumnStats{MaxColLen: 10, AvgColLen: 5.5, NumNulls: 1}},
+		},
+		{
+			name: "decimal with bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "decimal(10,2)",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					DecimalStats: &hive_metastore.DecimalColumnStatsData{
+						LowValue:  &hive_metastore.Decimal{Unscaled: []byte{1}, Scale: 2},
+						HighValue: &hive_metastore.Decimal{Unscaled: []byte{2}, Scale: 2},
+						NumNulls:  3, NumDVs: 4,
+					},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "decimal(10,2)", Decimal: &DecimalColumnStats{
+				LowValue: &Decimal{Unscaled: []byte{1}, Scale: 2}, HighValue: &Decimal{Unscaled: []byte{2}, Scale: 2},
+				NumNulls: 3, NumDistinct: 4,
+			}},
+		},
+		{
+			name: "decimal nil bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "decimal(10,2)",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					DecimalStats: &hive_metastore.DecimalColumnStatsData{NumNulls: 3, NumDVs: 4},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "decimal(10,2)", Decimal: &DecimalColumnStats{NumNulls: 3, NumDistinct: 4}},
+		},
+		{
+			name: "date with bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "date",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					DateStats: &hive_metastore.DateColumnStatsData{
+						LowValue:  &hive_metastore.Date{DaysSinceEpoch: 0},
+						HighValue: &hive_metastore.Date{DaysSinceEpoch: 5},
+						NumNulls:  1, NumDVs: 2,
+					},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "date", Date: &DateColumnStats{
+				LowValue:  timePtr(time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)),
+				HighValue: timePtr(time.Date(1970, 1, 6, 0, 0, 0, 0, time.UTC)),
+				NumNulls:  1, NumDistinct: 2,
+			}},
+		},
+		{
+			name: "date nil bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "date",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					DateStats: &hive_metastore.DateColumnStatsData{NumNulls: 1, NumDVs: 2},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "date", Date: &DateColumnStats{NumNulls: 1, NumDistinct: 2}},
+		},
+		{
+			name: "timestamp with bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "timestamp",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					TimestampStats: &hive_metastore.TimestampColumnStatsData{
+						LowValue:  &hive_metastore.Timestamp{SecondsSinceEpoch: 0},
+						HighValue: &hive_metastore.Timestamp{SecondsSinceEpoch: 3600},
+						NumNulls:  1, NumDVs: 2,
+					},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "timestamp", Timestamp: &TimestampColumnStats{
+				LowValue:  timePtr(time.Unix(0, 0).UTC()),
+				HighValue: timePtr(time.Unix(3600, 0).UTC()),
+				NumNulls:  1, NumDistinct: 2,
+			}},
+		},
+		{
+			name: "timestamp nil bounds",
+			obj: &hive_metastore.ColumnStatisticsObj{
+				ColName: "c", ColType: "timestamp",
+				StatsData: &hive_metastore.ColumnStatisticsData{
+					TimestampStats: &hive_metastore.TimestampColumnStatsData{NumNulls: 1, NumDVs: 2},
+				},
+			},
+			want: ColumnStatistics{ColumnName: "c", ColumnType: "timestamp", Timestamp: &TimestampColumnStats{NumNulls: 1, NumDistinct: 2}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := columnStatisticsFromThrift(tt.obj)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// timePtr returns a pointer to t, mirroring ptr (convert.go) for time.Time
+// literals in column-stats fixtures.
+func timePtr(t time.Time) *time.Time { return &t }
+
+// TestDecimalFromThrift_CopiesUnscaled covers the fix for
+// decimalFromThrift assigning d.Unscaled directly instead of copying it
+// (mirroring TestDatabaseFromThrift_CopiesParameters's rationale): the
+// result must never alias the wire struct's slice.
+func TestDecimalFromThrift_CopiesUnscaled(t *testing.T) {
+	t.Parallel()
+	unscaled := []byte{1, 2, 3}
+	wire := &hive_metastore.Decimal{Unscaled: unscaled, Scale: 2}
+
+	out := decimalFromThrift(wire)
+	require.NotNil(t, out)
+	require.Equal(t, unscaled, out.Unscaled)
+
+	out.Unscaled[0] = 0xFF
+	assert.Equal(t, byte(1), unscaled[0], "decimalFromThrift must not alias the wire struct's Unscaled slice")
 }

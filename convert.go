@@ -747,6 +747,100 @@ func partitionsToThrift(ps []*Partition, cat *string, dbName, tableName string) 
 // 2.3 and 3.x, where NotificationEvent.catName does not exist on the wire
 // at all; see notification.go's doc comment on newNotificationEventRequest
 // for the same gap on the request side).
+// decimalFromThrift converts a generated Decimal to the exported Decimal
+// type, copying Unscaled (see copyStrings) so the result never aliases the
+// wire struct's slice. It returns nil for a nil input.
+func decimalFromThrift(d *hive_metastore.Decimal) *Decimal {
+	if d == nil {
+		return nil
+	}
+	out := make([]byte, len(d.Unscaled))
+	copy(out, d.Unscaled)
+	return &Decimal{Unscaled: out, Scale: d.Scale}
+}
+
+// epoch is the Unix epoch at UTC midnight, the base dateFromThrift adds
+// Date.DaysSinceEpoch to.
+var epoch = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// dateFromThrift converts a generated Date (whole days since the Unix
+// epoch) to a UTC time.Time at that day's midnight. It returns nil for a
+// nil input.
+func dateFromThrift(d *hive_metastore.Date) *time.Time {
+	if d == nil {
+		return nil
+	}
+	t := epoch.AddDate(0, 0, int(d.DaysSinceEpoch))
+	return &t
+}
+
+// timestampFromThrift converts a generated Timestamp (seconds since the
+// Unix epoch) to a UTC time.Time. It returns nil for a nil input.
+func timestampFromThrift(ts *hive_metastore.Timestamp) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	t := time.Unix(ts.SecondsSinceEpoch, 0).UTC()
+	return &t
+}
+
+// columnStatisticsFromThrift converts one generated ColumnStatisticsObj to
+// the exported ColumnStatistics type: ColumnStatisticsData's active union
+// arm (SPEC §5.8) selects which of Boolean/Long/.../Timestamp is
+// populated; every LowValue/HighValue pointer is nil-safe, independently
+// of its sibling (see decimalFromThrift, dateFromThrift,
+// timestampFromThrift). histogram and bitVectors (raw binary sketches) are
+// not exposed. A nil o.StatsData (not expected on the wire, since the
+// field is Thrift-required) leaves every arm nil.
+func columnStatisticsFromThrift(o *hive_metastore.ColumnStatisticsObj) ColumnStatistics {
+	out := ColumnStatistics{ColumnName: o.ColName, ColumnType: o.ColType}
+	d := o.StatsData
+	if d == nil {
+		return out
+	}
+	switch {
+	case d.BooleanStats != nil:
+		s := d.BooleanStats
+		out.Boolean = &BooleanColumnStats{NumTrues: s.NumTrues, NumFalses: s.NumFalses, NumNulls: s.NumNulls}
+	case d.LongStats != nil:
+		s := d.LongStats
+		out.Long = &LongColumnStats{LowValue: s.LowValue, HighValue: s.HighValue, NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+	case d.DoubleStats != nil:
+		s := d.DoubleStats
+		out.Double = &DoubleColumnStats{LowValue: s.LowValue, HighValue: s.HighValue, NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+	case d.StringStats != nil:
+		s := d.StringStats
+		out.String = &StringColumnStats{MaxColLen: s.MaxColLen, AvgColLen: s.AvgColLen, NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+	case d.BinaryStats != nil:
+		s := d.BinaryStats
+		out.Binary = &BinaryColumnStats{MaxColLen: s.MaxColLen, AvgColLen: s.AvgColLen, NumNulls: s.NumNulls}
+	case d.DecimalStats != nil:
+		s := d.DecimalStats
+		out.Decimal = &DecimalColumnStats{LowValue: decimalFromThrift(s.LowValue), HighValue: decimalFromThrift(s.HighValue), NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+	case d.DateStats != nil:
+		s := d.DateStats
+		out.Date = &DateColumnStats{LowValue: dateFromThrift(s.LowValue), HighValue: dateFromThrift(s.HighValue), NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+	case d.TimestampStats != nil:
+		s := d.TimestampStats
+		out.Timestamp = &TimestampColumnStats{LowValue: timestampFromThrift(s.LowValue), HighValue: timestampFromThrift(s.HighValue), NumNulls: s.NumNulls, NumDistinct: s.NumDVs}
+	}
+	return out
+}
+
+// columnStatisticsListFromThrift converts a slice of generated
+// ColumnStatisticsObj values, preserving the server's own order. It
+// returns nil for a nil or empty input (see copyStringMap).
+func columnStatisticsListFromThrift(objs []*hive_metastore.ColumnStatisticsObj) []ColumnStatistics {
+	if len(objs) == 0 {
+		return nil
+	}
+	out := make([]ColumnStatistics, len(objs))
+	for i, o := range objs {
+		out[i] = columnStatisticsFromThrift(o)
+	}
+	return out
+}
+
 func notificationFromThrift(e *hive_metastore.NotificationEvent) NotificationEvent {
 	out := NotificationEvent{
 		ID:            e.EventId,

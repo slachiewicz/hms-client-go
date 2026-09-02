@@ -206,3 +206,19 @@ func TestNewNotificationEventRequest_SetsMaxEventsAndEventTypeList(t *testing.T)
 	assert.Equal(t, int32(10), *got.MaxEvents)
 	assert.Equal(t, []string{"CREATE_TABLE"}, got.EventTypeList)
 }
+
+// TestNewTableStatsRequest_KeepsIDLDefaultsOverWire covers stats.go's
+// GetTableColumnStatistics building a TableStatsRequest via
+// NewTableStatsRequest() rather than a bare struct literal, which would
+// send Engine="" and ID=0 on the wire instead of the IDL defaults ("hive"
+// and -1); neither field has an equivalent on the exported API.
+func TestNewTableStatsRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	req := newTableStatsRequest("db", "tbl", nil, []string{"c1"})
+
+	got := hive_metastore.NewTableStatsRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, "hive", got.Engine)
+	assert.Equal(t, int64(-1), got.ID)
+}
