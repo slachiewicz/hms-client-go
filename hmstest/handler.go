@@ -1084,10 +1084,7 @@ func (h *handler) DropPartitionsReq(_ context.Context, req *hive_metastore.DropP
 			}
 		}
 		if idx < 0 {
-			if req.IfExists {
-				continue
-			}
-			return nil, &hive_metastore.NoSuchObjectException{Message: "partition " + name + " not found"}
+			return nil, &hive_metastore.NoSuchObjectException{Message: "Some partitions to drop are missing"}
 		}
 		existing = append(existing[:idx], existing[idx+1:]...)
 	}

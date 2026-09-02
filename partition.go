@@ -583,6 +583,9 @@ func (c *Client) DropPartitionsByNames(ctx context.Context, dbName, tableName st
 			chunk := names[i:end]
 			req := newDropPartitionsRequest(dbName, tableName, cat, chunk, deleteData, ifExists)
 			if _, err := cn.dropPartitionsReq(ctx, req); err != nil {
+				if ifExists && classify(err) == ErrNotFound {
+					continue
+				}
 				return err
 			}
 		}
