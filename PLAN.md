@@ -146,5 +146,58 @@ Defined in SPEC §5. Implementation notes:
 - [x] Coverage: Iceberg, Delta Lake, and Hudi table creation, schema evolution, partition batch add/alter/drop, catalog operations on 3.x/4.x, `ErrNotSupported` on 2.x.
 - [x] `.github/workflows/integration.yml` with the matrix above. First fully green run: 2026-09-02, all five jobs (2.3.9, 3.1.3, 4.0.1, 4.2.1 binary, 4.2.1 HTTP).
 
+### Slice 7: `set_ugi` over binary NOSASL
+- [ ] `options.go`: `WithUserGroups`. `client.go`/`conn.go`: on a newly dialed binary connection with no SASL auth configured and `WithUser` set, call `set_ugi(user, groups)` once before the connection is used for anything else. See SPEC §3.1 and §5.1.
+- [ ] `internal/hmstest`: a `set_ugi` handler recording the `(user, groups)` it was called with, so a test can assert it fired exactly once per new connection and never over HTTP or under SASL PLAIN/Kerberos.
+- [ ] Integration matrix: no new job; covered by the existing binary-TCP legs (2.3.9, 3.1.3, 4.0.1, 4.2.1) asserting `set_ugi` is accepted.
+
+### Slice 8: Partition lookups & `AlterDatabase`
+- [ ] `partition.go`: `GetPartitionsByNames`, `GetPartitionsByFilter`, `GetPartitionNamesByValues`, chunked per SPEC §5.5. `client.go`: `AlterDatabase` per SPEC §5.3. `conn.go`: bind `get_partitions_by_names`, `get_partitions_by_filter`, `get_partition_names_ps`, `alter_database`.
+- [ ] Fold in the SPEC §5.0 catalog-resolution fix: `AlterTable` honours `newTable.CatalogName` the same way `CreateTable` does.
+- [ ] `internal/hmstest`: handlers for the four RPCs above, backed by the existing in-memory store.
+- [ ] Unit tests: chunking boundary for `GetPartitionsByNames`, filter string passed through verbatim, prefix matching for `GetPartitionNamesByValues`, `AlterDatabase` round-trip.
+- [ ] Integration matrix: extend the 3.x/4.x legs (these RPCs are unavailable on 2.3 per SPEC §2.1) with a partition-filter and partition-by-names lookup, and a database alter.
+
+### Slice 9: Binary and HTTP TLS
+- [ ] `options.go`: `WithTLS` per SPEC §5.1. `internal/transport/binary.go`: wrap the dialed socket in `tls.Client` before the SASL/binary protocol layers, for `thrift://` against a `metastore.use.SSL=true` server. `internal/transport/http.go`: apply the configured `*tls.Config` to the `*http.Client`'s `Transport.TLSClientConfig` for `https://`. See SPEC §3.1, §3.2.
+- [ ] Unit tests: binary TLS handshake against an in-process TLS listener wrapping `internal/hmstest`; HTTP TLS client config applied and overridable by a caller-supplied `WithHTTPClient`.
+- [ ] Integration matrix: no new job; a TLS-enabled 4.2.1 leg is tracked as a follow-up, not required for 1.0 sign-off, since it needs a certificate-bearing Docker image.
+
+### Slice 10: Notifications
+- [ ] `client.go` (or a new `notification.go`): `CurrentNotificationID`, `GetNextNotifications`, `NotificationEvent` per SPEC §5.7. `conn.go`: bind `get_current_notificationEventId`, `get_next_notification`. `convert.go`: `NotificationEvent` conversion.
+- [ ] `internal/hmstest`: an append-only event log driven by the store's own mutations (create/drop/alter), plus handlers for the two RPCs.
+- [ ] Unit tests: event ordering, `eventTypes` filtering, `lastEventID` pagination.
+- [ ] Integration matrix: extend every leg (2.3+) with a notification-id check after a table create.
+
+### Slice 11: Column statistics (read-only)
+- [ ] A new `stats.go`: `GetTableColumnStatistics` and the `ColumnStatistics`/`*ColumnStats`/`Decimal` types per SPEC §5.8. `conn.go`: bind `get_table_statistics_req`. `convert.go`: the `ColumnStatisticsData` union-arm conversion.
+- [ ] `internal/hmstest`: a `get_table_statistics_req` handler serving fixture stats for at least one column of each of the seven exposed types (bool/long/double/string/binary/decimal/date).
+- [ ] Unit tests: each union arm converts to the right `ColumnStatistics` field with the rest nil; an unset optional low/high value stays nil, not a zero-valued pointer.
+- [ ] Integration matrix: extend the 3.x/4.x legs with a column-statistics read after `ANALYZE TABLE` (or an equivalent stats-populating step) on a fixture table.
+
+### Slice 12: ACID locks and transactions
+- [ ] A new `txn.go`: `OpenTransaction`, `CommitTransaction`, `AbortTransaction`, `Heartbeat`, `Lock`, `CheckLock`, `Unlock`, and the `Lock*`/`LockRequest`/`LockResponse` types per SPEC §5.9. `conn.go`: bind `open_txns`, `commit_txn`, `abort_txn`, `heartbeat`, `lock`, `check_lock`, `unlock`.
+- [ ] `internal/hmstest`: a minimal txn/lock table (open txn ids, lock ids and their state) backing the seven handlers above.
+- [ ] Unit tests: open/commit/abort round-trip, a lock request that returns `LockStateWaiting` then `LockStateAcquired` on `CheckLock`, heartbeat on a txn-only and lock-only request.
+- [ ] Integration matrix: extend the 2.3+ legs with an open/lock/heartbeat/commit cycle against a fixture table.
+
+### Slice 13: `SkewedInfo` exposure (gated)
+- [ ] Gate: track the upstream Thrift Go fix for THRIFT-2063 (PR 3778). Not started until a `github.com/apache/thrift` release containing it is available to pin in `go.mod`.
+- [ ] Once ungated: `scripts/gen-thrift.sh` stops removing `skewedColValueLocationMaps` from the IDL; regenerate `gen/`. `types.go`: `SkewedInfo`, `SkewedLocation` per SPEC §5.4. `convert.go`: `StorageDescriptor.SkewedInfo` conversion, including the list-keyed map.
+- [ ] `internal/hmstest`: a fixture table with skewed columns, values, and at least one location-map entry.
+- [ ] Unit tests: round-trip of `ColumnValueLocationMaps` through `CreateTable`/`GetTable`.
+- [ ] Integration matrix: extend the 3.x/4.x legs (skew is unsupported on 2.3) with a skewed-table create/read.
+
+### Slice 14: Kerberos (pure Go)
+- [ ] `go.mod`: add `github.com/jcmturner/gokrb5/v8` (pure Go, zero Cgo, per AGENTS.md invariant #1). `options.go`: `WithKerberos` per SPEC §5.1. `internal/transport/binary.go` or a new `internal/transport/gssapi.go`: SASL GSSAPI (QOP `auth`) negotiation over the binary socket, wired in alongside the existing SASL PLAIN path in `DialBinary`. See SPEC §3.1.
+- [ ] Unit tests: GSSAPI negotiation frames against a fake KDC/acceptor (or a recorded exchange), and that `WithPlainAuth` and `WithKerberos` are mutually exclusive.
+- [ ] Integration matrix: a Kerberized 4.2.1 leg is tracked as a follow-up (needs a KDC sidecar in the Docker Compose fixture), not required for 1.0 sign-off.
+
+### Slice 15: Observability & API stability
+- [ ] `options.go`: `WithLogger`, `WithRPCObserver` per SPEC §5.10. `client.go`: emit `RPCInfo` from the `call`/`read` retry loop (`do`); log connection dial/close, `MarkFailed`/`MarkHealthy` transitions, and recovery-probe sweeps through the configured logger.
+- [ ] `go.mod`/tag policy: confirm module tags stay `v0.x` until the `polytable` adoption note below ships, per SPEC §8.
+- [ ] Unit tests: an observer sees one `RPCInfo` per attempt (including retried attempts) with the right `Attempt`/`Err`; a logger sees a dial/close pair and a failover transition under a simulated endpoint outage.
+- [ ] Integration matrix: no new job; observability is exercised incidentally by the other legs via `WithLogger` attached to the test harness's own logger.
+
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.

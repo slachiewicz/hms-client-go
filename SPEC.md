@@ -22,9 +22,10 @@ restate signatures or version claims.
 
 ### 1.1. Out of scope for 1.0
 * **Hive 2.2 and earlier**. Hive 2.2 lacks `get_table_req`, and the Hive 4 IDL this client is generated from no longer declares the legacy `get_table` / `get_table_objects_by_name` RPCs, so no fallback can be generated. Hive 2.2 is end of life; Spark 4 still defaults its metastore client to 2.3.10, which makes 2.3 the practical floor.
-* **Kerberos / GSSAPI**. Native C Kerberos is forbidden by the zero-Cgo invariant. A pure-Go implementation (for example `gokrb5`) is acceptable in a later release but is not part of 1.0.
 * **Compact protocol** (`metastore.thrift.compact.protocol.enabled=true`) and **framed transport** (`metastore.thrift.framed.transport.enabled=true`). Both are off by default on every supported server version.
-* **`SkewedInfo.skewedColValueLocationMaps`**. Its Thrift type is `map<list<string>, string>`, which Go cannot express and the Thrift Go generator rejects (THRIFT-2063). The field is removed from the IDL before generation. Reads are unaffected: the generated code skips the unknown field with Thrift's generic `Skip`, which handles list-typed keys. The client never writes it. Skewed column names and values (fields 1 and 2) are fully supported.
+* **`SkewedInfo.skewedColValueLocationMaps`**, gated on a Thrift Go release that can represent it (THRIFT-2063; fix pending upstream in PR 3778). Until that lands, the field is removed from the IDL before generation exactly as it is removed today; see Appendix A for the wire detail and §5.4 for the Go shape the client will expose once the gate clears.
+
+Kerberos / GSSAPI is **in scope for 1.0** via a pure-Go implementation (`gokrb5`); native C Kerberos remains forbidden by the zero-Cgo invariant. See §3.1 and §5.1 (`WithKerberos`).
 
 ---
 
@@ -32,7 +33,7 @@ restate signatures or version claims.
 
 ### 2.1. RPC availability by HMS version
 
-Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `rel/release-3.1.3` and `rel/release-4.2.1`. The client is generated from the 4.0.1 IDL, so an RPC must exist there to be callable at all.
+Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `rel/release-3.1.3` and `rel/release-4.2.1`. The client is generated from the 4.2.1 IDL, so an RPC must exist there to be callable at all.
 
 | RPC | 2.3.x | 3.x | 4.x | In 4.2.1 IDL |
 | :--- | :-: | :-: | :-: | :-: |
@@ -71,12 +72,15 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **Framing / Buffering**: `TBufferedTransport` (default buffer size: 8192 bytes). No `TFramedTransport`.
 * **Protocol**: `TBinaryProtocol` (strict write: true, strict read: true).
 * **Context propagation**:
-  * `thrift.TTransport.Read` and `Write` receive no context. Since Thrift 0.14 every `thrift.TProtocol` method receives one, so the client binds the request context at the **protocol layer**: before each RPC the socket is handed the request context and derives `net.Conn.SetReadDeadline` / `SetWriteDeadline` from `ctx.Deadline()`, falling back to the configured socket timeout when the context has no deadline.
-  * Cancellation is enforced with `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })`, registered per RPC and released on return. A cancelled RPC returns `ctx.Err()` wrapped in `ErrUnavailable`; the connection is discarded and a new one is provisioned for the next call.
+  * Binding happens in the `thrift.TClient` wrapper, `internal/transport.ContextClient`, not at the protocol layer: its `Call` is the single choke point every RPC passes through. Before delegating to the wrapped client, it sets the raw `net.Conn`'s deadline from `ctx.Deadline()`, falling back to the configured socket timeout when the context carries none, and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })` to cut that deadline short on cancellation; the stop handle is released when `Call` returns.
+  * The `thrift.TSocket` handed to Thrift is constructed over a `deadlineShield` wrapping the same `net.Conn`: `SetDeadline`/`SetReadDeadline`/`SetWriteDeadline` on it are no-ops, so `TSocket`'s own per-read/write deadline resets (driven by its `TConfiguration.SocketTimeout`, left at 0) never fight `ContextClient` for ownership of the connection's deadline.
+  * `ContextClient` does not exist yet during the SASL handshake (§3.1 Authentication), since it wraps the client built on top of the fully assembled transport. `DialBinary` gives the handshake the same deadline/cancel treatment directly against the raw `net.Conn` for its duration, then clears the deadline before `ContextClient` takes over.
+  * A cancelled RPC returns `ctx.Err()` wrapped in `ErrUnavailable`; the connection is discarded and a new one is provisioned for the next call.
 * **Authentication**:
-  * `NOSASL` / `NONE`: raw binary protocol, the default.
-  * `LDAP` / `CUSTOM`: SASL `PLAIN` framing (`TSaslClientTransport`, RFC 4616 initial response `\0user\0password`) over the same socket. The client implements the SASL negotiation handshake in pure Go.
-  * `KERBEROS`: out of scope for 1.0 (see §1.1).
+  * `NOSASL` / `NONE`: raw binary protocol, the default. When `WithUser` (and optionally `WithUserGroups`) is set and no SASL auth is configured, the client calls `set_ugi(user, groups)` once per newly dialed connection, mirroring the Java `HiveMetaStoreClient`'s behavior under `hive.metastore.execute.setugi` (§5.1).
+  * `LDAP` / `CUSTOM`: SASL `PLAIN` framing (RFC 4616 initial response `\0user\0password`), 1-byte-status/4-byte-length-prefixed negotiation frames followed by 4-byte-length-prefixed data frames (the Java `TSaslTransport` wire format). The client implements the SASL negotiation handshake in pure Go (`internal/transport/sasl.go`); see the context-propagation bullet above for how the handshake gets its deadline.
+  * `KERBEROS`: SASL GSSAPI (QOP `auth`) over the same socket, using a pure-Go Kerberos implementation (`gokrb5`) rather than native C Kerberos, keeping the zero-Cgo invariant. Selected with `WithKerberos`; see §5.1.
+  * **TLS**: `WithTLS(cfg *tls.Config)` wraps the dialed socket in `tls.Client` before the SASL/binary protocol layers are attached, for a server configured with `metastore.use.SSL=true`. See §5.1.
 
 ### 3.2. Thrift-over-HTTP/HTTPS Transport (`http://` / `https://`)
 * **Availability**: Hive 4.0+ only. Connecting to a 2.x or 3.x endpoint over HTTP fails with `ErrUnavailable`: the endpoint does not speak Thrift-over-HTTP at all, so the first `TApplicationException` or non-Thrift response classifies as a transport failure, not as `ErrNotSupported` (reserved for `UNKNOWN_METHOD` and the catalog case in §2.3 Rule 1).
@@ -89,6 +93,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
   * Auth mode `JWT`: `Authorization: Bearer <token>`.
   * Every other auth mode: `x-actor-username: <user>`. The user defaults to the OS user when not configured.
   * Arbitrary additional headers supplied by the caller (for Knox or other reverse proxies).
+* **TLS**: `WithTLS(cfg *tls.Config)` (§5.1) overrides the `*http.Client`'s `Transport.TLSClientConfig` for `https://` endpoints, the same option used for `thrift://` (§3.1).
 
 ---
 
@@ -103,17 +108,32 @@ uris := "thrift://hms-01.internal:9083,thrift://hms-02.internal:9083,thrift://hm
 ### 4.2. Failover Policy
 This mirrors the Java `HiveMetaStoreClient`: sticky active endpoint, not round-robin.
 1. **Active endpoint**: the client connects to endpoints in list order (or random order when `WithRandomEndpointOrder()` is set) and stays on the first one that answers.
-2. **Failure detection**: on `io.EOF`, `syscall.ECONNREFUSED`, `syscall.ECONNRESET`, `syscall.ETIMEDOUT`, a dial error, or a context deadline caused by socket I/O:
+2. **Failure detection**: on `io.EOF`, `syscall.ECONNREFUSED`, `syscall.ECONNRESET`, `syscall.ETIMEDOUT`, a dial error, a context deadline caused by socket I/O, or a `TApplicationException` in the frame-desync class (`BAD_SEQUENCE_ID`, `INVALID_MESSAGE_TYPE_EXCEPTION`, `PROTOCOL_ERROR`, `WRONG_METHOD_NAME`):
    * The active endpoint is marked unhealthy with an exponential backoff cooldown (initial 1s, max 30s, full jitter).
-   * The request is retried on the next healthy endpoint.
-3. **Retry budget**: at most 3 attempts per RPC across endpoints by default (`WithMaxRetries`). Non-idempotent RPCs (`create_*`, `add_partitions*`, `drop_*`) are retried only when the failure happened before the request was flushed.
-4. **Recovery**: a background probe (`fb303.getStatus`) re-enables cooled-down endpoints. Interval 30s, cancelled by `Close`.
+   * A desync exception additionally means the shared connection's read/write framing is itself corrupted, not merely that one call failed, so the connection is always discarded rather than returned to its pool, regardless of point 3 below.
+   * The request is retried on the next healthy endpoint, subject to point 3.
+3. **Retry budget**: at most 3 attempts per RPC across endpoints by default (`WithMaxRetries`). Two distinct decisions apply:
+   * A connection that could not be **acquired** at all (dial failure, or no pooled connection available) is always retried on another endpoint — this holds for every RPC, idempotent or not, since nothing has reached the server yet.
+   * Once the RPC has **started** on an acquired connection, only an idempotent (read-only, `get_*`) RPC is retried elsewhere, and only on `ErrUnavailable` while the caller's context is still live: `GetCatalogs`, `GetCatalog`, `GetAllDatabases`, `GetDatabase`, `GetAllTables`, `GetTable`, `GetTables`, `GetPartitions`, `GetPartitionNames`, `GetConfigValue`, `ServerVersion`. Every other RPC (`Create*`, `Alter*`, `Drop*`, `AddPartitions`, and the ACID/lock RPCs in §5.9) returns the failure immediately once started, since the request may already have reached the server.
+   * A cancelled or expired caller context never cools an endpoint (`MarkFailed` is not called) and is never itself a reason to retry: the failure is the caller's, not the endpoint's.
+4. **Recovery**: a background probe (`fb303.getStatus`) re-enables cooled-down endpoints. Interval 30s. The probe runs for every client, including one constructed with a single endpoint, and on a successful probe hands the freshly dialed, already-healthy connection to that endpoint's pool rather than discarding it. The probe goroutine is cancelled by `Close` and awaited before `Close` returns.
 
 ---
 
 ## 5. API Interface Specification
 
 Package: `hms` at the module root (`import "github.com/slachiewicz/hms-client-go"`). No generated Thrift type appears in any exported signature.
+
+### 5.0. Catalog resolution
+
+Every call that touches a catalog-scoped object resolves the *effective catalog* the same way, in this precedence order, highest first:
+
+1. A per-call `InCatalog(name)` (`CatalogOption`), when passed to that call.
+2. The struct's own `CatalogName` field, on a create/alter call that takes a struct (`CreateDatabase`, `CreateTable`; `AlterTable` honours `newTable.CatalogName` the same way — **1.0 fix**: today `AlterTable` only looks at its `opts ...CatalogOption` and ignores `newTable.CatalogName`).
+3. `WithCatalog(name)`, the client-wide default set at construction.
+4. `"hive"`, the built-in default.
+
+On a connection whose server does not support catalogs (Hive 2.3; probed once per connection via `get_catalogs`, §2.3 Rule 1): the resolved default catalog `"hive"` is never written on the wire — the request is sent exactly as it would be to a catalog-unaware server — and resolving to any other catalog returns `ErrNotSupported` without issuing the RPC.
 
 ### 5.1. Constructor and options
 
@@ -129,8 +149,13 @@ func WithPoolSize(n int) Option
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
-func WithUser(name string) Option               // x-actor-username identity over HTTP only
+func WithUser(name string) Option               // x-actor-username over HTTP; set_ugi user over binary NOSASL (§3.1)
+func WithUserGroups(groups ...string) Option    // set_ugi groups over binary NOSASL; no effect over HTTP or non-NOSASL binary auth
 func WithPlainAuth(user, password string) Option // SASL PLAIN over binary TCP
+func WithKerberos(principal string, keytabOrCCache ...string) Option // SASL GSSAPI over binary TCP, pure Go (gokrb5); see §3.1
+func WithTLS(cfg *tls.Config) Option            // thrift:// (metastore.use.SSL=true) and https:// (overrides the http.Client's TLS config); see §3.1, §3.2
+func WithLogger(l *slog.Logger) Option          // connection lifecycle, failover, and probe events at Debug/Info; see §5.10
+func WithRPCObserver(f func(RPCInfo)) Option    // per-RPC hook; see §5.10
 ```
 
 Per-call catalog override:
@@ -166,15 +191,19 @@ type Database struct {
     Parameters  map[string]string
     OwnerName   string
     OwnerType   PrincipalType
+    CreateTime  time.Time // 1.0 addition
 }
 
 func (c *Client) GetAllDatabases(ctx context.Context, opts ...CatalogOption) ([]string, error)
 func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOption) (*Database, error)
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error
+func (c *Client) AlterDatabase(ctx context.Context, name string, db *Database, opts ...CatalogOption) error
 func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, cascade, ifExists bool, opts ...CatalogOption) error
 ```
 
-An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side as `<warehouse>/<db>.db` the way Hive's own DDL path does, since the generated `locationUri` field's default Thrift requiredness would otherwise put an empty string on the wire and the server rejects that outright. The warehouse root is the resolved catalog's own `LocationUri` (`get_catalog`) on any server that supports catalogs (Hive 3.1+; a non-default catalog is its own warehouse root by definition), or the `hive.metastore.warehouse.dir` configuration value on a server that predates catalogs (Hive 2.3), since it has no catalog to ask. Hive 3.1's `get_config_value` does not resolve that key to its `metastore.warehouse.dir` alias the way Hive 4's does (it answers empty), which is why catalogs are asked instead of the config value wherever they exist.
+An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side before the RPC is issued; see Appendix A for the warehouse-dir resolution rule and the Hive 3.1 `get_config_value` quirk it works around.
+
+`AlterDatabase` wraps `alter_database(dbname, db)` (1.0 addition), replacing the named database's mutable properties (`Description`, `LocationURI`, `Parameters`, `OwnerName`, `OwnerType`) with `db`'s.
 
 ### 5.4. Table Operations
 
@@ -184,6 +213,7 @@ type Table struct {
     DatabaseName     string
     TableName        string
     Owner            string
+    OwnerType        PrincipalType // 1.0 addition
     CreateTime       time.Time
     LastAccessTime   time.Time
     Retention        int32
@@ -203,7 +233,24 @@ func (c *Client) AlterTable(ctx context.Context, dbName, tableName string, newTa
 func (c *Client) DropTable(ctx context.Context, dbName, tableName string, deleteData, ifExists bool, opts ...CatalogOption) error
 ```
 
-`GetTables` chunks `tableNames` into requests of at most 1000 names.
+`GetTables` chunks `tableNames` into requests of at most 1000 names (default; `withChunkSize` test hook). Chunking is sequential, not parallel: chunks are sent one after another, and for a mutating chunked call (`AddPartitions`, §5.5) a failure partway through leaves every earlier chunk already committed on the server.
+
+`StorageDescriptor` has no `SkewedInfo` field today; exposing it is a 1.0 addition, targeting this shape:
+
+```go
+type SkewedInfo struct {
+    ColumnNames             []string
+    ColumnValues            [][]string
+    ColumnValueLocationMaps []SkewedLocation
+}
+
+type SkewedLocation struct {
+    Values   []string
+    Location string
+}
+```
+
+`ColumnNames` and `ColumnValues` (wire fields 1 and 2, plain `list<string>` / `list<list<string>>`) are not affected by the THRIFT-2063 gate in §1.1 and ship as soon as the field is added. `ColumnValueLocationMaps` (wire field 3, `map<list<string>, string>`) is the gated part: it is dropped from the generated code until a Thrift Go release fixes THRIFT-2063 (Appendix A), exactly as it is dropped today.
 
 ### 5.5. Partition Operations
 
@@ -225,18 +272,169 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, ifNotExists bool, opts ...CatalogOption) error
 func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, opts ...CatalogOption) error
 func (c *Client) DropPartition(ctx context.Context, dbName, tableName string, partVals []string, deleteData, ifExists bool, opts ...CatalogOption) error
+
+// 1.0 additions
+func (c *Client) GetPartitionsByNames(ctx context.Context, db, tbl string, names []string, opts ...CatalogOption) ([]*Partition, error)
+func (c *Client) GetPartitionsByFilter(ctx context.Context, db, tbl, filter string, maxParts int, opts ...CatalogOption) ([]*Partition, error)
+func (c *Client) GetPartitionNamesByValues(ctx context.Context, db, tbl string, partialValues []string, maxParts int, opts ...CatalogOption) ([]string, error)
 ```
 
 `DropPartition` with `ifExists == false` on a missing partition returns `ErrNotFound`; with `ifExists == true` it returns `nil`.
+
+`AddPartitions` chunks `partitions` the same way `GetTables` chunks `tableNames` (§5.4): at most 1000 per request by default, sent sequentially, so a failure on a later chunk leaves the earlier chunks already committed on the server.
+
+`GetPartitionsByNames` wraps `get_partitions_by_names` and is chunked like `AddPartitions`. `GetPartitionsByFilter` wraps `get_partitions_by_filter`; `filter` is Hive's partition-filter expression grammar (e.g. `"year = 2024 AND month > 6"`) and is passed through to the server verbatim — the client does not parse or validate it. `GetPartitionNamesByValues` wraps `get_partition_names_ps`, matching partitions whose leading partition-key values equal `partialValues` (a prefix; trailing keys are wildcarded).
 
 ### 5.6. Utilities
 
 ```go
 func (c *Client) GetConfigValue(ctx context.Context, name, defaultValue string) (string, error)
 func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) // parsed from getVersion / get_config_value
+
+type HiveVersion struct {
+    Major int
+    Minor int
+    Patch int
+    Raw   string // the server's literal, unparsed version string
+}
+
+func ParseHiveVersion(s string) (HiveVersion, error)
+func (v HiveVersion) String() string // returns Raw
 ```
 
-`getVersion` does not always report the server's release: every Hive 3.x metastore answers the metastore schema line "3.0" instead, and so does Hive 2.3.x. `ParseHiveVersion` accepts both the three-component release form and this two-component schema-line form (defaulting `Patch` to 0). When `getVersion` reports a schema line, `ServerVersion` tells 3.x from 2.3.x apart by probing catalog support (§2.3 Rule 1) on the same connection, since 2.3 predates catalogs.
+`ServerVersion` prefers the fb303 `getVersion` RPC. A Hive 4.x server answers with its real release (e.g. `"4.0.1"`) and that is returned as-is. A pre-4 server does not report its release there; see Appendix A for the schema-line quirk and how `ServerVersion` infers Major/Minor from it. `ParseHiveVersion` accepts both the three-component release form and the two-component schema-line form (`Patch` defaults to 0 for the latter). If `getVersion` itself is `UNKNOWN_METHOD`, `ServerVersion` falls back to the `"hive.metastore.version"` configuration value, then `"metastore.version"`, with no capability inference applied to that fallback value; it returns an error wrapping `ErrNotSupported` if the server reports a version from none of these.
+
+### 5.7. Notifications
+
+```go
+type NotificationEvent struct {
+    ID            int64
+    Time          time.Time
+    Type          string
+    CatalogName   string
+    DatabaseName  string
+    TableName     string
+    Message       string
+    MessageFormat string
+}
+
+func (c *Client) CurrentNotificationID(ctx context.Context) (int64, error)
+func (c *Client) GetNextNotifications(ctx context.Context, lastEventID int64, max int, eventTypes []string) ([]NotificationEvent, error)
+```
+
+`CurrentNotificationID` wraps `get_current_notificationEventId`. `GetNextNotifications` wraps `get_next_notification`, requesting `NotificationEventRequest{LastEvent: lastEventID, MaxEvents: max, EventTypeList: eventTypes}`; `eventTypes` nil or empty means every event type. Both RPCs exist on 2.3+.
+
+### 5.8. Column Statistics
+
+Read-only in 1.0; writing statistics is out of scope.
+
+```go
+func (c *Client) GetTableColumnStatistics(ctx context.Context, db, tbl string, columns []string, opts ...CatalogOption) ([]ColumnStatistics, error)
+
+type ColumnStatistics struct {
+    ColumnName string
+    ColumnType string
+    // Exactly one of the following is set, matching ColumnStatisticsData's
+    // wire union (idl/hive_metastore.thrift): the field corresponding to
+    // ColumnType's Hive category is non-nil, the rest are nil.
+    Boolean *BooleanColumnStats
+    Long    *LongColumnStats
+    Double  *DoubleColumnStats
+    String  *StringColumnStats
+    Binary  *BinaryColumnStats
+    Decimal *DecimalColumnStats
+    Date    *DateColumnStats
+}
+
+type BooleanColumnStats struct{ NumTrues, NumFalses, NumNulls int64 }
+type LongColumnStats struct{ LowValue, HighValue *int64; NumNulls, NumDistinct int64 }
+type DoubleColumnStats struct{ LowValue, HighValue *float64; NumNulls, NumDistinct int64 }
+type StringColumnStats struct{ MaxColLen int64; AvgColLen float64; NumNulls, NumDistinct int64 }
+type BinaryColumnStats struct{ MaxColLen int64; AvgColLen float64; NumNulls int64 }
+type DecimalColumnStats struct{ LowValue, HighValue *Decimal; NumNulls, NumDistinct int64 }
+type DateColumnStats struct{ LowValue, HighValue *time.Time; NumNulls, NumDistinct int64 }
+type Decimal struct{ Unscaled []byte; Scale int16 }
+```
+
+`GetTableColumnStatistics` wraps `get_table_statistics_req` (`TableStatsRequest{DbName, TblName, ColNames: columns, CatName, Engine: "hive"}`) rather than the older per-call `get_table_column_statistics`, so the whole `columns` list is fetched in one round trip. Each `ColumnStatisticsObj` in the response's `statsObj` becomes one `ColumnStatistics` value; `ColumnStatisticsData`'s active union arm selects which of `Boolean`/`Long`/.../`Date` is populated. `TimestampColumnStatsData` (the union's 8th arm) has no exported field in 1.0 and is skipped. `histogram` and `bitVectors` (raw `binary` sketches) are not exposed.
+
+### 5.9. ACID: Locks and Transactions
+
+Minimal surface for the metastore's lock manager and transaction lifecycle, available on Hive 2.3+.
+
+```go
+func (c *Client) OpenTransaction(ctx context.Context, user, host string) (int64, error) // open_txns, num=1
+func (c *Client) CommitTransaction(ctx context.Context, txnID int64) error
+func (c *Client) AbortTransaction(ctx context.Context, txnID int64) error
+func (c *Client) Heartbeat(ctx context.Context, txnID int64, lockID int64) error // either id may be 0 to omit it
+
+func (c *Client) Lock(ctx context.Context, req LockRequest) (LockResponse, error)
+func (c *Client) CheckLock(ctx context.Context, lockID int64) (LockResponse, error)
+func (c *Client) Unlock(ctx context.Context, lockID int64) error
+
+type LockLevel int32
+const (
+    LockLevelDB        LockLevel = 1
+    LockLevelTable     LockLevel = 2
+    LockLevelPartition LockLevel = 3
+)
+
+type LockType int32
+const (
+    LockTypeSharedRead  LockType = 1
+    LockTypeSharedWrite LockType = 2
+    LockTypeExclusive   LockType = 3
+    LockTypeExclWrite   LockType = 4
+)
+
+type LockState int32
+const (
+    LockStateAcquired    LockState = 1
+    LockStateWaiting     LockState = 2
+    LockStateAbort       LockState = 3
+    LockStateNotAcquired LockState = 4
+)
+
+type LockComponent struct {
+    Type      LockType
+    Level     LockLevel
+    Database  string
+    Table     string // optional
+    Partition string // optional
+}
+
+type LockRequest struct {
+    Components []LockComponent
+    TxnID      int64 // 0 means none
+    User       string
+    Host       string
+}
+
+type LockResponse struct {
+    LockID       int64
+    State        LockState
+    ErrorMessage string
+}
+```
+
+`OpenTransaction` wraps `open_txns` with `OpenTxnRequest{NumTxns: 1, User: user, Hostname: host}` and returns the single allocated `txn_ids[0]`. `Lock`, `CheckLock`, and `Unlock` wrap `lock`, `check_lock`, and `unlock` respectively; `Heartbeat` wraps `heartbeat` with `HeartbeatRequest{TxnId, LockId}` (either may be omitted by passing 0, matching the RPC's optional fields).
+
+### 5.10. Observability
+
+```go
+func WithLogger(l *slog.Logger) Option
+func WithRPCObserver(f func(RPCInfo)) Option
+
+type RPCInfo struct {
+    Method   string
+    Endpoint string
+    Attempt  int
+    Duration time.Duration
+    Err      error
+}
+```
+
+`WithLogger` logs connection lifecycle (dial, close), failover (`MarkFailed`/`MarkHealthy` transitions), and recovery-probe events at `slog.LevelDebug` or `slog.LevelInfo`; it never logs RPC payloads or credentials. `WithRPCObserver`'s `f` is called once per attempt of every RPC (so a retried call invokes it more than once), after that attempt completes; `RPCInfo.Attempt` is 1-based and `Err` is the error `classify` would map (nil on success). `f` must not block or call back into the `Client`.
 
 ---
 
@@ -275,7 +473,32 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `AlreadyExistsException` | `hms.ErrAlreadyExists` | `errors.Is(err, hms.ErrAlreadyExists)` |
 | `InvalidOperationException`, `InvalidObjectException`, `InvalidInputException` | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 | `MetaException` | `hms.ErrMeta` | `errors.Is(err, hms.ErrMeta)` |
-| Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
+| Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4), `TApplicationException` in the frame-desync class (`BAD_SEQUENCE_ID`, `INVALID_MESSAGE_TYPE_EXCEPTION`, `PROTOCOL_ERROR`, `WRONG_METHOD_NAME`) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
 | `TApplicationException(UNKNOWN_METHOD)` with no fallback, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |
+| `ConfigValSecurityException` (`get_config_value` on a key not beginning with `hive`, `mapred`, or `hdfs`) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` — target mapping; **planned for 1.0**, `classify` does not special-case this exception type today (it falls through to `hms.ErrMeta`) |
 
-`DropDatabase` on Hive 3.1 additionally maps a bare `MetaException(java.lang.NullPointerException)` from `drop_database` to `hms.ErrNotFound`, following up with `get_database` on the same connection to confirm the database is actually missing: Hive 3.1's metastore NPEs there instead of raising `NoSuchObjectException` as every other supported version does.
+`DropDatabase` on Hive 3.1 additionally maps a bare `MetaException(java.lang.NullPointerException)` from `drop_database` to `hms.ErrNotFound`; see Appendix A.
+
+---
+
+## 8. API Stability Policy
+
+* Module tags stay on the `v0.x` line until the `polytable` adoption described in PLAN.md's downstream note ships.
+* `v1.0.0` promises standard Go-module semver for package `hms`: no breaking change to an exported identifier without a major version bump.
+* `internal/` (`internal/transport`, `internal/ha`) is unstable and carries no compatibility promise at any version; it exists to be reorganized freely.
+* `gen/` (the generated Thrift bindings) is not part of the API surface at any version — AGENTS.md invariant #4 already forbids a generated type from appearing in an exported `hms` identifier, so `gen/`'s own shape changing (e.g. on an IDL bump) is never a breaking change to package `hms`.
+
+---
+
+## Appendix A. Server quirks the client compensates for
+
+| Version | Quirk | Client behaviour |
+| :--- | :--- | :--- |
+| All | Go's zero value for an unset `Database.LocationURI` is written on the wire as `""`, and the generated field's default (non-optional) Thrift requiredness means the server sees that empty string rather than "absent"; the server rejects it outright (`MetaException(IllegalArgumentException: Can not create a Path from an empty string)`). | `CreateDatabase` fills in `<warehouse>/<db>.db` (lowercased db name) client-side before issuing the RPC when `LocationURI` is empty (§5.3). |
+| 3.1+ | The warehouse root for the fill-in above. | Taken from the resolved catalog's own `LocationUri` (`get_catalog`): the default catalog's location *is* the warehouse dir, and a non-default catalog's location is its own warehouse root by definition. |
+| 2.3 | Catalogs do not exist, so there is no catalog to ask for the warehouse root above. | Taken from the `hive.metastore.warehouse.dir` configuration value (`get_config_value`) instead. |
+| 3.1 | `get_config_value` does not resolve `hive.metastore.warehouse.dir` to its `metastore.warehouse.dir` alias the way Hive 4's does; it answers empty. | Sidestepped entirely on 3.1+ by asking the catalog (row above) rather than the config value. |
+| 3.1 | `drop_database` on a missing database raises a bare `MetaException(java.lang.NullPointerException)` instead of `NoSuchObjectException` (every other supported version raises the latter, which `classify` maps to `ErrNotFound`). | `DropDatabase` follows up with `get_database` on the same connection when `drop_database`'s error doesn't already classify as `ErrNotFound`; if that confirms the database is missing, the original error is replaced so the `ErrNotFound` contract holds on 3.1 too. Paid only on the error path. |
+| 2.3, 3.x | `getVersion` (fb303) does not report the server's real release: every Hive 3.x release and Hive 2.3.x both answer the metastore schema line `"3.0"`. | `ServerVersion` (§5.6) tells the two apart by probing catalog support (§2.3 Rule 1) on the same connection: catalog support present → reported as `HiveVersion{Major: 3, Minor: 0}`; absent → `HiveVersion{Major: 2, Minor: 3}`. `Raw` always carries the server's literal `"3.0"` answer, so the true 3.x patch release is not recoverable from this RPC. |
+| All | Several generated request/response structs declare a field with Thrift "optional with default" requiredness that this package's exported API has no equivalent for (`GetTableRequest.Engine` default `"hive"`, `GetTableRequest.ID`/`PartitionsRequest.ID`/`AlterPartitionsRequest.WriteId`/`Partition.WriteId` default `-1`, `Table.OwnerType` default `PrincipalType.USER`). A bare Go struct literal would leave these at the Go zero value instead, which the server reads as a real (and wrong) engine name, numeric id, write id, or owner type rather than "unset". | Every such request/response is built via the generated `NewXxx()` constructor (e.g. `hive_metastore.NewGetTableRequest()`, `NewTable()`, `NewPartition()`, `NewPartitionsRequest()`, `NewAlterPartitionsRequest()`) so the Thrift-declared defaults land on the wire, and only the fields this package exposes are then overwritten. |
+| Pending upstream fix | `SkewedInfo.skewedColValueLocationMaps` is `map<list<string>, string>`, a list-keyed map Go cannot express; the Thrift Go generator rejects it (THRIFT-2063, fix pending in PR 3778). | `scripts/gen-thrift.sh` removes the field from the IDL before generation. Reads are unaffected: the generated code skips the unknown field with Thrift's generic `Skip`, which handles list-typed keys. The client never writes it. See §1.1 and §5.4. |
