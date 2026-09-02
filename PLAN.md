@@ -140,10 +140,10 @@ Defined in SPEC §5. Implementation notes:
 - [ ] Unit tests simulating node outages, recovery, and the non-idempotent-after-flush case.
 
 ### Slice 5: Multi-Version Docker Integration Tests
-- [ ] `test/docker/hive-2.3.9/Dockerfile` (self-built; `apache/hive` on Docker Hub publishes only 3.1.3 and 4.x tags).
-- [ ] Version-parameterised suite under `//go:build integration` against: self-built 2.3.9, `apache/hive:3.1.3`, `apache/hive:4.0.1`, `apache/hive:4.2.1` (binary TCP), plus `apache/hive:4.2.1` in HTTP mode.
-- [ ] Coverage: Iceberg, Delta Lake, and Hudi table creation, schema evolution, partition batch add/alter/drop, catalog operations on 3.x/4.x, `ErrNotSupported` on 2.x.
-- [ ] `.github/workflows/integration.yml` with the matrix above.
+- [x] `test/docker/hive-2.3.9/Dockerfile` (self-built; `apache/hive` on Docker Hub publishes only 3.1.3 and 4.x tags).
+- [x] Version-parameterised suite under `//go:build integration` against: self-built 2.3.9, `apache/hive:3.1.3`, `apache/hive:4.0.1`, `apache/hive:4.2.1` (binary TCP), plus `apache/hive:4.2.1` in HTTP mode.
+- [x] Coverage: Iceberg, Delta Lake, and Hudi table creation, schema evolution, partition batch add/alter/drop, catalog operations on 3.x/4.x, `ErrNotSupported` on 2.x.
+- [x] `.github/workflows/integration.yml` with the matrix above.
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.
