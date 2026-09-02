@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -238,6 +239,99 @@ func TestGetPartitionsSeq_InternsAcrossChunks(t *testing.T) {
 		"the two A partitions, in different chunks, must share one []*FieldSchema slice")
 	assert.False(t, sliceIdentity(got[0].Storage.Columns) == sliceIdentity(got[1].Storage.Columns),
 		"the A and B partitions must not share a slice")
+}
+
+// TestGetPartitionsSeq_NoConnectionHeldWhileConsumerRuns covers fix round
+// 1's design review: GetPartitionsSeq used to run the names lookup and
+// every chunk fetch inside one held connection, so a consumer that made
+// another call on the same Client from inside the range loop body would
+// block forever under WithPoolSize(1) -- the nested call waiting on the
+// very connection GetPartitionsSeq itself was still holding. Each chunk's
+// connection is now released as soon as that chunk's own fetch returns,
+// before any of its partitions are yielded, so the nested call below must
+// succeed promptly instead of deadlocking.
+func TestGetPartitionsSeq_NoConnectionHeldWhileConsumerRuns(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI(), hms.WithPoolSize(1), hms.WithChunkSize(2))
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName:  "db",
+		TableName:     "t",
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+	}))
+	dates := []string{"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"}
+	parts := make([]*hms.Partition, len(dates))
+	for i, d := range dates {
+		parts[i] = &hms.Partition{Values: []string{d}}
+	}
+	require.NoError(t, c.AddPartitions(ctx, "db", "t", parts, false))
+
+	n := 0
+	for p, err := range c.GetPartitionsSeq(ctx, "db", "t") {
+		require.NoError(t, err)
+		require.NotNil(t, p)
+		n++
+
+		// A short-timeout context bounds the wait: if GetPartitionsSeq
+		// still held its own connection while this loop body runs,
+		// acquire would block on WithPoolSize(1)'s single connection
+		// until this deadline, and the nested call would fail with
+		// context.DeadlineExceeded (wrapped as ErrUnavailable) instead of
+		// succeeding.
+		nestedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, nestedErr := c.GetPartitionNames(nestedCtx, "db", "t", -1)
+		cancel()
+		require.NoError(t, nestedErr, "a nested call from inside the range loop body must not deadlock on the pool")
+
+		assert.LessOrEqual(t, hms.ClientLiveConns(c, 0), int32(1))
+	}
+	assert.Equal(t, 4, n)
+}
+
+// TestGetPartitionsSeq_FetchesChunksLazily covers the actual, honest
+// property behind G11's "streaming, memory-bounded" claim, in place of
+// BenchmarkGetPartitionsSeq's allocs/op (which does not measure it; see
+// that benchmark's doc comment in seq_bench_test.go): with WithChunkSize
+// (100) over 2,000 partitions, each chunk's get_partitions_by_names_req is
+// issued only when the range loop reaches that chunk, interleaved with
+// the caller's own consumption, rather than every chunk being fetched
+// eagerly before the first item is yielded. After yielding the n-th item,
+// exactly ceil(n/100) chunk RPCs can have happened -- never more -- which
+// is what keeps at most one chunk's worth of partitions materialised at a
+// time instead of the whole 2,000.
+func TestGetPartitionsSeq_FetchesChunksLazily(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI(), hms.WithChunkSize(100))
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName:  "db",
+		TableName:     "t",
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+	}))
+	const total = 2000
+	parts := make([]*hms.Partition, total)
+	for i := range parts {
+		parts[i] = &hms.Partition{Values: []string{fmt.Sprintf("d%04d", i)}}
+	}
+	require.NoError(t, c.AddPartitions(ctx, "db", "t", parts, false))
+
+	n := 0
+	for p, err := range c.GetPartitionsSeq(ctx, "db", "t") {
+		require.NoError(t, err)
+		require.NotNil(t, p)
+		n++
+
+		wantRPCs := (n + 99) / 100
+		gotRPCs := countCalls(srv, "get_partitions_by_names_req")
+		assert.Equal(t, wantRPCs, gotRPCs,
+			"after yielding item %d, exactly %d chunk RPC(s) must have run, not more (got %d)", n, wantRPCs, gotRPCs)
+	}
+	assert.Equal(t, total, n)
+	assert.Equal(t, 20, countCalls(srv, "get_partitions_by_names_req"))
 }
 
 // --- GetTablesSeq ---

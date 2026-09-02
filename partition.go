@@ -117,48 +117,68 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 // chunk -- whose columns are equal (Name/Type/Comment) share a single
 // []*FieldSchema slice rather than each getting its own copy, extending
 // GetPartitionsByNames' own within-call interning across every chunk this
-// call issues. See Partition.Storage's doc comment (types.go): the shared
+// call issues. The interner lives in this function's own closure, not
+// inside any one RPC's own fn, so it survives across the separate c.read
+// calls below. See Partition.Storage's doc comment (types.go): the shared
 // slice must be copied before mutation.
+//
+// The names lookup and each chunk fetch are separate c.read calls -- one
+// pooled connection acquired and released per RPC, not one connection held
+// for the whole sequence. A chunk's connection is released as soon as
+// that chunk's RPC returns, before any of its partitions are yielded to
+// the caller, so a slow consumer (one that blocks between items, or that
+// itself calls this Client from inside the range loop body) never starves
+// the connection pool, and WithRPCObserver sees one RPCInfo per RPC --
+// get_partition_names once, then one per chunk with its own real wire
+// name -- each Duration measuring only that RPC, never any part of the
+// consumer's own loop body (SPEC §5.10). Consequently each chunk's fetch
+// retries across endpoints on ErrUnavailable exactly as GetPartitionsByNames
+// itself does (SPEC §4.2 point 3): a retry re-runs only that one chunk's
+// own fn, which has not yielded anything from that chunk yet when it
+// fails, so nothing already handed to the caller is ever re-yielded.
 //
 // On failure, exactly one (nil, err) pair is yielded and the sequence
 // ends; breaking out of the range loop early (or returning from within
 // it) stops the sequence immediately and issues no further RPCs -- the
-// chunk loop below checks the yield function's own return value between
-// every partition, and ctx's cancellation/deadline between every chunk, so
+// chunk loop checks the yield function's own return value between every
+// partition, and ctx's cancellation/deadline before every chunk fetch, so
 // an early stop can never leave a chunk's RPC in flight or a later one
-// started needlessly. Both checks, and every RPC this call issues, run
-// inside a single c.call invocation (not c.read): once this call's own fn
-// has started, any error -- including one that would otherwise be
-// retried on another endpoint as ErrUnavailable -- is returned
-// immediately rather than retried, because a retry would re-run fn from
-// its first RPC and re-yield every partition already handed to the
-// caller, which no other call in this package does and which range-over-
-// func gives no way to undo. The pooled connection this call acquires is
-// therefore released (or discarded, on an unavailable error) exactly
-// once, on every path a caller's range loop can take.
+// started needlessly.
 func (c *Client) GetPartitionsSeq(ctx context.Context, dbName, tableName string, opts ...CatalogOption) iter.Seq2[*Partition, error] {
 	return func(yield func(*Partition, error) bool) {
-		err := c.call(ctx, "get_partition_names", func(ctx context.Context, cn *conn) error {
+		var names []string
+		err := c.read(ctx, "get_partition_names", func(ctx context.Context, cn *conn) error {
 			cat, err := c.resolveCat(ctx, cn, opts)
 			if err != nil {
 				return err
 			}
-			names, err := cn.getPartitionNames(ctx, qualifyDBName(cat, dbName), tableName, -1)
-			if err != nil {
-				return err
+			names, err = cn.getPartitionNames(ctx, qualifyDBName(cat, dbName), tableName, -1)
+			return err
+		})
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		in := make(columnIntern)
+		for i := 0; i < len(names); i += c.cfg.chunkSize {
+			if err := ctx.Err(); err != nil {
+				yield(nil, wrapError("get_partitions_by_names_req", err))
+				return
 			}
-			in := make(columnIntern)
-			for i := 0; i < len(names); i += c.cfg.chunkSize {
-				if err := ctx.Err(); err != nil {
+			end := i + c.cfg.chunkSize
+			if end > len(names) {
+				end = len(names)
+			}
+			chunk := names[i:end]
+
+			var raw []*hive_metastore.Partition
+			err := c.read(ctx, "get_partitions_by_names_req", func(ctx context.Context, cn *conn) error {
+				cat, err := c.resolveCat(ctx, cn, opts)
+				if err != nil {
 					return err
 				}
-				end := i + c.cfg.chunkSize
-				if end > len(names) {
-					end = len(names)
-				}
-				chunk := names[i:end]
-				var raw []*hive_metastore.Partition
-				err := cn.tryReq(ctx, "get_partitions_by_names_req",
+				return cn.tryReq(ctx, "get_partitions_by_names_req",
 					func(ctx context.Context) error {
 						resp, err := cn.getPartitionsByNamesReq(ctx, newGetPartitionsByNamesRequest(dbName, tableName, cat, chunk))
 						if err != nil {
@@ -176,19 +196,16 @@ func (c *Client) GetPartitionsSeq(ctx context.Context, dbName, tableName string,
 						return nil
 					},
 				)
-				if err != nil {
-					return err
-				}
-				for _, p := range raw {
-					if !yield(partitionFromThriftIntern(p, in), nil) {
-						return nil
-					}
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			for _, p := range raw {
+				if !yield(partitionFromThriftIntern(p, in), nil) {
+					return
 				}
 			}
-			return nil
-		})
-		if err != nil {
-			yield(nil, err)
 		}
 	}
 }

@@ -58,16 +58,29 @@ func benchPartitionFixture(b *testing.B, partitionCount, columnCount int) (c *hm
 	return c, ctx, dbName, tableName
 }
 
-// BenchmarkGetPartitions and BenchmarkGetPartitionsSeq compare G11's
-// streaming form against GetPartitions on a 2,000-partition x 100-column
-// fixture, reporting allocs/op (run with -benchmem, or just -bench since
-// this file calls b.ReportAllocs() itself): GetPartitionsSeq should show
-// materially fewer allocations, both because it never holds the whole
-// 2,000-partition result in memory at once (chunked at the default
-// WithChunkSize=1000, so this fixture's response spans 2 chunks) and
-// because column-list interning (G11) collapses every partition's
-// 100-column Storage.Columns, identical across the whole table, into a
-// single shared []*FieldSchema instead of 2,000 separate copies.
+// BenchmarkGetPartitions and BenchmarkGetPartitionsSeq report allocs/op
+// for GetPartitions and GetPartitionsSeq over the same 2,000-partition x
+// 100-column fixture (run with -benchmem, or just -bench since this file
+// calls b.ReportAllocs() itself).
+//
+// Measured (Apple M1, -benchtime=20x): both report ~1.28M allocs/op and
+// ~51MB/op, with GetPartitionsSeq very slightly higher, not lower. This is
+// expected, not a regression: column-list interning (G11) applies equally
+// to both -- GetPartitions' own single-shot conversion (partitionsFromThrift)
+// interns within its one call just as GetPartitionsSeq interns across its
+// chunks -- so neither benchmark's total allocation count reflects
+// interning's effect in isolation, and GetPartitionsSeq's 3 RPCs
+// (get_partition_names plus 2 get_partitions_by_names_req chunks, at the
+// default WithChunkSize=1000) cost a little more than GetPartitions' single
+// get_partitions_req.
+//
+// What these two benchmarks do NOT show, because -benchmem/allocs-per-op
+// measures total allocation count over the whole call, not memory held at
+// any one instant, is GetPartitionsSeq's actual point (G11): it never
+// materialises more than one chunk's worth of partitions at a time, where
+// GetPartitions holds all 2,000 before returning any of them.
+// TestGetPartitionsSeq_FetchesChunksLazily (seq_test.go) demonstrates that
+// property directly and deterministically instead.
 func BenchmarkGetPartitions(b *testing.B) {
 	c, ctx, dbName, tableName := benchPartitionFixture(b, 2000, 100)
 	b.ReportAllocs()

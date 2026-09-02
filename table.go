@@ -110,53 +110,82 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 // so unlike GetPartitionsSeq's by-names chunks this call's own chunks
 // never need cn.tryReq.
 //
+// Every chunk's Storage.Columns lists are interned against one another
+// (columnIntern), the same way GetTables' own within-call interning does,
+// extended across every chunk this call issues; the interner lives in
+// this function's own closure so it survives across the separate c.read
+// calls below. See Table.Storage's doc comment (types.go).
+//
+// The names lookup and each chunk fetch are separate c.read calls -- one
+// pooled connection acquired and released per RPC, not one connection
+// held for the whole sequence -- exactly as GetPartitionsSeq describes:
+// a chunk's connection is released before any of its tables are yielded,
+// so a slow consumer never starves the pool, WithRPCObserver sees one
+// RPCInfo per RPC (get_all_tables, then one get_table_objects_by_name_req
+// per chunk) with Duration measuring only that RPC, and each chunk's
+// fetch retries across endpoints on ErrUnavailable like GetTables itself
+// (SPEC §4.2 point 3) without ever re-yielding a table already handed to
+// the caller. See GetPartitionsSeq's doc comment for the full rationale.
+//
 // On failure, exactly one (nil, err) pair is yielded and the sequence
 // ends; breaking out of the range loop early stops the sequence
 // immediately and issues no further RPCs, and ctx's cancellation/deadline
-// is checked between chunks, exactly as GetPartitionsSeq describes. Like
-// GetPartitionsSeq, every RPC runs inside a single c.call invocation (not
-// c.read), so a retry on another endpoint -- which would re-run this
-// call's own fn from get_all_tables and re-yield every table already
-// handed to the caller -- never happens once fn has started; see
-// GetPartitionsSeq's doc comment for the full rationale.
+// is checked before every chunk fetch, exactly as GetPartitionsSeq
+// describes.
 func (c *Client) GetTablesSeq(ctx context.Context, dbName string, opts ...CatalogOption) iter.Seq2[*Table, error] {
 	return func(yield func(*Table, error) bool) {
-		err := c.call(ctx, "get_all_tables", func(ctx context.Context, cn *conn) error {
+		var names []string
+		err := c.read(ctx, "get_all_tables", func(ctx context.Context, cn *conn) error {
 			cat, err := c.resolveCat(ctx, cn, opts)
 			if err != nil {
 				return err
 			}
-			names, err := cn.getAllTables(ctx, qualifyDBName(cat, dbName))
-			if err != nil {
-				return err
+			names, err = cn.getAllTables(ctx, qualifyDBName(cat, dbName))
+			return err
+		})
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		in := make(columnIntern)
+		for i := 0; i < len(names); i += c.cfg.chunkSize {
+			if err := ctx.Err(); err != nil {
+				yield(nil, wrapError("get_table_objects_by_name_req", err))
+				return
 			}
-			in := make(columnIntern)
-			for i := 0; i < len(names); i += c.cfg.chunkSize {
-				if err := ctx.Err(); err != nil {
+			end := i + c.cfg.chunkSize
+			if end > len(names) {
+				end = len(names)
+			}
+			chunk := names[i:end]
+
+			var tables []*hive_metastore.Table
+			err := c.read(ctx, "get_table_objects_by_name_req", func(ctx context.Context, cn *conn) error {
+				cat, err := c.resolveCat(ctx, cn, opts)
+				if err != nil {
 					return err
-				}
-				end := i + c.cfg.chunkSize
-				if end > len(names) {
-					end = len(names)
 				}
 				res, err := cn.getTableObjectsByNameReq(ctx, &hive_metastore.GetTablesRequest{
 					DbName:   dbName,
-					TblNames: names[i:end],
+					TblNames: chunk,
 					CatName:  cat,
 				})
 				if err != nil {
 					return err
 				}
-				for _, t := range res.Tables {
-					if !yield(tableFromThriftIntern(t, in), nil) {
-						return nil
-					}
+				tables = res.Tables
+				return nil
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			for _, t := range tables {
+				if !yield(tableFromThriftIntern(t, in), nil) {
+					return
 				}
 			}
-			return nil
-		})
-		if err != nil {
-			yield(nil, err)
 		}
 	}
 }
