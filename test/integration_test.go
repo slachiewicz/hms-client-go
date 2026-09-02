@@ -21,6 +21,9 @@
 //   - HMS_USER (optional): forwarded as hms.WithUser, for a server that
 //     authenticates the caller (e.g. the HTTP-mode job, which runs as
 //     "ci").
+//   - HMS_KRB5_URIS, HMS_KRB5_PRINCIPAL, HMS_KRB5_KEYTAB (optional): a
+//     Kerberized endpoint and the identity to reach it with, for
+//     TestKerberos. No matrix job sets them yet; see envKrb5URIs.
 package integration_test
 
 import (
@@ -58,6 +61,19 @@ const envUser = "HMS_USER"
 // follow-up), so this is always empty today and TestTLS always skips; it
 // exists so that job has a test ready to enable once it lands.
 const envTLSURIs = "HMS_TLS_URIS"
+
+// envKrb5URIs names the endpoint(s) of a Kerberized metastore (SPEC §3.1,
+// KERBEROS), for TestKerberos, and envKrb5Principal the client principal
+// to authenticate as. No matrix image runs a KDC yet (PLAN.md Slice 14
+// tracks a Kerberized leg as a follow-up), so these are always empty today
+// and TestKerberos always skips; the test exists so that job has one ready
+// to enable once the KDC sidecar lands. The credentials come from the
+// ambient KRB5CCNAME credential cache unless envKrb5Keytab names a keytab.
+const (
+	envKrb5URIs      = "HMS_KRB5_URIS"
+	envKrb5Principal = "HMS_KRB5_PRINCIPAL"
+	envKrb5Keytab    = "HMS_KRB5_KEYTAB"
+)
 
 // dialTimeout bounds how long New (and thus every test's setup) waits to
 // connect before failing, distinct from each RPC's own context below.
@@ -187,10 +203,15 @@ func TestDatabases_CRUD(t *testing.T) {
 // TestTables_FormatBuildersAndLifecycle round-trips NewIcebergTable,
 // NewDeltaTable, and NewHudiTable through CreateTable/GetTable (SPEC.md §6),
 // then exercises AlterTable (a parameter change) and DropTable's ifExists
-// semantics.
+// semantics. It also asserts OwnerType defaults to PrincipalUser on create
+// (SPEC.md §5.4, "1.0 addition"), and, on 4.x only, that a further
+// GetTable -> AlterTable round trip on the Iceberg table preserves
+// Parameters, Storage.SerDe, and TableType unchanged (round-trip fidelity,
+// SPEC.md §5.4).
 func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
+	_, expectVersion := requireHMSEnv(t)
 	ctx := context.Background()
 
 	dbName := uniqueName("it_tbldb_")
@@ -207,6 +228,23 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hms.IcebergSerDe, gotIceberg.Storage.SerDe.SerializationLib)
 	assert.Equal(t, "ICEBERG", gotIceberg.Parameters[hms.ParamTableType])
+	assert.Equal(t, hms.PrincipalUser, gotIceberg.OwnerType, "OwnerType defaults to PrincipalUser on create")
+
+	if expectVersion == "4.0" || expectVersion == "4.2" {
+		// Round-trip fidelity (SPEC.md §5.4): a GetTable -> AlterTable
+		// round trip that changes nothing must not disturb Parameters,
+		// Storage.SerDe, or TableType.
+		wantParams := make(map[string]string, len(gotIceberg.Parameters))
+		for k, v := range gotIceberg.Parameters {
+			wantParams[k] = v
+		}
+		require.NoError(t, c.AlterTable(ctx, dbName, "iceberg_tbl", gotIceberg))
+		afterFidelity, err := c.GetTable(ctx, dbName, "iceberg_tbl")
+		require.NoError(t, err)
+		assert.Equal(t, wantParams, afterFidelity.Parameters)
+		assert.Equal(t, gotIceberg.Storage.SerDe, afterFidelity.Storage.SerDe)
+		assert.Equal(t, gotIceberg.TableType, afterFidelity.TableType)
+	}
 
 	delta := hms.NewDeltaTable(dbName, "delta_tbl", "file:///tmp/"+dbName+"/delta_tbl", cols)
 	require.NoError(t, c.CreateTable(ctx, delta))
@@ -458,6 +496,32 @@ func TestTLS(t *testing.T) {
 	defer cancel()
 	c, err := hms.New(ctx, uris, hms.WithTLS(&tls.Config{}))
 	require.NoError(t, err, "connecting to %s over TLS", uris)
+	t.Cleanup(func() { _ = c.Close() })
+
+	_, err = c.ServerVersion(context.Background())
+	require.NoError(t, err)
+}
+
+// TestKerberos connects to a Kerberized metastore with hms.WithKerberos,
+// which authenticates over SASL GSSAPI at QOP auth (SPEC §3.1), and
+// confirms a basic RPC round-trips over the resulting connection. It skips
+// unless HMS_KRB5_URIS is set; see envKrb5URIs's doc comment.
+func TestKerberos(t *testing.T) {
+	t.Parallel()
+	uris := os.Getenv(envKrb5URIs)
+	if uris == "" {
+		t.Skipf("%s is not set; skipping Kerberos integration test (see PLAN.md Slice 14)", envKrb5URIs)
+	}
+
+	opts := []hms.Option{hms.WithKerberos(os.Getenv(envKrb5Principal))}
+	if kt := os.Getenv(envKrb5Keytab); kt != "" {
+		opts = []hms.Option{hms.WithKerberos(os.Getenv(envKrb5Principal), kt)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	c, err := hms.New(ctx, uris, opts...)
+	require.NoError(t, err, "connecting to %s with Kerberos", uris)
 	t.Cleanup(func() { _ = c.Close() })
 
 	_, err = c.ServerVersion(context.Background())
