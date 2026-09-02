@@ -3,7 +3,7 @@ package transport
 // This file is package transport (white-box), not transport_test, because
 // the handshake it drives runs without a KDC: the service ticket and the
 // client credentials are minted in-process and reach the mechanism through
-// KerberosConfig's unexported initiator hook. Reaching that hook, and the
+// KerberosConfig's unexported newInitiator hook. Reaching that hook, and the
 // negotiation-frame helpers the fake acceptor shares with the client, is
 // the only reason these tests live inside the package.
 
@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,6 +71,36 @@ type krbFixture struct {
 	// flight.
 	block   chan struct{}
 	entered chan struct{}
+
+	// built counts how many times the fixture was handed out as an
+	// initiator (see newInitiator) and destroyed counts how many times
+	// KerberosSession.Close released it, so a test can assert that one
+	// client's dials share a single set of credentials and that closing it
+	// releases them exactly once.
+	built     atomic.Int32
+	destroyed atomic.Int32
+}
+
+// newInitiator is KerberosConfig.newInitiator's test hook: it hands the
+// fixture itself to NewKerberosSession and counts the call, so a test can
+// see how often credentials were loaded.
+func (f *krbFixture) newInitiator() (initiator, error) {
+	f.built.Add(1)
+	return f, nil
+}
+
+// Destroy satisfies the interface KerberosSession.Close looks for,
+// standing in for (*client.Client).Destroy.
+func (f *krbFixture) Destroy() { f.destroyed.Add(1) }
+
+// session returns a KerberosSession over the fixture, the handle a dial
+// needs now that credentials are loaded once per client rather than once
+// per connection.
+func (f *krbFixture) session(t *testing.T) *KerberosSession {
+	t.Helper()
+	s, err := NewKerberosSession(KerberosConfig{newInitiator: f.newInitiator})
+	require.NoError(t, err)
+	return s
 }
 
 // newKrbFixture builds a fixture whose service principal is "hive/<host>",
@@ -573,7 +604,7 @@ func TestGSSAPIHandshakeAndCall(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), testServerTimeout)
 			defer cancel()
 			conn, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
-				Kerberos: &KerberosConfig{initiator: fixture},
+				Kerberos: &KerberosConfig{Session: fixture.session(t)},
 			})
 			require.NoError(t, err)
 			defer func() { _ = conn.Close() }()
@@ -586,6 +617,71 @@ func TestGSSAPIHandshakeAndCall(t *testing.T) {
 			assert.Equal(t, qopAuth, acceptor.selected, "the client must select auth, the only layer it implements")
 		})
 	}
+}
+
+// TestKerberosSessionSharedAcrossDials is the wire-level statement of the
+// one-session-per-client rule (SPEC §3.1): two connections dialed with the
+// same KerberosSession authenticate off one set of credentials, loaded
+// once, and only Close releases them -- a dial must not, since the session
+// outlives every connection made from it.
+func TestKerberosSessionSharedAcrossDials(t *testing.T) {
+	t.Parallel()
+	ln, host := newTestListener(t)
+	fixture := newKrbFixture(t, host)
+	sess, err := NewKerberosSession(KerberosConfig{newInitiator: fixture.newInitiator})
+	require.NoError(t, err)
+
+	for dial := range 2 {
+		acceptor := &gssAcceptor{fixture: fixture, layers: qopAuth}
+		errs := serveGSSAPI(t, ln, acceptor, true)
+
+		ctx, cancel := context.WithTimeout(t.Context(), testServerTimeout)
+		conn, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
+			Kerberos: &KerberosConfig{Session: sess},
+		})
+		require.NoError(t, err, "dial %d", dial)
+
+		status, err := fb303.NewFacebookServiceClient(conn.Client).GetStatus(ctx)
+		require.NoError(t, err, "dial %d", dial)
+		assert.Equal(t, fb303.FbStatus_ALIVE, status)
+
+		require.NoError(t, conn.Close())
+		require.NoError(t, <-errs)
+		cancel()
+	}
+
+	assert.Equal(t, int32(1), fixture.built.Load(), "both dials must share one set of credentials")
+	assert.Equal(t, int32(0), fixture.destroyed.Load(), "a dial must not release the client's credentials")
+
+	sess.Close()
+	assert.Equal(t, int32(1), fixture.destroyed.Load(), "Close releases the credentials")
+}
+
+// TestKerberosSessionCloseIsIdempotent pins Client.Close's own contract on
+// the session it owns: closing twice releases the credentials once, and a
+// client that never configured Kerberos closes a nil session.
+func TestKerberosSessionCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	fixture := newKrbFixture(t, "hms.example.com")
+	sess, err := NewKerberosSession(KerberosConfig{newInitiator: fixture.newInitiator})
+	require.NoError(t, err)
+
+	sess.Close()
+	sess.Close()
+	assert.Equal(t, int32(1), fixture.destroyed.Load())
+
+	var absent *KerberosSession
+	assert.NotPanics(t, absent.Close)
+}
+
+// TestDialBinaryRequiresKerberosSession records that credentials are never
+// loaded per dial: without a session there is nothing to authenticate with,
+// and the dial says so rather than building a gokrb5 client of its own.
+func TestDialBinaryRequiresKerberosSession(t *testing.T) {
+	t.Parallel()
+	_, err := NewSaslGSSAPI(nil, "hms.example.com:9083", KerberosConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no session")
 }
 
 func TestGSSAPIHandshakeFailures(t *testing.T) {
@@ -649,7 +745,7 @@ func TestGSSAPIHandshakeFailures(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), testServerTimeout)
 			defer cancel()
 			_, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
-				Kerberos: &KerberosConfig{initiator: fixture},
+				Kerberos: &KerberosConfig{Session: fixture.session(t)},
 			})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
@@ -668,7 +764,7 @@ func TestGSSAPIRejectsUnknownServicePrincipal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), testServerTimeout)
 	defer cancel()
 	_, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
-		Kerberos: &KerberosConfig{initiator: fixture, ServicePrincipal: "hive/elsewhere.invalid"},
+		Kerberos: &KerberosConfig{Session: fixture.session(t), ServicePrincipal: "hive/elsewhere.invalid"},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no service ticket for hive/elsewhere.invalid")
@@ -796,7 +892,7 @@ func TestGSSAPITicketAcquisitionHonoursContext(t *testing.T) {
 	dialed := make(chan error, 1)
 	go func() {
 		_, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
-			Kerberos: &KerberosConfig{initiator: fixture},
+			Kerberos: &KerberosConfig{Session: fixture.session(t)},
 		})
 		dialed <- err
 	}()
@@ -820,7 +916,7 @@ func TestGSSAPITicketAcquisitionHonoursContext(t *testing.T) {
 	drain(t, errs)
 }
 
-func TestNewSaslGSSAPICredentialErrors(t *testing.T) {
+func TestNewKerberosSessionCredentialErrors(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -858,9 +954,13 @@ func TestNewSaslGSSAPICredentialErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := NewSaslGSSAPI(nil, "hms.example.com:9083", tc.cfg)
+			_, err := NewKerberosSession(tc.cfg)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
+
+			// Validate answers the same question New asks before it
+			// dials, and must agree with the session it stands in for.
+			assert.ErrorContains(t, tc.cfg.Validate(), tc.wantErr)
 		})
 	}
 }

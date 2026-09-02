@@ -236,7 +236,35 @@ func krbConfig(cfg *config) *transport.KerberosConfig {
 		CCache:           cfg.krbCCache,
 		ServicePrincipal: cfg.krbService,
 		Krb5Conf:         cfg.krbConf,
+		Session:          cfg.krbSession,
 	}
+}
+
+// newKerberosSession loads the caller's Kerberos credentials once for the
+// whole Client (SPEC §3.1), so every connection it dials shares them
+// instead of each dial building -- and leaking the renewal goroutine of --
+// a gokrb5 client of its own. It returns nil when WithKerberos was never
+// called or no endpoint is binary, the same two cases in which validateAuth
+// ignores the Kerberos configuration entirely: a session nothing would
+// authenticate with is not worth loading credentials for. New stores the
+// result on the config every newConn reads, and Client.Close closes it.
+func newKerberosSession(cfg *config, eps []transport.Endpoint) (*transport.KerberosSession, error) {
+	krb := krbConfig(cfg)
+	if krb == nil || !hasBinaryEndpoint(eps) {
+		return nil, nil
+	}
+	return transport.NewKerberosSession(*krb)
+}
+
+// hasBinaryEndpoint reports whether any endpoint uses the binary TCP
+// transport, the only one the SASL mechanisms apply to.
+func hasBinaryEndpoint(eps []transport.Endpoint) bool {
+	for _, ep := range eps {
+		if ep.Scheme == transport.SchemeThrift {
+			return true
+		}
+	}
+	return false
 }
 
 // validateAuth reports a caller mistake in the binary transport's
@@ -251,14 +279,7 @@ func krbConfig(cfg *config) *transport.KerberosConfig {
 // It applies only to a binary endpoint: neither option has any effect over
 // HTTP, so an unreadable keytab there is inert rather than a mistake.
 func validateAuth(cfg *config, eps []transport.Endpoint) error {
-	binary := false
-	for _, ep := range eps {
-		if ep.Scheme == transport.SchemeThrift {
-			binary = true
-			break
-		}
-	}
-	if !binary {
+	if !hasBinaryEndpoint(eps) {
 		return nil
 	}
 	if cfg.plainUser != "" && cfg.kerberos {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/thrift/lib/go/thrift"
@@ -90,13 +91,76 @@ type KerberosConfig struct {
 	// domain_realm mapping, as for any SPN without one.
 	ServicePrincipal string
 
-	// initiator, when non-nil, supplies the client's Kerberos identity and
-	// service tickets instead of loading them from Keytab or CCache. It is
-	// a test hook (see gssapi_internal_test.go), which is why it is
-	// unexported: it lets the handshake be exercised end to end against a
-	// ticket minted in-process, with no KDC. Production dials always leave
-	// it nil.
-	initiator initiator
+	// Session holds the credentials every connection authenticating with
+	// this configuration shares. It is required for a GSSAPI dial: the
+	// credentials are loaded once, by NewKerberosSession, rather than once
+	// per connection, since the gokrb5 client behind them owns a
+	// background session-renewal goroutine that only Session.Close stops.
+	// Every field above is read by NewKerberosSession; only
+	// ServicePrincipal is read per dial.
+	Session *KerberosSession
+
+	// newInitiator, when non-nil, supplies the client's Kerberos identity
+	// and service tickets to NewKerberosSession instead of loading them
+	// from Keytab or CCache. It is a test hook (see
+	// gssapi_internal_test.go), which is why it is unexported: it lets the
+	// handshake be exercised end to end against a ticket minted
+	// in-process, with no KDC. Production sessions always leave it nil.
+	newInitiator func() (initiator, error)
+}
+
+// KerberosSession holds the Kerberos credentials shared by every connection
+// one client opens (SPEC §3.1): the gokrb5 client behind them starts a
+// session-renewal goroutine on its first login that nothing but
+// (*client.Client).Destroy stops, so building one per dial would leak a
+// goroutine per connection. Construct one with NewKerberosSession, hand it
+// to every KerberosConfig, and Close it once the connections using it are
+// gone.
+type KerberosSession struct {
+	// init is what the handshake actually uses; see initiator.
+	init initiator
+	// once makes Close idempotent, since a client's Close is.
+	once sync.Once
+}
+
+// NewKerberosSession loads the credentials cfg names -- a keytab when one
+// is configured, otherwise a credential cache -- and returns the session
+// every connection using cfg shares. A caller mistake (a keytab, credential
+// cache, or krb5.conf that is missing or unreadable) surfaces here, before
+// any endpoint is dialed. The returned session must be closed once the
+// connections built from it are gone.
+//
+// Credentials are read once, here, so a keytab or credential cache
+// refreshed on disk afterwards is not picked up by an existing session; a
+// caller that needs the new credentials builds a new client.
+func NewKerberosSession(cfg KerberosConfig) (*KerberosSession, error) {
+	if cfg.newInitiator != nil {
+		init, err := cfg.newInitiator()
+		if err != nil {
+			return nil, err
+		}
+		return &KerberosSession{init: init}, nil
+	}
+	cl, err := newKrbClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &KerberosSession{init: krbInitiator{cl: cl}}, nil
+}
+
+// Close releases the session's credentials, stopping the gokrb5 client's
+// session-renewal goroutine. It is idempotent, and safe on a nil session,
+// so a client that never configured Kerberos can call it unconditionally.
+// Connections dialed with this session must not be used afterwards.
+func (s *KerberosSession) Close() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		if d, ok := s.init.(interface{ Destroy() }); ok {
+			d.Destroy()
+		}
+	})
 }
 
 // initiator supplies the Kerberos identity and service tickets that a
@@ -124,6 +188,11 @@ func (k krbInitiator) ServiceTicket(spn string) (messages.Ticket, types.Encrypti
 	return k.cl.GetServiceTicket(spn)
 }
 
+// Destroy zeroes the gokrb5 client's credentials and stops the
+// session-renewal goroutine its first login started; KerberosSession.Close
+// calls it.
+func (k krbInitiator) Destroy() { k.cl.Destroy() }
+
 // NewSaslGSSAPI wraps inner in a SaslTransport that authenticates with SASL
 // GSSAPI (RFC 4752) on Open, in the same Java TSaslTransport framing
 // NewSaslPlain uses. hostPort is the metastore endpoint, whose host half
@@ -134,24 +203,20 @@ func (k krbInitiator) ServiceTicket(spn string) (messages.Ticket, types.Encrypti
 // unwrapped, and a server that offers no such layer fails the handshake
 // rather than silently downgrading.
 //
-// Loading the caller's credentials (keytab or credential cache) happens
-// here, so a misconfigured WithKerberos fails before any handshake I/O.
-// The KDC exchanges that acquire the service ticket happen in the
-// handshake itself, on Open.
+// The caller's credentials come from cfg.Session, which is required:
+// they are loaded once per client by NewKerberosSession, not once per
+// connection (SPEC §3.1), so a misconfigured WithKerberos fails there,
+// before any endpoint is dialed. The KDC exchanges that acquire the
+// service ticket happen in the handshake itself, on Open.
 func NewSaslGSSAPI(inner thrift.TTransport, hostPort string, cfg KerberosConfig) (SaslTransport, error) {
 	spn, err := servicePrincipal(hostPort, cfg.ServicePrincipal)
 	if err != nil {
 		return nil, err
 	}
-	init := cfg.initiator
-	if init == nil {
-		cl, err := newKrbClient(cfg)
-		if err != nil {
-			return nil, err
-		}
-		init = krbInitiator{cl: cl}
+	if cfg.Session == nil {
+		return nil, errors.New("hms: kerberos: no session; build one with NewKerberosSession and set KerberosConfig.Session")
 	}
-	return &saslTransport{inner: inner, mech: &gssapiMech{init: init, spn: spn}}, nil
+	return &saslTransport{inner: inner, mech: &gssapiMech{init: cfg.Session.init, spn: spn}}, nil
 }
 
 // servicePrincipal returns the metastore's service principal name:
@@ -670,10 +735,13 @@ func isCCacheType(s string) bool {
 // is present when one is required. It is what lets a caller mistake -- a
 // keytab path with a typo in it, say -- surface from hms.New as an invalid
 // operation, before any endpoint is dialed, instead of as a dial failure.
+// The session it builds to answer that is destroyed again immediately, so
+// this leaves nothing running behind it.
 func (cfg KerberosConfig) Validate() error {
-	if cfg.initiator != nil {
-		return nil
+	s, err := NewKerberosSession(cfg)
+	if err != nil {
+		return err
 	}
-	_, err := newKrbClient(cfg)
-	return err
+	s.Close()
+	return nil
 }

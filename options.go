@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/slachiewicz/hms-client-go/internal/transport"
 )
 
 // Default configuration values applied by New before any Option runs.
@@ -49,6 +51,11 @@ type config struct {
 	krbCCache    string
 	krbService   string
 	krbConf      string
+	// krbSession holds the one Kerberos session a Client's connections
+	// share (SPEC §3.1). It is not set by any Option: New builds it, after
+	// the options have run, from the fields above, and Client.Close closes
+	// it. See newKerberosSession.
+	krbSession *transport.KerberosSession
 
 	tlsConfig *tls.Config
 
@@ -242,6 +249,11 @@ func WithPlainAuth(user, password string) Option {
 //
 // The metastore's own principal is "hive/<host>" for the endpoint host
 // being dialed, matching hive.metastore.kerberos.principal's default.
+//
+// New reads the credentials once, for the whole Client, and every
+// connection it dials shares them; Close releases them (SPEC §3.1). A
+// keytab or credential cache refreshed on disk afterwards is not picked up
+// by a running Client -- construct a new one.
 func WithKerberos(principal string, keytabOrCCache ...string) Option {
 	return func(c *config) {
 		c.kerberos = true

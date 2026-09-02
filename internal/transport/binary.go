@@ -101,6 +101,13 @@ func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
 // Configuring both is a caller error and fails before the socket is
 // dialed, since a connection carries exactly one SASL identity.
 //
+// cfg.Kerberos.Session is required for a GSSAPI dial and is not built
+// here: the credentials it holds are loaded once per client, by
+// NewKerberosSession, and shared by every connection that client dials,
+// since the gokrb5 client behind them owns a goroutine only
+// KerberosSession.Close stops. DialBinary never closes the session; the
+// client that built it does, once its connections are gone.
+//
 // The Kerberos handshake's own KDC exchanges are the one piece of I/O the
 // deadline below does not reach: they run against the KDC over gokrb5's
 // own sockets, not the metastore connection, and are bounded by

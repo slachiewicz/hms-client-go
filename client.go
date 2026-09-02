@@ -98,6 +98,14 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
 
+	// The caller's Kerberos credentials are loaded once here, not once per
+	// dial: the gokrb5 client behind them runs a session-renewal goroutine
+	// that only Close stops (SPEC §3.1). Every conn this Client dials reads
+	// the session off cfg (see krbConfig), and Close releases it.
+	if cfg.krbSession, err = newKerberosSession(cfg, eps); err != nil {
+		return nil, wrapAs("New", ErrInvalidOperation, err)
+	}
+
 	cluster := ha.New(len(eps), cfg.randomOrder, time.Now)
 	pools := make([]*endpointPool, len(eps))
 	for i := range pools {
@@ -131,6 +139,9 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		break
 	}
 	if !dialed {
+		// No Client is returned, so nothing will ever call Close to
+		// release the session this New just built.
+		cfg.krbSession.Close()
 		return nil, wrapError("New", errors.Join(ErrUnavailable, lastErr))
 	}
 
@@ -198,7 +209,9 @@ func (c *Client) observe(op string, idx, attempt int, dur time.Duration, err err
 }
 
 // Close releases every pooled connection, stops the recovery-probe
-// goroutine, and marks the client closed. Every caller -- concurrent or
+// goroutine, releases the Kerberos credentials New loaded when
+// WithKerberos was configured (which stops their renewal goroutine), and
+// marks the client closed. Every caller -- concurrent or
 // sequential, whichever call actually does the closing or not -- waits
 // for the probe goroutine to have exited before returning. Any call still
 // in flight completes normally; its connection is closed rather than
@@ -234,6 +247,12 @@ func (c *Client) Close() error {
 	if c.probeDone != nil {
 		<-c.probeDone
 	}
+	// Last, once no pooled conn and no probe can still dial with these
+	// credentials: closing the Kerberos session stops the gokrb5 client's
+	// session-renewal goroutine (SPEC §3.1). It is a no-op when
+	// WithKerberos was never configured, and idempotent, so the
+	// already-closed path above needs no counterpart.
+	c.cfg.krbSession.Close()
 	return errors.Join(errs...)
 }
 
