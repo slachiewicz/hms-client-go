@@ -28,11 +28,14 @@ hms-client-go/
 │       ├── ci.yml                 # gofmt, vet, unit tests, golangci-lint, govulncheck
 │       └── integration.yml        # Docker matrix: Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1
 ├── client.go                      # package hms: Client, New, Close
+├── conn.go                        # One live connection: bound RPC func fields, UNKNOWN_METHOD fallback cache, catalog probe (SPEC §2.3)
 ├── options.go                     # Functional options (see SPEC §5.1)
 ├── types.go                       # Clean Go structs (Catalog, Database, Table, Partition, ...)
 ├── convert.go                     # Thrift <-> hms type mapping (the only file importing gen/ types into hms)
+├── table.go                       # Table operations (SPEC §5.4)
+├── partition.go                   # Partition operations (SPEC §5.5)
 ├── errors.go                      # Sentinel errors & exception unwrapping (SPEC §7)
-├── fallback.go                    # UNKNOWN_METHOD detection and legacy RPC fallback (SPEC §2.3)
+├── version.go                     # Module version (debug.ReadBuildInfo) and the HTTP User-Agent string
 ├── formats.go                     # Iceberg / Delta / Hudi table builders (SPEC §6)
 ├── idl/                           # Committed Thrift IDL (Hive 4.0.1 + fb303) for reproducible generation
 │   ├── hive_metastore.thrift
@@ -42,13 +45,11 @@ hms-client-go/
 │   └── hive_metastore/
 ├── internal/
 │   ├── transport/
-│   │   ├── ctxsocket.go           # net.Conn-backed TTransport with per-RPC context binding
-│   │   ├── ctxprotocol.go         # TProtocol wrapper that hands each call's ctx to the socket
-│   │   ├── http.go                # THttpClient wrapper: default path, headers, auth
-│   │   ├── sasl_plain.go          # SASL PLAIN client framing over the binary socket
-│   │   └── factory.go             # URI scheme -> transport
-│   ├── pool/
-│   │   └── pool.go                # Connection pool, idle health checks
+│   │   ├── uri.go                 # Endpoint list parsing (thrift:// and http(s)://)
+│   │   ├── ctxclient.go           # thrift.TClient wrapper binding ctx deadlines/cancel to the socket
+│   │   ├── binary.go              # TCP dial + optional SASL PLAIN + buffered binary protocol
+│   │   ├── sasl.go                # SASL PLAIN client framing
+│   │   └── http.go                # THttpClient wrapper: default path, headers, auth
 │   └── ha/
 │       └── cluster.go             # Endpoint list, cooldown, sticky-active failover
 ├── test/
@@ -90,10 +91,8 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 ### 3.2. Dual Transport Architecture
 
 #### Binary TCP Socket (`thrift://`)
-* `internal/transport/ctxsocket.go` implements `thrift.TTransport` over `net.Conn` and exposes `SetContext(ctx)`.
-* `internal/transport/ctxprotocol.go` wraps `TBinaryProtocol`. Every `TProtocol` method already receives a `context.Context`; the wrapper forwards it to the socket, which sets read/write deadlines from `ctx.Deadline()` (fallback: configured socket timeout) and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })` for cancellation. The `AfterFunc` stop handle is released when the RPC returns.
-* `thrift.TTransport.Read(p []byte)` has no context parameter, so the earlier design of a `Read(ctx, buf)` method is not implementable against the Thrift interface. The protocol-layer binding above is the replacement.
-* SASL PLAIN (`sasl_plain.go`) wraps the socket when `WithPlainAuth` is set: Thrift SASL handshake (START / OK / COMPLETE status bytes, 4-byte big-endian length prefix), then length-prefixed frames for payload.
+* `internal/transport/ctxclient.go` wraps `thrift.TClient`. Its single method `Call(ctx, ...)` receives the request context, so it is the natural binding point: before delegating it sets `net.Conn` read/write deadlines from `ctx.Deadline()` (fallback: configured socket timeout) and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })`, releasing the stop handle on return. Wrapping `TProtocol` would need the same logic repeated across ~40 methods; wrapping `TClient` needs it once.
+* SASL PLAIN (`sasl.go`) wraps the socket when `WithPlainAuth` is set: Thrift SASL handshake (START / OK / COMPLETE status bytes, 4-byte big-endian length prefix), then length-prefixed frames for payload.
 
 #### Thrift-over-HTTP/HTTPS (`http://` / `https://`)
 * `internal/transport/http.go` wraps Thrift's `THttpClient`, which already implements `TTransport` and honours the context passed to `Flush(ctx)`.
@@ -142,10 +141,10 @@ Defined in SPEC §5. Implementation notes:
 - [ ] Unit tests simulating node outages, recovery, and the non-idempotent-after-flush case.
 
 ### Slice 5: Multi-Version Docker Integration Tests
-- [ ] `test/docker/hive-2.3.9/Dockerfile` (self-built; `apache/hive` on Docker Hub publishes only 3.1.3 and 4.x tags).
-- [ ] Version-parameterised suite under `//go:build integration` against: self-built 2.3.9, `apache/hive:3.1.3`, `apache/hive:4.0.1`, `apache/hive:4.2.1` (binary TCP), plus `apache/hive:4.2.1` in HTTP mode.
-- [ ] Coverage: Iceberg, Delta Lake, and Hudi table creation, schema evolution, partition batch add/alter/drop, catalog operations on 3.x/4.x, `ErrNotSupported` on 2.x.
-- [ ] `.github/workflows/integration.yml` with the matrix above.
+- [x] `test/docker/hive-2.3.9/Dockerfile` (self-built; `apache/hive` on Docker Hub publishes only 3.1.3 and 4.x tags).
+- [x] Version-parameterised suite under `//go:build integration` against: self-built 2.3.9, `apache/hive:3.1.3`, `apache/hive:4.0.1`, `apache/hive:4.2.1` (binary TCP), plus `apache/hive:4.2.1` in HTTP mode.
+- [x] Coverage: Iceberg, Delta Lake, and Hudi table creation, schema evolution, partition batch add/alter/drop, catalog operations on 3.x/4.x, `ErrNotSupported` on 2.x.
+- [x] `.github/workflows/integration.yml` with the matrix above.
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.

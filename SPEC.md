@@ -79,7 +79,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
   * `KERBEROS`: out of scope for 1.0 (see §1.1).
 
 ### 3.2. Thrift-over-HTTP/HTTPS Transport (`http://` / `https://`)
-* **Availability**: Hive 4.0+ only. Connecting to a 2.x or 3.x endpoint over HTTP fails with `ErrNotSupported` after the first `TApplicationException` or non-Thrift response.
+* **Availability**: Hive 4.0+ only. Connecting to a 2.x or 3.x endpoint over HTTP fails with `ErrUnavailable`: the endpoint does not speak Thrift-over-HTTP at all, so the first `TApplicationException` or non-Thrift response classifies as a transport failure, not as `ErrNotSupported` (reserved for `UNKNOWN_METHOD` and the catalog case in §2.3 Rule 1).
 * **Scheme**: `http://<host>[:<port>][/path]` or `https://...`. When `path` is empty the client uses `/metastore`, the server default of `metastore.server.thrift.http.path`.
 * **Framing**: HTTP POST requests carrying `TBinaryProtocol` payloads, using Thrift's `THttpClient` over a caller-supplied or default `*http.Client` (connection reuse, keep-alive, proxy resolution, HTTP/2).
 * **Headers** (mirroring `HiveMetaStoreClient.createHttpClient` in Hive 4.0.1):
@@ -129,7 +129,7 @@ func WithPoolSize(n int) Option
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
-func WithUser(name string) Option               // x-actor-username / SASL PLAIN user
+func WithUser(name string) Option               // x-actor-username identity over HTTP only
 func WithPlainAuth(user, password string) Option // SASL PLAIN over binary TCP
 ```
 
@@ -271,5 +271,5 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `AlreadyExistsException` | `hms.ErrAlreadyExists` | `errors.Is(err, hms.ErrAlreadyExists)` |
 | `InvalidOperationException`, `InvalidObjectException`, `InvalidInputException` | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 | `MetaException` | `hms.ErrMeta` | `errors.Is(err, hms.ErrMeta)` |
-| Connection / network failure, context cancellation during I/O | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
-| `TApplicationException(UNKNOWN_METHOD)` with no fallback, HTTP against Hive < 4, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |
+| Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
+| `TApplicationException(UNKNOWN_METHOD)` with no fallback, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |

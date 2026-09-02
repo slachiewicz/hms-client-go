@@ -1,0 +1,99 @@
+name: integration
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+permissions:
+  contents: read
+jobs:
+  integration:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: hive-2.3.9
+            build: true
+            expect_version: "2.3"
+            uris: "thrift://127.0.0.1:9083"
+          - name: hive-3.1.3
+            image: apache/hive:3.1.3
+            expect_version: "3.1"
+            uris: "thrift://127.0.0.1:9083"
+          - name: hive-4.0.1
+            image: apache/hive:4.0.1
+            expect_version: "4.0"
+            uris: "thrift://127.0.0.1:9083"
+          - name: hive-4.2.1-binary
+            image: apache/hive:4.2.1
+            expect_version: "4.2"
+            uris: "thrift://127.0.0.1:9083"
+          - name: hive-4.2.1-http
+            image: apache/hive:4.2.1
+            expect_version: "4.2"
+            uris: "http://127.0.0.1:9083/metastore"
+            http: true
+            user: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.0"
+          cache: true
+
+      - name: Build self-built image (hive-2.3.9 only)
+        if: matrix.build
+        run: docker build -t hms-client-go-hive-2.3.9 test/docker/hive-2.3.9
+
+      - name: Start metastore container (binary TCP)
+        if: "!matrix.http"
+        run: |
+          if [ "${{ matrix.build }}" = "true" ]; then
+            image="hms-client-go-hive-2.3.9"
+          else
+            image="${{ matrix.image }}"
+          fi
+          docker run -d --name hms -p 9083:9083 \
+            --env SERVICE_NAME=metastore \
+            "$image"
+
+      - name: Start metastore container (HTTP mode)
+        if: matrix.http
+        run: |
+          docker run -d --name hms -p 9083:9083 \
+            --env SERVICE_NAME=metastore \
+            --env HIVE_CUSTOM_CONF_DIR=/hive_custom_conf \
+            -v "${{ github.workspace }}/test/docker/conf:/hive_custom_conf" \
+            "${{ matrix.image }}"
+
+      - name: Wait for metastore port 9083
+        run: |
+          for i in $(seq 1 90); do
+            if (exec 3<>/dev/tcp/127.0.0.1/9083) 2>/dev/null; then
+              echo "metastore is accepting connections on 9083"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "metastore did not become ready within the timeout" >&2
+          docker logs hms || true
+          exit 1
+
+      - name: make test-docker
+        env:
+          HMS_URIS: ${{ matrix.uris }}
+          HMS_EXPECT_VERSION: ${{ matrix.expect_version }}
+          HMS_USER: ${{ matrix.user }}
+        run: make test-docker
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker logs hms || true

@@ -20,7 +20,7 @@ These hold regardless of which task you are on. Breaking one is a defect even wh
 
 1. **Pure Go / Zero Cgo**: No Cgo dependencies. Never introduce JVM, Hadoop XML, or native C Kerberos/GSSAPI requirements. A pure-Go Kerberos implementation is permitted later; it is out of scope for 1.0.
 2. **Hive 2/3/4 Interoperability**: Code generated from the Hive 4 IDL MUST keep working against Hive 2.x and 3.x servers. Follow SPEC §2.3: fallbacks are keyed on `TApplicationException(UNKNOWN_METHOD)`, cached per connection, and `catName` is never written on the wire to a server without catalog support. Check SPEC §2.1 before assuming an RPC exists on a given version.
-3. **Context Safety**: Every network I/O call MUST respect `context.Context` cancellation and deadlines on the underlying socket or HTTP transport. Binding happens at the `TProtocol` layer (PLAN §3.2), never by ignoring the context.
+3. **Context Safety**: Every network I/O call MUST respect `context.Context` cancellation and deadlines on the underlying socket or HTTP transport. Binding happens in the `thrift.TClient` wrapper (PLAN §3.2), never by ignoring the context.
 4. **Clean Abstractions**: No generated Thrift type appears in an exported identifier of package `hms`. Conversion lives in `convert.go`.
 5. **Small Binaries**: Never store the generated `ThriftHiveMetastoreClient` (or a struct holding it) in a field whose type is reachable from an interface. Bind the methods you use into `func` fields. See PLAN §1 goal 6 for the measurement.
 

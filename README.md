@@ -20,6 +20,35 @@ A modern, pure-Go client library for **Apache Hive Metastore (HMS)** supporting 
 
 ---
 
+## Install
+
+```sh
+go get github.com/slachiewicz/hms-client-go
+```
+
+## Usage
+
+```go
+ctx := context.Background()
+c, err := hms.New(ctx, "thrift://hms1:9083,thrift://hms2:9083")
+if err != nil {
+	log.Fatal(err)
+}
+defer c.Close()
+
+tbl, err := c.GetTable(ctx, "default", "events", hms.InCatalog("spark_catalog"))
+switch {
+case errors.Is(err, hms.ErrNotFound):
+	log.Println("table does not exist")
+case err != nil:
+	log.Fatal(err)
+default:
+	log.Println(tbl.TableName, tbl.Owner)
+}
+```
+
+---
+
 ## Documentation
 
 * [Formal Specification (`SPEC.md`)](SPEC.md)
