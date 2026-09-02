@@ -20,14 +20,18 @@ type RPCInfo struct {
 	// Attempt is the 1-based number of this attempt within the RPC's
 	// retry loop (do): a call retried across endpoints invokes the
 	// observer once per attempt, so Attempt climbs across those calls
-	// rather than resetting.
+	// rather than resetting. An attempt that failed to get a connection
+	// to Endpoint at all counts too.
 	Attempt int
-	// Duration is how long this attempt took, from just before the RPC
-	// was issued on the wire to just after it returned.
+	// Duration is how long this attempt took: from just before the RPC
+	// was issued on the wire to just after it returned, or, for an
+	// attempt that never got a connection, the time spent trying to
+	// acquire one.
 	Duration time.Duration
 	// Err is the error classify would map for this attempt -- the raw
 	// error the RPC returned, before wrapError adds "<op>: " context --
-	// or nil on success.
+	// or the dial failure when this attempt never reached the wire, or
+	// nil on success.
 	Err error
 }
 
@@ -48,10 +52,14 @@ func WithLogger(l *slog.Logger) Option {
 
 // WithRPCObserver sets f, called once per attempt of every RPC (so a
 // retried call invokes it more than once), synchronously, immediately after
-// that attempt completes (SPEC §5.10). f must not block or call back into
-// the Client: it runs inline on the goroutine that issued the RPC, so doing
-// either would stall that call (and, transitively, anything sharing the
-// same connection pool). A panic escaping f is recovered and logged at
+// that attempt completes (SPEC §5.10). An attempt that could not get a
+// connection to the endpoint counts as an attempt: f sees it with the dial
+// failure in Err, so an endpoint that is refusing connections is as visible
+// to an observer as one that answers with errors.
+//
+// f must not block or call back into the Client: it runs inline on the
+// goroutine that issued the RPC, so doing either would stall that call
+// (and, transitively, anything sharing the same connection pool). A panic escaping f is recovered and logged at
 // slog.LevelError through the configured logger (see WithLogger) rather
 // than propagated to the RPC's caller.
 func WithRPCObserver(f func(RPCInfo)) Option {

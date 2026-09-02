@@ -407,11 +407,14 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 // config.clamp). When every endpoint is cooling, do returns ErrUnavailable
 // joined with the last error observed.
 //
-// Every time fn actually runs, the WithRPCObserver function (if any) is
-// invoked once, synchronously, with that attempt's RPCInfo -- Attempt is
-// 1-based and counts only attempts that reached fn, not acquire/dial
-// failures that never called it (SPEC §5.10); see observe. A dial/acquire
-// failure and a retry decision are logged at slog.LevelDebug through
+// The WithRPCObserver function (if any) is invoked once per attempt,
+// synchronously, with that attempt's RPCInfo -- Attempt is 1-based and
+// counts every attempt this loop makes against an endpoint, including one
+// that failed to acquire a connection and so never reached fn (SPEC
+// §5.10); see observe. For such an attempt Err is the acquire/dial failure
+// and Duration is the time spent in acquire; otherwise both describe fn
+// itself. A dial/acquire failure and a retry decision are logged at
+// slog.LevelDebug through
 // WithLogger's logger; the endpoint transitions this loop drives (marked
 // failed, marked healthy) are logged at slog.LevelInfo by markFailed and
 // markHealthy themselves.
@@ -424,8 +427,15 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 			return wrapError(op, errors.Join(ErrUnavailable, last))
 		}
 
+		rpcAttempt++
+		start := time.Now()
 		cn, err := c.acquire(ctx, idx)
 		if err != nil {
+			// An attempt that never got a connection is still an
+			// attempt against this endpoint, and its failure is the one
+			// an observer most wants to see; Duration is the time spent
+			// trying to get that connection (SPEC §5.10).
+			c.observe(op, idx, rpcAttempt, time.Since(start), err)
 			if ctx.Err() != nil || errors.Is(err, errClosed) {
 				// ctx's own cancellation/deadline, or the client
 				// being closed, is not evidence idx is unhealthy;
@@ -441,8 +451,7 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 			continue // dial failures are always retryable
 		}
 
-		rpcAttempt++
-		start := time.Now()
+		start = time.Now()
 		err = fn(ctx, cn)
 		c.observe(op, idx, rpcAttempt, time.Since(start), err)
 

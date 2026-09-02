@@ -466,7 +466,7 @@ type RPCInfo struct {
 }
 ```
 
-`WithLogger` logs connection lifecycle (dial, close), failover (`MarkFailed`/`MarkHealthy` transitions), and recovery-probe events at `slog.LevelDebug` or `slog.LevelInfo`; it never logs RPC payloads or credentials. `WithRPCObserver`'s `f` is called once per attempt of every RPC (so a retried call invokes it more than once), after that attempt completes; `RPCInfo.Attempt` is 1-based and `Err` is the error `classify` would map (nil on success). `f` must not block or call back into the `Client`.
+`WithLogger` logs connection lifecycle (dial, close), failover (`MarkFailed`/`MarkHealthy` transitions), and recovery-probe events at `slog.LevelDebug` or `slog.LevelInfo`; it never logs RPC payloads or credentials. `WithRPCObserver`'s `f` is called once per attempt of every RPC (so a retried call invokes it more than once), after that attempt completes; `RPCInfo.Attempt` is 1-based and `Err` is the error `classify` would map (nil on success). An attempt that could not get a connection to the endpoint is an attempt: `f` sees it with the dial failure in `Err` and the time spent acquiring in `Duration`. `f` must not block or call back into the `Client`.
 
 ---
 

@@ -102,6 +102,46 @@ func TestObserver_Failover_OnePerAttempt(t *testing.T) {
 	assert.NoError(t, got[1].Err)
 }
 
+// TestObserver_AcquireFailure_ObservedPerAttempt covers the other half of
+// "once per attempt" (SPEC §5.10): an attempt that could not even dial the
+// endpoint is reported too, with the dial failure in Err, so an observer
+// watching for an endpoint going down does not simply stop hearing about
+// it.
+func TestObserver_AcquireFailure_ObservedPerAttempt(t *testing.T) {
+	t.Parallel()
+	srv1 := hmstest.Start(t, hmstest.Hive40)
+	srv2 := hmstest.Start(t, hmstest.Hive40)
+
+	var mu sync.Mutex
+	var got []hms.RPCInfo
+	c := mustNew(t, srv1.URI()+","+srv2.URI(),
+		hms.WithMaxRetries(2),
+		hms.WithRPCObserver(func(info hms.RPCInfo) {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, info)
+		}))
+
+	// Both endpoints are gone: the first attempt fails on the conn New
+	// pooled, and the second -- on the other endpoint, whose pool is
+	// empty -- never gets a connection at all.
+	srv1.Stop()
+	srv2.Stop()
+
+	_, err := c.GetAllDatabases(context.Background())
+	require.Error(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, got, 2, "one RPCInfo per attempt, including the one that never dialed")
+	for i, info := range got {
+		assert.Equal(t, "get_all_databases", info.Method, "attempt %d", i)
+		assert.Equal(t, i+1, info.Attempt)
+		assert.Error(t, info.Err, "an attempt that never got a connection reports why")
+	}
+	assert.NotEqual(t, got[0].Endpoint, got[1].Endpoint, "the second attempt moved to the other endpoint")
+}
+
 // TestObserver_PanicRecovered covers SPEC §5.10: a panic escaping the
 // WithRPCObserver function must not propagate to the RPC's caller -- the
 // call still succeeds -- and is instead recovered and logged through
