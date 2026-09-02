@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -67,6 +68,22 @@ func TestWrapError(t *testing.T) {
 			assert.Contains(t, got.Error(), "get_table: ")
 		})
 	}
+}
+
+// TestWrapError_NoDoublePrefix covers the fix for wrapError re-wrapping an
+// error a call site already wrapped (e.g. CreateDatabase's own
+// wrapAs("create_database", ...), wrapped again by do's wrapError(op, err)
+// at the end of its retry loop): the op must not be prefixed twice, and the
+// inner call's own sentinel must survive rather than being replaced by
+// classify's ErrMeta default for an *hmsError it doesn't otherwise recognize.
+func TestWrapError_NoDoublePrefix(t *testing.T) {
+	t.Parallel()
+	inner := hms.WrapError("create_database", errors.New("boom"))
+	outer := hms.WrapError("create_database", inner)
+
+	require.Error(t, outer)
+	assert.Same(t, inner, outer)
+	assert.Equal(t, 1, strings.Count(outer.Error(), "create_database: "))
 }
 
 func TestIsUnknownMethod(t *testing.T) {

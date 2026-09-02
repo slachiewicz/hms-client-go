@@ -42,10 +42,22 @@ type hmsError struct {
 func (e *hmsError) Error() string   { return e.op + ": " + e.cause.Error() }
 func (e *hmsError) Unwrap() []error { return []error{e.sentinel, e.cause} }
 
-// wrapError wraps an error with operation context and maps it to a sentinel error.
+// wrapError wraps an error with operation context and maps it to a sentinel
+// error. If err already is an *hmsError -- typically because the call site
+// that produced it (inside a call/read closure) already used wrapAs or
+// wrapError itself, e.g. CreateDatabase's own ErrInvalidOperation -- it is
+// returned unchanged instead of being wrapped a second time: do's own
+// wrapError(op, err) at the end of the retry loop would otherwise prefix
+// the same op onto the message twice ("create_database: create_database:
+// ...") and, via classify's default case, could paper over the inner call's
+// deliberately chosen sentinel with ErrMeta.
 func wrapError(op string, err error) error {
 	if err == nil {
 		return nil
+	}
+	var already *hmsError
+	if errors.As(err, &already) {
+		return err
 	}
 	return &hmsError{op: op, sentinel: classify(err), cause: err}
 }
