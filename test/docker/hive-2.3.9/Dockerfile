@@ -16,12 +16,14 @@ RUN apt-get update \
 
 # archive.apache.org is the only host for these releases and throttles
 # aggressively: the same download has taken 70 s and stalled past 30 min.
-# Fail fast and retry rather than hang; the workflow caches the resulting
-# layers so this runs once per cache lifetime.
-RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --speed-limit 50000 --speed-time 60 --max-time 1200 \
-      https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz | tar -xz -C /opt \
-    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --speed-limit 50000 --speed-time 60 --max-time 1200 \
-      https://archive.apache.org/dist/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz | tar -xz -C /opt
+# Download to a file (so curl's retries can resume with -C -) and only then
+# extract; streaming into tar made every retry fail on a closed pipe.
+RUN set -eu; \
+    fetch() { curl -fSL --retry 8 --retry-all-errors --retry-delay 15 -C - \
+                --speed-limit 50000 --speed-time 60 --max-time 1500 -o "$2" "$1"; }; \
+    fetch https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz /tmp/hadoop.tgz; \
+    fetch https://archive.apache.org/dist/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz /tmp/hive.tgz; \
+    tar -xzf /tmp/hadoop.tgz -C /opt; tar -xzf /tmp/hive.tgz -C /opt; rm -f /tmp/hadoop.tgz /tmp/hive.tgz
 
 ENV HADOOP_HOME=/opt/hadoop-${HADOOP_VERSION}
 ENV HIVE_HOME=/opt/apache-hive-${HIVE_VERSION}-bin
