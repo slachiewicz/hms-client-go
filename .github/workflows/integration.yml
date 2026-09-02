@@ -49,21 +49,20 @@ jobs:
           go-version: "1.27.0"
           cache: true
 
-      - name: Build self-built image (hive-2.3.9 only)
+      - name: Pull the Hive 2.3.9 image, or build it if unpublished (hive-2.3.9 only)
         if: matrix.build
-        run: docker build -t hms-client-go-hive-2.3.9 test/docker/hive-2.3.9
+        run: |
+          # Published on demand by the hive-2.3.9-image workflow. Until the
+          # first publish (or if Docker Hub is unreachable) build it here.
+          docker pull "${{ matrix.image }}" || \
+            docker build -t "${{ matrix.image }}" test/docker/hive-2.3.9
 
       - name: Start metastore container (binary TCP)
         if: "!matrix.http"
         run: |
-          if [ "${{ matrix.build }}" = "true" ]; then
-            image="hms-client-go-hive-2.3.9"
-          else
-            image="${{ matrix.image }}"
-          fi
           docker run -d --name hms -p 9083:9083 \
             --env SERVICE_NAME=metastore \
-            "$image"
+            "${{ matrix.image }}"
 
       - name: Start metastore container (HTTP mode)
         if: matrix.http
