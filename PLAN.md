@@ -37,7 +37,7 @@ hms-client-go/
 ├── errors.go                      # Sentinel errors & exception unwrapping (SPEC §7)
 ├── version.go                     # Module version (debug.ReadBuildInfo) and the HTTP User-Agent string
 ├── formats.go                     # Iceberg / Delta / Hudi table builders (SPEC §6)
-├── idl/                           # Committed Thrift IDL (Hive 4.0.1 + fb303) for reproducible generation
+├── idl/                           # Committed Thrift IDL (Hive 4.2.1 + fb303) for reproducible generation
 │   ├── hive_metastore.thrift
 │   └── share/fb303/if/fb303.thrift
 ├── gen/                           # Generated Thrift code, committed; regenerate with `make gen`
@@ -75,7 +75,7 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 ## 3. Detailed Component Design
 
 ### 3.1. IDL Generation (`scripts/gen-thrift.sh`)
-* Base IDL from Apache Hive `rel/release-4.0.1`: `standalone-metastore/metastore-common/src/main/thrift/hive_metastore.thrift`.
+* Base IDL from Apache Hive `rel/release-4.2.1`: `standalone-metastore/metastore-common/src/main/thrift/hive_metastore.thrift`.
 * `hive_metastore.thrift` includes `share/fb303/if/fb303.thrift`, so fb303 is stored at `idl/share/fb303/if/fb303.thrift` (from `apache/thrift` tag `v0.24.0`, `contrib/fb303/if/fb303.thrift`).
 * Thrift compiler **0.24.0**, matching `github.com/apache/thrift v0.24.0` in `go.mod`. Generated code and library must be the same minor version; the script refuses to run otherwise.
 * Command:

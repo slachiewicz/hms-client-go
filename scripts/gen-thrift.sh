@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 IDL_DIR="${ROOT_DIR}/idl"
 GEN_DIR="${ROOT_DIR}/gen"
 
-HIVE_VERSION="rel/release-4.0.1"
+HIVE_VERSION="rel/release-4.2.1"
 HIVE_RAW_BASE="https://raw.githubusercontent.com/apache/hive/${HIVE_VERSION}/standalone-metastore/metastore-common/src/main/thrift"
 
 # Must match github.com/apache/thrift in go.mod: generated code and runtime

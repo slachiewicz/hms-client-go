@@ -219,6 +219,7 @@ enum CompactionType {
     MAJOR = 2,
     REBALANCE = 3,
     ABORT_TXN_CLEANUP = 4,
+    SMART_OPTIMIZE = 5,
 }
 
 enum GrantRevokeType {
@@ -392,7 +393,8 @@ struct Catalog {
   3: string locationUri,              // default storage location.  When databases are created in
                                       // this catalog, if they do not specify a location, they will
                                       // be placed in this location.
-  4: optional i32 createTime          // creation time of catalog in seconds since epoch
+  4: optional i32 createTime,          // creation time of catalog in seconds since epoch
+  5: optional map<string, string> parameters
 }
 
 struct CreateCatalogRequest {
@@ -417,7 +419,8 @@ struct GetCatalogsResponse {
 }
 
 struct DropCatalogRequest {
-  1: string name
+  1: string name,
+  2: optional bool ifExists = true
 }
 
 // namespace for tables
@@ -435,6 +438,15 @@ struct Database {
   11: optional DatabaseType type,
   12: optional string connector_name,
   13: optional string remote_dbname
+}
+
+struct GetDatabaseObjectsRequest {
+  1: optional string catalogName,
+  2: optional string pattern
+}
+
+struct GetDatabaseObjectsResponse {
+  1: required list<Database> databases
 }
 
 // This object holds the information needed by SerDes
@@ -742,9 +754,7 @@ struct Schema {
 struct PrimaryKeysRequest {
   1: required string db_name,
   2: required string tbl_name,
-  3: optional string catName,
-  4: optional string validWriteIdList,
-  5: optional i64 tableId=-1
+  3: optional string catName
 }
 
 struct PrimaryKeysResponse {
@@ -755,10 +765,8 @@ struct ForeignKeysRequest {
   1: string parent_db_name,
   2: string parent_tbl_name,
   3: string foreign_db_name,
-  4: string foreign_tbl_name,
-  5: optional string catName,          // No cross catalog constraints
-  6: optional string validWriteIdList,
-  7: optional i64 tableId=-1
+  4: string foreign_tbl_name
+  5: optional string catName          // No cross catalog constraints
 }
 
 struct ForeignKeysResponse {
@@ -769,8 +777,6 @@ struct UniqueConstraintsRequest {
   1: required string catName,
   2: required string db_name,
   3: required string tbl_name,
-  4: optional string validWriteIdList,
-  5: optional i64 tableId=-1
 }
 
 struct UniqueConstraintsResponse {
@@ -781,8 +787,6 @@ struct NotNullConstraintsRequest {
   1: required string catName,
   2: required string db_name,
   3: required string tbl_name,
-  4: optional string validWriteIdList,
-  5: optional i64 tableId=-1
 }
 
 struct NotNullConstraintsResponse {
@@ -792,9 +796,7 @@ struct NotNullConstraintsResponse {
 struct DefaultConstraintsRequest {
   1: required string catName,
   2: required string db_name,
-  3: required string tbl_name,
-  4: optional string validWriteIdList,
-  5: optional i64 tableId=-1
+  3: required string tbl_name
 }
 
 struct DefaultConstraintsResponse {
@@ -804,9 +806,7 @@ struct DefaultConstraintsResponse {
 struct CheckConstraintsRequest {
   1: required string catName,
   2: required string db_name,
-  3: required string tbl_name,
-  4: optional string validWriteIdList,
-  5: optional i64 tableId=-1
+  3: required string tbl_name
 }
 
 struct CheckConstraintsResponse {
@@ -816,9 +816,7 @@ struct CheckConstraintsResponse {
 struct AllTableConstraintsRequest {
   1: required string dbName,
   2: required string tblName,
-  3: required string catName,
-  4: optional string validWriteIdList,
-  5: optional i64 tableId=-1
+  3: required string catName
 }
 
 struct AllTableConstraintsResponse {
@@ -1500,7 +1498,8 @@ struct NotificationEventRequest {
     3: optional list<string> eventTypeSkipList,
     4: optional string catName,
     5: optional string dbName,
-    6: optional list<string> tableNames
+    6: optional list<string> tableNames,
+    7: optional list<string> eventTypeList
 }
 
 struct NotificationEvent {
@@ -1565,6 +1564,8 @@ struct FireEventRequest {
     5: optional list<string> partitionVals,
     6: optional string catName,
     7: optional map<string, string> tblParams,
+    // To keep the backward compatibility, batch partition vals for reload event is used
+    8: optional list<list<string>> batchPartitionValsForRefresh
 }
 
 struct FireEventResponse {
@@ -1793,6 +1794,18 @@ struct DropDatabaseRequest {
   6: optional bool softDelete=false,
   7: optional i64 txnId=0,
   8: optional bool deleteManagedDir=true
+}
+
+struct GetFunctionsRequest {
+  1: required string dbName,
+  2: optional string catalogName,
+  3: optional string pattern,
+  4: optional bool returnNames=true
+}
+
+struct GetFunctionsResponse {
+  1: optional list<string> function_names,
+  2: optional list<Function> functions
 }
 
 // Request type for cm_recycle
@@ -2497,6 +2510,20 @@ struct GetAllWriteEventInfoRequest {
   3: optional string tableName
 }
 
+struct DeleteColumnStatisticsRequest {
+  1: optional string cat_name,
+  2: required string db_name,
+  3: required string tbl_name,
+  4: optional list<string> part_names,
+  5: optional list<string> col_names,
+  6: optional string engine = "hive",
+  7: optional bool tableLevel = false
+}
+
+struct ReplayedTxnsForPolicyResult {
+  1: map<string, string> replTxnMapEntry
+}
+
 // Exceptions.
 
 exception MetaException {
@@ -2590,6 +2617,7 @@ service ThriftHiveMetastore extends fb303.FacebookService
   void drop_database_req(1:DropDatabaseRequest req) throws(1:NoSuchObjectException o1, 2:InvalidOperationException o2, 3:MetaException o3)
   list<string> get_databases(1:string pattern) throws(1:MetaException o1)
   list<string> get_all_databases() throws(1:MetaException o1)
+  GetDatabaseObjectsResponse get_databases_req (1:GetDatabaseObjectsRequest request) throws(1:MetaException o1)
   void alter_database(1:string dbname, 2:Database db) throws(1:MetaException o1, 2:NoSuchObjectException o2)
   void alter_database_req(1:AlterDatabaseRequest alterDbReq) throws(1:MetaException o1, 2:NoSuchObjectException o2)
 
@@ -3009,6 +3037,9 @@ PartitionsResponse get_partitions_req(1:PartitionsRequest req)
   bool delete_table_column_statistics(1:string db_name, 2:string tbl_name, 3:string col_name, 4:string engine) throws
               (1:NoSuchObjectException o1, 2:MetaException o2, 3:InvalidObjectException o3,
                4:InvalidInputException o4)
+  bool delete_column_statistics_req(1: DeleteColumnStatisticsRequest req) throws
+              (1:NoSuchObjectException o1, 2:MetaException o2, 3:InvalidObjectException o3,
+              4:InvalidInputException o4)
 
   //
   // user-defined functions
@@ -3027,6 +3058,8 @@ PartitionsResponse get_partitions_req(1:PartitionsRequest req)
       throws (1:InvalidOperationException o1, 2:MetaException o2)
 
   list<string> get_functions(1:string dbName, 2:string pattern)
+      throws (1:MetaException o1)
+  GetFunctionsResponse get_functions_req(1:GetFunctionsRequest request)
       throws (1:MetaException o1)
   Function get_function(1:string dbName, 2:string funcName)
       throws (1:MetaException o1, 2:NoSuchObjectException o2)
@@ -3291,6 +3324,7 @@ PartitionsResponse get_partitions_req(1:PartitionsRequest req)
   list<string> get_all_packages(1: ListPackageRequest request) throws (1:MetaException o1)
   void drop_package(1: DropPackageRequest request) throws (1:MetaException o1)
   list<WriteEventInfo> get_all_write_event_info(1: GetAllWriteEventInfoRequest request) throws (1:MetaException o1)
+  ReplayedTxnsForPolicyResult get_replayed_txns_for_policy(1: string policyName) throws (1: MetaException o1)
 }
 
 // * Note about the DDL_TIME: When creating or altering a table or a partition,

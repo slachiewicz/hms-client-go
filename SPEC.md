@@ -32,9 +32,9 @@ restate signatures or version claims.
 
 ### 2.1. RPC availability by HMS version
 
-Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `rel/release-3.1.3` and `rel/release-4.0.1`. The client is generated from the 4.0.1 IDL, so an RPC must exist there to be callable at all.
+Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `rel/release-3.1.3` and `rel/release-4.2.1`. The client is generated from the 4.0.1 IDL, so an RPC must exist there to be callable at all.
 
-| RPC | 2.3.x | 3.x | 4.x | In 4.0.1 IDL |
+| RPC | 2.3.x | 3.x | 4.x | In 4.2.1 IDL |
 | :--- | :-: | :-: | :-: | :-: |
 | `get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req` | Y | Y | Y | Y |
 | `get_database`, `get_all_databases`, `create_database`, `drop_database`, `get_all_tables`, `create_table`, `alter_table`, `drop_table`, `get_partitions`, `get_partition_names`, `alter_partitions`, `drop_partition`, `get_config_value` | Y | Y | Y | Y |
