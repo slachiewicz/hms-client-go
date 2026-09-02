@@ -1,6 +1,11 @@
 package hms
 
-import "github.com/slachiewicz/hms-client-go/gen/hive_metastore"
+import (
+	"math"
+	"time"
+
+	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
+)
 
 // ptr returns a pointer to a copy of s. It exists so a string literal or
 // value can be passed where the generated Thrift bindings require *string.
@@ -96,6 +101,284 @@ func databaseToThrift(db *Database, cat *string) *hive_metastore.Database {
 	if db.OwnerType != 0 {
 		pt := hive_metastore.PrincipalType(db.OwnerType)
 		out.OwnerType = &pt
+	}
+	return out
+}
+
+// copyStringMap returns a shallow copy of m, so the returned value never
+// aliases the generated struct's map. It returns nil for a nil or empty
+// input: a non-optional Thrift map field round-trips a nil source map as a
+// non-nil, zero-length one, and this keeps that indistinguishable from nil
+// on this package's side of the conversion.
+func copyStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// copyStrings returns a copy of s, so the returned value never aliases the
+// generated struct's slice. It returns nil for a nil or empty input, for
+// the same reason as copyStringMap.
+func copyStrings(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
+}
+
+// timeFromUnix32 converts a Thrift int32 "seconds since epoch" field to a
+// time.Time, per Hive's convention that 0 means unset.
+func timeFromUnix32(s int32) time.Time {
+	if s == 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(s), 0)
+}
+
+// unix32FromTime converts t to a Thrift int32 "seconds since epoch" field,
+// per Hive's convention that a zero time.Time means unset. A value outside
+// the int32 range is clamped rather than silently wrapping (gosec G115).
+func unix32FromTime(t time.Time) int32 {
+	if t.IsZero() {
+		return 0
+	}
+	u := t.Unix()
+	switch {
+	case u > math.MaxInt32:
+		u = math.MaxInt32
+	case u < math.MinInt32:
+		u = math.MinInt32
+	}
+	return int32(u)
+}
+
+// fieldSchemaFromThrift converts a generated FieldSchema to the exported
+// FieldSchema type. It returns nil for a nil input.
+func fieldSchemaFromThrift(f *hive_metastore.FieldSchema) *FieldSchema {
+	if f == nil {
+		return nil
+	}
+	return &FieldSchema{Name: f.Name, Type: f.Type, Comment: f.Comment}
+}
+
+// fieldSchemaToThrift converts the exported FieldSchema type to its
+// generated wire representation. It returns nil for a nil input.
+func fieldSchemaToThrift(f *FieldSchema) *hive_metastore.FieldSchema {
+	if f == nil {
+		return nil
+	}
+	return &hive_metastore.FieldSchema{Name: f.Name, Type: f.Type, Comment: f.Comment}
+}
+
+// fieldSchemasFromThrift converts a slice of generated FieldSchema values.
+// It returns nil for a nil or empty input (see copyStringMap).
+func fieldSchemasFromThrift(fs []*hive_metastore.FieldSchema) []*FieldSchema {
+	if len(fs) == 0 {
+		return nil
+	}
+	out := make([]*FieldSchema, len(fs))
+	for i, f := range fs {
+		out[i] = fieldSchemaFromThrift(f)
+	}
+	return out
+}
+
+// fieldSchemasToThrift converts a slice of the exported FieldSchema type. It
+// returns nil for a nil or empty input (see copyStringMap).
+func fieldSchemasToThrift(fs []*FieldSchema) []*hive_metastore.FieldSchema {
+	if len(fs) == 0 {
+		return nil
+	}
+	out := make([]*hive_metastore.FieldSchema, len(fs))
+	for i, f := range fs {
+		out[i] = fieldSchemaToThrift(f)
+	}
+	return out
+}
+
+// serDeFromThrift converts a generated SerDeInfo to the exported SerDeInfo
+// type. It returns nil for a nil input.
+func serDeFromThrift(s *hive_metastore.SerDeInfo) *SerDeInfo {
+	if s == nil {
+		return nil
+	}
+	return &SerDeInfo{
+		Name:             s.Name,
+		SerializationLib: s.SerializationLib,
+		Parameters:       copyStringMap(s.Parameters),
+	}
+}
+
+// serDeToThrift converts the exported SerDeInfo type to its generated wire
+// representation. It returns nil for a nil input.
+func serDeToThrift(s *SerDeInfo) *hive_metastore.SerDeInfo {
+	if s == nil {
+		return nil
+	}
+	return &hive_metastore.SerDeInfo{
+		Name:             s.Name,
+		SerializationLib: s.SerializationLib,
+		Parameters:       copyStringMap(s.Parameters),
+	}
+}
+
+// orderFromThrift converts a generated Order to the exported Order type. It
+// returns nil for a nil input.
+func orderFromThrift(o *hive_metastore.Order) *Order {
+	if o == nil {
+		return nil
+	}
+	return &Order{Column: o.Col, Order: o.Order}
+}
+
+// orderToThrift converts the exported Order type to its generated wire
+// representation. It returns nil for a nil input.
+func orderToThrift(o *Order) *hive_metastore.Order {
+	if o == nil {
+		return nil
+	}
+	return &hive_metastore.Order{Col: o.Column, Order: o.Order}
+}
+
+// ordersFromThrift converts a slice of generated Order values. It returns
+// nil for a nil or empty input (see copyStringMap).
+func ordersFromThrift(os []*hive_metastore.Order) []*Order {
+	if len(os) == 0 {
+		return nil
+	}
+	out := make([]*Order, len(os))
+	for i, o := range os {
+		out[i] = orderFromThrift(o)
+	}
+	return out
+}
+
+// ordersToThrift converts a slice of the exported Order type. It returns
+// nil for a nil or empty input (see copyStringMap).
+func ordersToThrift(os []*Order) []*hive_metastore.Order {
+	if len(os) == 0 {
+		return nil
+	}
+	out := make([]*hive_metastore.Order, len(os))
+	for i, o := range os {
+		out[i] = orderToThrift(o)
+	}
+	return out
+}
+
+// storageFromThrift converts a generated StorageDescriptor to the exported
+// StorageDescriptor type. It returns nil for a nil input.
+func storageFromThrift(sd *hive_metastore.StorageDescriptor) *StorageDescriptor {
+	if sd == nil {
+		return nil
+	}
+	out := &StorageDescriptor{
+		Columns:       fieldSchemasFromThrift(sd.Cols),
+		Location:      sd.Location,
+		InputFormat:   sd.InputFormat,
+		OutputFormat:  sd.OutputFormat,
+		Compressed:    sd.Compressed,
+		NumBuckets:    sd.NumBuckets,
+		SerDe:         serDeFromThrift(sd.SerdeInfo),
+		BucketColumns: copyStrings(sd.BucketCols),
+		SortColumns:   ordersFromThrift(sd.SortCols),
+		Parameters:    copyStringMap(sd.Parameters),
+	}
+	if sd.StoredAsSubDirectories != nil {
+		out.StoredAsSubDirectories = *sd.StoredAsSubDirectories
+	}
+	return out
+}
+
+// storageToThrift converts the exported StorageDescriptor type to its
+// generated wire representation. It returns nil for a nil input.
+func storageToThrift(sd *StorageDescriptor) *hive_metastore.StorageDescriptor {
+	if sd == nil {
+		return nil
+	}
+	out := &hive_metastore.StorageDescriptor{
+		Cols:         fieldSchemasToThrift(sd.Columns),
+		Location:     sd.Location,
+		InputFormat:  sd.InputFormat,
+		OutputFormat: sd.OutputFormat,
+		Compressed:   sd.Compressed,
+		NumBuckets:   sd.NumBuckets,
+		SerdeInfo:    serDeToThrift(sd.SerDe),
+		BucketCols:   copyStrings(sd.BucketColumns),
+		SortCols:     ordersToThrift(sd.SortColumns),
+		Parameters:   copyStringMap(sd.Parameters),
+	}
+	if sd.StoredAsSubDirectories {
+		v := true
+		out.StoredAsSubDirectories = &v
+	}
+	return out
+}
+
+// tableFromThrift converts a generated Table to the exported Table type. A
+// nil wire CatName defaults to the "hive" catalog, matching Hive's own
+// convention on a server that predates catalogs (Hive 2.3). It returns nil
+// for a nil input.
+func tableFromThrift(t *hive_metastore.Table) *Table {
+	if t == nil {
+		return nil
+	}
+	out := &Table{
+		DatabaseName:     t.DbName,
+		TableName:        t.TableName,
+		Owner:            t.Owner,
+		CreateTime:       timeFromUnix32(t.CreateTime),
+		LastAccessTime:   timeFromUnix32(t.LastAccessTime),
+		Retention:        t.Retention,
+		Storage:          storageFromThrift(t.Sd),
+		PartitionKeys:    fieldSchemasFromThrift(t.PartitionKeys),
+		Parameters:       copyStringMap(t.Parameters),
+		ViewOriginalText: t.ViewOriginalText,
+		ViewExpandedText: t.ViewExpandedText,
+		TableType:        TableType(t.TableType),
+	}
+	if t.CatName != nil {
+		out.CatalogName = *t.CatName
+	} else {
+		out.CatalogName = defaultCatalog
+	}
+	return out
+}
+
+// tableToThrift converts the exported Table type to its generated wire
+// representation. cat is the effective catalog resolved for the call (see
+// (*Client).resolveCat); it becomes the wire CatName field (possibly nil,
+// when the connection is known not to support catalogs), taking precedence
+// over t.CatalogName (see (*Client).CreateTable, which folds a non-empty
+// t.CatalogName into the resolveCat call that produces cat). It returns nil
+// for a nil input.
+func tableToThrift(t *Table, cat *string) *hive_metastore.Table {
+	if t == nil {
+		return nil
+	}
+	out := &hive_metastore.Table{
+		DbName:           t.DatabaseName,
+		TableName:        t.TableName,
+		Owner:            t.Owner,
+		CreateTime:       unix32FromTime(t.CreateTime),
+		LastAccessTime:   unix32FromTime(t.LastAccessTime),
+		Retention:        t.Retention,
+		PartitionKeys:    fieldSchemasToThrift(t.PartitionKeys),
+		Parameters:       copyStringMap(t.Parameters),
+		ViewOriginalText: t.ViewOriginalText,
+		ViewExpandedText: t.ViewExpandedText,
+		TableType:        string(t.TableType),
+		CatName:          cat,
+	}
+	if t.Storage != nil {
+		out.Sd = storageToThrift(t.Storage)
 	}
 	return out
 }

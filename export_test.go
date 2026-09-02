@@ -30,3 +30,13 @@ func ClientMaxRetries(c *Client) int { return c.cfg.maxRetries }
 func ClientAcquire(c *Client, ctx context.Context) (*conn, error) { return c.acquire(ctx) }
 func ClientRelease(c *Client, cn *conn)                           { c.release(cn) }
 func ClientLiveConns(c *Client) int32                             { return c.live.Load() }
+
+// SetChunkSizeForTest overrides defaultChunkSize, GetTables' per-request
+// chunk size, so a test can exercise chunking without needing thousands of
+// fixture tables. Call the returned restore func (typically via defer) to
+// put the original value back.
+func SetChunkSizeForTest(n int) (restore func()) {
+	old := defaultChunkSize
+	defaultChunkSize = n
+	return func() { defaultChunkSize = old }
+}
