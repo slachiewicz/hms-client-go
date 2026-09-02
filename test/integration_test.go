@@ -299,7 +299,12 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 		require.NoError(t, c.AlterTable(ctx, dbName, "iceberg_tbl", gotIceberg))
 		afterFidelity, err := c.GetTable(ctx, dbName, "iceberg_tbl")
 		require.NoError(t, err)
-		assert.Equal(t, wantParams, afterFidelity.Parameters)
+		// Hive 4 adds its own statistics parameters (numFiles, totalSize,
+		// numFilesErasureCoded) on alter_table, so compare as a subset: every
+		// parameter the client sent must come back unchanged.
+		for k, v := range wantParams {
+			assert.Equal(t, v, afterFidelity.Parameters[k], "parameter %q", k)
+		}
 		assert.Equal(t, gotIceberg.Storage.SerDe, afterFidelity.Storage.SerDe)
 		assert.Equal(t, gotIceberg.TableType, afterFidelity.TableType)
 	}
