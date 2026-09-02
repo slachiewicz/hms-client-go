@@ -25,7 +25,7 @@ var partitionVersions = []struct {
 func TestAddPartitions_Chunked(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)
-	c := mustNew(t, srv.URI(), hms.WithChunkSize(2))
+	c := mustNew(t, srv.URI(), hms.WithPartitionBatchSize(2))
 	ctx := context.Background()
 
 	require.NoError(t, c.CreateTable(ctx, &hms.Table{
@@ -54,6 +54,68 @@ func TestAddPartitions_Chunked(t *testing.T) {
 	got, err := c.GetPartitions(ctx, "db", "t", -1)
 	require.NoError(t, err)
 	assert.Len(t, got, 5)
+}
+
+// TestAddPartitions_ChunkSizeDoesNotAffectBatching covers the fix to a
+// consumer regression: WithChunkSize used to also govern AddPartitions'
+// batch size, so a caller setting it only to bound GetTables/
+// GetPartitionsByNames requests unknowingly shrank AddPartitions' batches
+// too. WithChunkSize(2) alone must leave AddPartitions at its 1000-item
+// default (a single add_partitions_req for five partitions); only
+// WithPartitionBatchSize(2) governs AddPartitions' batching (three
+// add_partitions_req calls for five partitions).
+func TestAddPartitions_ChunkSizeDoesNotAffectBatching(t *testing.T) {
+	t.Parallel()
+
+	countAddPartitionsReq := func(calls []string) int {
+		n := 0
+		for _, call := range calls {
+			if call == "add_partitions_req" {
+				n++
+			}
+		}
+		return n
+	}
+
+	parts := []*hms.Partition{
+		{Values: []string{"2024-01-01"}},
+		{Values: []string{"2024-01-02"}},
+		{Values: []string{"2024-01-03"}},
+		{Values: []string{"2024-01-04"}},
+		{Values: []string{"2024-01-05"}},
+	}
+
+	t.Run("WithChunkSize(2) alone does not batch AddPartitions", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive40)
+		c := mustNew(t, srv.URI(), hms.WithChunkSize(2))
+		ctx := context.Background()
+
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{
+			DatabaseName:  "db",
+			TableName:     "t",
+			PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		}))
+		require.NoError(t, c.AddPartitions(ctx, "db", "t", parts, false))
+
+		assert.Equal(t, 1, countAddPartitionsReq(srv.Calls()))
+	})
+
+	t.Run("WithPartitionBatchSize(2) batches AddPartitions", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive40)
+		c := mustNew(t, srv.URI(), hms.WithPartitionBatchSize(2))
+		ctx := context.Background()
+
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{
+			DatabaseName:  "db",
+			TableName:     "t",
+			PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		}))
+		require.NoError(t, c.AddPartitions(ctx, "db", "t", parts, false))
+
+		assert.Equal(t, 3, countAddPartitionsReq(srv.Calls()))
+	})
 }
 
 func TestAddPartitions_IfNotExists(t *testing.T) {

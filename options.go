@@ -12,12 +12,13 @@ import (
 
 // Default configuration values applied by New before any Option runs.
 const (
-	defaultCatalog       = "hive"
-	defaultTimeout       = 30 * time.Second
-	defaultMaxRetries    = 3
-	defaultPoolSize      = 4
-	defaultProbeInterval = 30 * time.Second
-	defaultChunkSize     = 1000
+	defaultCatalog            = "hive"
+	defaultTimeout            = 30 * time.Second
+	defaultMaxRetries         = 3
+	defaultPoolSize           = 4
+	defaultProbeInterval      = 30 * time.Second
+	defaultChunkSize          = 1000
+	defaultPartitionBatchSize = 1000
 	// minProbeInterval is the floor clamp enforces on probeInterval: a
 	// zero or negative value would panic inside time.NewTicker
 	// (recoveryProbe) instead of merely misbehaving, unlike poolSize or
@@ -35,6 +36,10 @@ type config struct {
 	poolSize       int
 	probeInterval  time.Duration
 	chunkSize      int
+	// partitionBatchSize governs AddPartitions' batching only (SPEC §5.5,
+	// §2.3 Rule 5), separate from chunkSize (GetTables, GetPartitionsByNames):
+	// see WithPartitionBatchSize.
+	partitionBatchSize int
 
 	httpClient  *http.Client
 	httpHeaders map[string]string
@@ -82,13 +87,14 @@ func (cfg *config) wantsSetUgi() bool {
 // newConfig returns a config seeded with the library defaults.
 func newConfig() *config {
 	return &config{
-		catalog:       defaultCatalog,
-		timeout:       defaultTimeout,
-		maxRetries:    defaultMaxRetries,
-		poolSize:      defaultPoolSize,
-		probeInterval: defaultProbeInterval,
-		chunkSize:     defaultChunkSize,
-		logger:        slog.New(slog.DiscardHandler),
+		catalog:            defaultCatalog,
+		timeout:            defaultTimeout,
+		maxRetries:         defaultMaxRetries,
+		poolSize:           defaultPoolSize,
+		probeInterval:      defaultProbeInterval,
+		chunkSize:          defaultChunkSize,
+		partitionBatchSize: defaultPartitionBatchSize,
+		logger:             slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -116,6 +122,9 @@ func (cfg *config) clamp() {
 	}
 	if cfg.chunkSize < 1 {
 		cfg.chunkSize = 1
+	}
+	if cfg.partitionBatchSize < 1 {
+		cfg.partitionBatchSize = 1
 	}
 	if cfg.connectTimeout == 0 {
 		cfg.connectTimeout = cfg.timeout
@@ -176,11 +185,21 @@ func withProbeInterval(d time.Duration) Option {
 	return func(c *config) { c.probeInterval = d }
 }
 
-// WithChunkSize sets the per-request chunk size used by GetTables,
-// AddPartitions, and GetPartitionsByNames (SPEC §5.1, §5.4, §5.5, §2.3
-// Rule 5). The default is 1000. A value below 1 is clamped to 1.
+// WithChunkSize sets the per-request chunk size used by the name-lookup RPCs
+// GetTables and GetPartitionsByNames (SPEC §5.1, §5.4, §5.5, §2.3 Rule 5).
+// It does not govern AddPartitions' batch size; see WithPartitionBatchSize
+// for that. The default is 1000. A value below 1 is clamped to 1.
 func WithChunkSize(n int) Option {
 	return func(c *config) { c.chunkSize = n }
+}
+
+// WithPartitionBatchSize sets the batch size AddPartitions splits its
+// partitions argument into (SPEC §5.1, §5.5, §2.3 Rule 5), independent of
+// WithChunkSize: a caller tuning read-side lookups with WithChunkSize no
+// longer unknowingly shrinks AddPartitions' batches too. The default is
+// 1000. A value below 1 is clamped to 1.
+func WithPartitionBatchSize(n int) Option {
+	return func(c *config) { c.partitionBatchSize = n }
 }
 
 // WithHTTPClient sets the *http.Client used for the "http://" and "https://"

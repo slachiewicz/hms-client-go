@@ -22,8 +22,10 @@ a release, so everything below is unreleased.
   `AlterDatabase` no longer silently reset them (SPEC §5.4).
 - `Message(err)` to extract a clean exception message, and every error this package returns
   now uses it (SPEC §7).
-- `WithChunkSize` to control the per-request chunk size for `GetTables`, `AddPartitions`, and
-  `GetPartitionsByNames` (SPEC §5.1, §5.4, §5.5).
+- `WithChunkSize` to control the per-request chunk size for `GetTables` and `GetPartitionsByNames`
+  (SPEC §5.1, §5.4, §5.5).
+- `WithPartitionBatchSize` to control `AddPartitions`' batch size independently of
+  `WithChunkSize` (SPEC §5.1, §5.5, §2.3 Rule 5).
 - Partition lookups by name, filter, and partial values: `GetPartitionsByNames`,
   `GetPartitionsByFilter`, `GetPartitionNamesByValues` (SPEC §5.5).
 - `AlterDatabase` (SPEC §5.3).
@@ -54,6 +56,11 @@ a release, so everything below is unreleased.
   instead of an unclassified error (SPEC §7).
 - `AddPartitions` and `AlterPartitions` now take the database and table from the call's own
   `dbName`/`tableName` arguments; a `Partition.DatabaseName`/`TableName` no longer overrides them.
+- `WithChunkSize` no longer governs `AddPartitions`' batch size; use the new
+  `WithPartitionBatchSize` for that. A caller that set `WithChunkSize` only to control
+  `AddPartitions` batching (e.g. to bound request size against a server-side limit) must add
+  `WithPartitionBatchSize` explicitly -- `AddPartitions` now always batches at the 1000-item
+  default unless it is set.
 
 ### Known issues
 

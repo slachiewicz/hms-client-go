@@ -93,10 +93,12 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 }
 
 // AddPartitions adds partitions to the table named tableName in database
-// dbName. Requests are chunked to at most the client's chunk size (see
-// WithChunkSize; default 1000) partitions each (SPEC §2.3 Rule 5); chunks
-// are sent sequentially, so a failure on a later chunk leaves the earlier
-// chunks already committed on the server. With ifNotExists true, a
+// dbName. Requests are batched to at most the client's partition batch size
+// (see WithPartitionBatchSize; default 1000) partitions each (SPEC §2.3 Rule
+// 5) -- independent of WithChunkSize, which governs GetTables and
+// GetPartitionsByNames only; batches are sent sequentially, so a failure on
+// a later batch leaves the earlier batches already committed on the server.
+// With ifNotExists true, a
 // partition whose values already exist is silently skipped; otherwise it
 // is reported as ErrAlreadyExists.
 //
@@ -113,8 +115,8 @@ func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, pa
 		if err != nil {
 			return err
 		}
-		for i := 0; i < len(partitions); i += c.cfg.chunkSize {
-			end := i + c.cfg.chunkSize
+		for i := 0; i < len(partitions); i += c.cfg.partitionBatchSize {
+			end := i + c.cfg.partitionBatchSize
 			if end > len(partitions) {
 				end = len(partitions)
 			}
@@ -204,10 +206,10 @@ func newGetPartitionsByNamesRequest(dbName, tableName string, cat *string, names
 // GetPartitionNames, e.g. "dt=2024-01-01") is in names, in the order the
 // server returns them per chunk. Requests are chunked to at most the
 // client's chunk size (see WithChunkSize; default 1000) names each,
-// mirroring AddPartitions/GetTables (SPEC §2.3 Rule 5); chunks are sent
-// sequentially. Against a server lacking get_partitions_by_names_req
-// (Hive 2.3 and 3.x), it degrades to the legacy get_partitions_by_names
-// RPC (SPEC §2.3).
+// mirroring GetTables (SPEC §2.3 Rule 5) -- not AddPartitions, whose batch
+// size is WithPartitionBatchSize instead; chunks are sent sequentially.
+// Against a server lacking get_partitions_by_names_req (Hive 2.3 and 3.x),
+// it degrades to the legacy get_partitions_by_names RPC (SPEC §2.3).
 func (c *Client) GetPartitionsByNames(ctx context.Context, dbName, tableName string, names []string, opts ...CatalogOption) ([]*Partition, error) {
 	var out []*Partition
 	err := c.read(ctx, "get_partitions_by_names_req", func(ctx context.Context, cn *conn) error {

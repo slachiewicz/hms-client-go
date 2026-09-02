@@ -63,7 +63,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **Rule 2 (`get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req`)**: No fallback. All three exist on every supported version and the legacy forms are absent from the Hive 4 IDL.
 * **Rule 3 (`alter_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `alter_partitions(dbName, tblName, parts)`.
 * **Rule 4 (`get_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partitions(dbName, tblName, maxParts)`.
-* **Rule 5 (batching)**: `add_partitions_req` and `get_table_objects_by_name_req` are chunked (default 1000 items per request) on every version to bound request size.
+* **Rule 5 (batching)**: `add_partitions_req` and `get_table_objects_by_name_req` are chunked (default 1000 items per request) on every version to bound request size. `add_partitions_req`'s batch size is governed by `WithPartitionBatchSize`, independent of `WithChunkSize`, which governs `get_table_objects_by_name_req` and `get_partitions_by_names_req`/`get_partitions_by_names` (Rule 6) instead — the two knobs do not share a value, so tuning one does not silently change the other's batching (§5.1).
 * **Rule 6 (`get_partitions_by_names_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partitions_by_names(dbName, tblName, names)`; chunked like Rule 5.
 * **Rule 7 (`get_partition_names_ps_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partition_names_ps(dbName, tblName, partVals, maxParts)`.
 
@@ -158,7 +158,8 @@ func WithConnectTimeout(d time.Duration) Option // dial / TLS handshake / SASL h
 func WithMaxRetries(n int) Option
 func WithRandomEndpointOrder() Option
 func WithPoolSize(n int) Option
-func WithChunkSize(n int) Option                // per-request chunk size for GetTables/AddPartitions/GetPartitionsByNames; default 1000; see §5.4, §5.5
+func WithChunkSize(n int) Option                // per-request chunk size for GetTables/GetPartitionsByNames; default 1000; see §5.4, §5.5
+func WithPartitionBatchSize(n int) Option       // per-request batch size for AddPartitions only, independent of WithChunkSize; default 1000; see §5.5
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
@@ -303,7 +304,7 @@ func (c *Client) GetPartitionNamesByValues(ctx context.Context, db, tbl string, 
 
 `DropPartition` with `ifExists == false` on a missing partition returns `ErrNotFound`; with `ifExists == true` it returns `nil`.
 
-`AddPartitions` chunks `partitions` the same way `GetTables` chunks `tableNames` (§5.4): at most 1000 per request by default, sent sequentially, so a failure on a later chunk leaves the earlier chunks already committed on the server.
+`AddPartitions` batches `partitions` the same way `GetTables` chunks `tableNames` (§5.4): at most 1000 per request by default, sent sequentially, so a failure on a later batch leaves the earlier batches already committed on the server. Its batch size is `WithPartitionBatchSize`, not `WithChunkSize`: the two are independent, so a caller tuning `WithChunkSize` for `GetTables`/`GetPartitionsByNames` does not also change `AddPartitions`' batching.
 
 `GetPartitionsByNames` wraps `get_partitions_by_names` and is chunked like `AddPartitions`. `GetPartitionsByFilter` wraps `get_partitions_by_filter`; `filter` is Hive's partition-filter expression grammar (e.g. `"year = 2024 AND month > 6"`) and is passed through to the server verbatim — the client does not parse or validate it. `GetPartitionNamesByValues` wraps `get_partition_names_ps`, matching partitions whose leading partition-key values equal `partialValues` (a prefix; trailing keys are wildcarded).
 
