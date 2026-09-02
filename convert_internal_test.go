@@ -62,7 +62,7 @@ func TestGetTable_PreservesNonDefaultOwnerType(t *testing.T) {
 	require.NoError(t, err)
 	defer c.release(0, cn)
 
-	res, err := cn.getTableReq(ctx, &hive_metastore.GetTableRequest{DbName: "db", TblName: "t", CatName: ptr("hive")})
+	res, err := cn.getTableReq(ctx, newGetTableRequest("db", "t", ptr("hive")))
 	require.NoError(t, err)
 	assert.Equal(t, hive_metastore.PrincipalType_ROLE, res.Table.OwnerType)
 }

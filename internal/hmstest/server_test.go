@@ -93,6 +93,8 @@ func TestServer_Hive23_GetTableReq(t *testing.T) {
 			DbName:  "db",
 			TblName: "tbl",
 			CatName: ptr("hive"),
+			Engine:  "hive",
+			ID:      -1,
 		})
 		require.Error(t, err)
 		var metaErr *hive_metastore.MetaException
@@ -107,6 +109,8 @@ func TestServer_Hive23_GetTableReq(t *testing.T) {
 		_, err := client.GetTableReq(context.Background(), &hive_metastore.GetTableRequest{
 			DbName:  "db",
 			TblName: "tbl",
+			Engine:  "hive",
+			ID:      -1,
 		})
 		require.Error(t, err)
 		var nsoErr *hive_metastore.NoSuchObjectException
@@ -179,7 +183,7 @@ func TestServer_CallsAndLastArgs(t *testing.T) {
 	_, err := client.GetCatalogs(ctx)
 	require.NoError(t, err)
 
-	req := &hive_metastore.GetTableRequest{DbName: "db", TblName: "tbl"}
+	req := &hive_metastore.GetTableRequest{DbName: "db", TblName: "tbl", Engine: "hive", ID: -1}
 	_, err = client.GetTableReq(ctx, req)
 	require.Error(t, err) // table does not exist; we only care about recording here
 

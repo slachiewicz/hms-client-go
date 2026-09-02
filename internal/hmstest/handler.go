@@ -487,6 +487,12 @@ func (h *handler) GetTableReq(_ context.Context, req *hive_metastore.GetTableReq
 	if err != nil {
 		return nil, err
 	}
+	if req.Engine != "hive" {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field Engine"}
+	}
+	if req.ID != -1 {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field ID"}
+	}
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
 	t, ok := h.store.Tables[tblKey(catName, req.DbName, req.TblName)]
@@ -595,6 +601,9 @@ func (h *handler) GetPartitionsReq(_ context.Context, req *hive_metastore.Partit
 	catName, err := cat(h.v, req.CatName)
 	if err != nil {
 		return nil, err
+	}
+	if req.ID != -1 {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field ID"}
 	}
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
@@ -709,6 +718,9 @@ func (h *handler) AlterPartitionsReq(_ context.Context, req *hive_metastore.Alte
 	catName, err := cat(h.v, req.CatName)
 	if err != nil {
 		return nil, err
+	}
+	if req.WriteId != -1 {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field WriteId"}
 	}
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()

@@ -26,6 +26,22 @@ func (c *Client) GetAllTables(ctx context.Context, dbName string, opts ...Catalo
 	return names, err
 }
 
+// newGetTableRequest builds a GetTableRequest from hive_metastore.
+// NewGetTableRequest() rather than a bare struct literal, so the
+// non-pointer "optional with default" fields Engine and ID (no equivalent
+// on this package's exported API) keep NewGetTableRequest's defaults
+// ("hive" and -1) instead of falling back to the Go zero value, which the
+// server would read as a real (and wrong) engine name or numeric table id
+// rather than "unset" (see tableToThrift's identical treatment of
+// Table.OwnerType/WriteId).
+func newGetTableRequest(dbName, tableName string, cat *string) *hive_metastore.GetTableRequest {
+	req := hive_metastore.NewGetTableRequest()
+	req.DbName = dbName
+	req.TblName = tableName
+	req.CatName = cat
+	return req
+}
+
 // GetTable returns the table named tableName in database dbName.
 func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ...CatalogOption) (*Table, error) {
 	var out *Table
@@ -34,7 +50,7 @@ func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ..
 		if err != nil {
 			return err
 		}
-		res, err := cn.getTableReq(ctx, &hive_metastore.GetTableRequest{DbName: dbName, TblName: tableName, CatName: cat})
+		res, err := cn.getTableReq(ctx, newGetTableRequest(dbName, tableName, cat))
 		if err != nil {
 			return err
 		}

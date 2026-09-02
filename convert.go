@@ -62,7 +62,7 @@ func databaseFromThrift(d *hive_metastore.Database, cat *string) *Database {
 		Name:        d.Name,
 		Description: d.Description,
 		LocationURI: d.LocationUri,
-		Parameters:  d.Parameters,
+		Parameters:  copyStringMap(d.Parameters),
 		OwnerName:   deref(d.OwnerName),
 	}
 	if d.OwnerType != nil {
@@ -92,7 +92,7 @@ func databaseToThrift(db *Database, cat *string) *hive_metastore.Database {
 		Name:        db.Name,
 		Description: db.Description,
 		LocationUri: db.LocationURI,
-		Parameters:  db.Parameters,
+		Parameters:  copyStringMap(db.Parameters),
 		CatalogName: cat,
 	}
 	if db.OwnerName != "" {

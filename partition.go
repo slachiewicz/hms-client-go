@@ -21,6 +21,22 @@ func clampParts(n int) int16 {
 	}
 }
 
+// newPartitionsRequest builds a PartitionsRequest from hive_metastore.
+// NewPartitionsRequest() rather than a bare struct literal, so the
+// non-pointer "optional with default" field ID (no equivalent on this
+// package's exported API) keeps NewPartitionsRequest's default of -1
+// instead of falling back to the Go zero value 0, a real numeric table id
+// on the wire rather than "unset" (see tableToThrift's identical treatment
+// of Table.WriteId).
+func newPartitionsRequest(dbName, tableName string, cat *string, maxParts int16) *hive_metastore.PartitionsRequest {
+	req := hive_metastore.NewPartitionsRequest()
+	req.CatName = cat
+	req.DbName = dbName
+	req.TblName = tableName
+	req.MaxParts = maxParts
+	return req
+}
+
 // GetPartitions returns up to maxParts partitions of the table named
 // tableName in database dbName; a negative maxParts means "all partitions".
 // Against a server lacking get_partitions_req (Hive 2.3 and 3.x), it
@@ -35,12 +51,7 @@ func (c *Client) GetPartitions(ctx context.Context, dbName, tableName string, ma
 		mp := clampParts(maxParts)
 		return cn.tryReq(ctx, "get_partitions_req",
 			func(ctx context.Context) error {
-				resp, err := cn.getPartitionsReq(ctx, &hive_metastore.PartitionsRequest{
-					CatName:  cat,
-					DbName:   dbName,
-					TblName:  tableName,
-					MaxParts: mp,
-				})
+				resp, err := cn.getPartitionsReq(ctx, newPartitionsRequest(dbName, tableName, cat, mp))
 				if err != nil {
 					return err
 				}
@@ -115,6 +126,22 @@ func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, pa
 	})
 }
 
+// newAlterPartitionsRequest builds an AlterPartitionsRequest from
+// hive_metastore.NewAlterPartitionsRequest() rather than a bare struct
+// literal, so the non-pointer "optional with default" field WriteId (no
+// equivalent on this package's exported API) keeps
+// NewAlterPartitionsRequest's default of -1 instead of falling back to the
+// Go zero value 0, a real write id on the wire rather than "unset" (see
+// tableToThrift's identical treatment of Table.WriteId).
+func newAlterPartitionsRequest(dbName, tableName string, cat *string, partitions []*hive_metastore.Partition) *hive_metastore.AlterPartitionsRequest {
+	req := hive_metastore.NewAlterPartitionsRequest()
+	req.CatName = cat
+	req.DbName = dbName
+	req.TableName = tableName
+	req.Partitions = partitions
+	return req
+}
+
 // AlterPartitions replaces existing partitions of the table named tableName
 // in database dbName, matched by their Values. Against a server lacking
 // alter_partitions_req (Hive 2.3 and 3.x), it degrades to the legacy
@@ -127,12 +154,8 @@ func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, 
 		}
 		return cn.tryReq(ctx, "alter_partitions_req",
 			func(ctx context.Context) error {
-				_, err := cn.alterPartitionsReq(ctx, &hive_metastore.AlterPartitionsRequest{
-					CatName:    cat,
-					DbName:     dbName,
-					TableName:  tableName,
-					Partitions: partitionsToThrift(partitions, cat, dbName, tableName),
-				})
+				req := newAlterPartitionsRequest(dbName, tableName, cat, partitionsToThrift(partitions, cat, dbName, tableName))
+				_, err := cn.alterPartitionsReq(ctx, req)
 				return err
 			},
 			func(ctx context.Context) error {
