@@ -736,11 +736,17 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 
 // AlterDatabase replaces the mutable properties (Description, LocationURI,
 // Parameters, OwnerName, OwnerType) of the database named name with db's
-// (SPEC §5.3, 1.0 addition); db.CreateTime is never written, the same way
-// CreateDatabase never writes it (see databaseToThrift). A non-empty
-// db.CatalogName overrides the client's default catalog for this call, the
-// same way CreateDatabase's db.CatalogName does; opts' InCatalog, if
-// passed, takes precedence over both (SPEC §5.0).
+// (SPEC §5.3, 1.0 addition); AlterDatabase itself never writes a
+// db.CreateTime of its own (see databaseToThrift), though a db that carries
+// a round-trip fidelity snapshot -- i.e. one GetDatabase itself returned --
+// echoes the original, server-assigned CreateTime back rather than clearing
+// it, which is harmless since the field is immutable; a field neither this
+// package's Database nor this doc comment mentions (Privileges, Type,
+// ConnectorName, RemoteDbname, ManagedLocationUri) survives the same way
+// (SPEC §5.4 "Round-trip fidelity"). A non-empty db.CatalogName overrides
+// the client's default catalog for this call, the same way CreateDatabase's
+// db.CatalogName does; opts' InCatalog, if passed, takes precedence over
+// both (SPEC §5.0).
 func (c *Client) AlterDatabase(ctx context.Context, name string, db *Database, opts ...CatalogOption) error {
 	return c.call(ctx, "alter_database", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCatFor(ctx, cn, db.CatalogName, opts)

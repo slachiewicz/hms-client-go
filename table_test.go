@@ -120,7 +120,15 @@ func TestAlterTable_PreservesUnmodelledFields(t *testing.T) {
 	got.Parameters["x"] = "2"
 	require.NoError(t, c.AlterTable(ctx, "db", "t", got))
 
-	stored := srv.Store().Tables["hive.db.t"]
+	// Read the persisted table back through the client rather than peeking
+	// at srv.Store().Tables directly, which would race the store's own
+	// lock against the handler goroutine servicing this connection; the
+	// exported TableRaw test hook then reaches the fields hms.Table itself
+	// has no field for, off the fresh GetTable response's own raw
+	// snapshot.
+	after, err := c.GetTable(ctx, "db", "t")
+	require.NoError(t, err)
+	stored := hms.TableRaw(after)
 	require.NotNil(t, stored)
 	assert.Equal(t, "2", stored.Parameters["x"], "the modelled field this test actually changed must still take effect")
 	require.NotNil(t, stored.RewriteEnabled, "RewriteEnabled must survive: hms.Table has no field for it")

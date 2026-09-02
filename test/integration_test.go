@@ -216,10 +216,13 @@ func TestDatabases_CRUD(t *testing.T) {
 // NewDeltaTable, and NewHudiTable through CreateTable/GetTable (SPEC.md §6),
 // then exercises AlterTable (a parameter change) and DropTable's ifExists
 // semantics. It also asserts OwnerType defaults to PrincipalUser on create
-// (SPEC.md §5.4, "1.0 addition"), and, on 4.x only, that a further
-// GetTable -> AlterTable round trip on the Iceberg table preserves
-// Parameters, Storage.SerDe, and TableType unchanged (round-trip fidelity,
-// SPEC.md §5.4).
+// (SPEC.md §5.4, "1.0 addition"), and, on 4.x only, a smoke test that a
+// further GetTable -> AlterTable round trip that changes nothing leaves the
+// Iceberg table's modelled Parameters, Storage.SerDe, and TableType intact.
+// This package is external to hms (no access to the raw/TableRaw internals
+// package hms's own convert_internal_test.go exercises against the fake
+// server), so it cannot assert survival of a field hms.Table does not
+// model; that guarantee is the white-box tests' job, not this one's.
 func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
@@ -243,9 +246,14 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 	assert.Equal(t, hms.PrincipalUser, gotIceberg.OwnerType, "OwnerType defaults to PrincipalUser on create")
 
 	if expectVersion == "4.0" || expectVersion == "4.2" {
-		// Round-trip fidelity (SPEC.md §5.4): a GetTable -> AlterTable
-		// round trip that changes nothing must not disturb Parameters,
-		// Storage.SerDe, or TableType.
+		// Smoke test: a GetTable -> AlterTable round trip that changes
+		// nothing must not disturb Parameters, Storage.SerDe, or
+		// TableType. This does not exercise round-trip fidelity itself
+		// (SPEC.md §5.4) -- every field checked here is one hms.Table
+		// already models and would round-trip even without the internal
+		// snapshot; see convert_internal_test.go's
+		// TestTableRoundTrip_PreservesUnmodelledFields and
+		// TestAlterTable_PreservesUnmodelledFields for that.
 		wantParams := make(map[string]string, len(gotIceberg.Parameters))
 		for k, v := range gotIceberg.Parameters {
 			wantParams[k] = v

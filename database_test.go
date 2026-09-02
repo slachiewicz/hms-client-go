@@ -56,7 +56,7 @@ func TestDatabases_CreateGetRoundTrip(t *testing.T) {
 				LocationURI: "hdfs:///mydb",
 				Parameters:  map[string]string{"k": "v"},
 				CreateTime:  got.CreateTime,
-			}, got)
+			}, hms.StripDatabaseRaw(got))
 
 			args, ok := srv.LastArgs("create_database").(*hive_metastore.Database)
 			require.True(t, ok)
@@ -80,6 +80,66 @@ func TestDatabases_CreateGetRoundTrip(t *testing.T) {
 			assert.Equal(t, "file:///tmp/hms-warehouse/nolocdb.db", got2.LocationURI)
 		})
 	}
+}
+
+// TestAlterDatabase_PreservesUnmodelledFields covers G3/SPEC §5.4's
+// round-trip fidelity guarantee for Database (finding 3 of the Task 3
+// review): before Database.raw existed, databaseToThrift always built a
+// bare hive_metastore.Database{}, so a GetDatabase -> AlterDatabase round
+// trip silently reset every field hms.Database has no field for --
+// Privileges, Type, ConnectorName, RemoteDbname, ManagedLocationUri --
+// exactly what a database Spark or Trino registered with those set would
+// suffer on any AlterDatabase call. The fixture's AlterDatabase replaces
+// the stored database wholesale (internal/hmstest/handler.go's
+// AlterDatabase), so a surviving field can only come from the snapshot.
+func TestAlterDatabase_PreservesUnmodelledFields(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	catName := "hive"
+	connectorName := "mysql_connector"
+	remoteDbname := "remote_db"
+	managedLocationURI := "hdfs:///managed/db"
+	srv.SeedDatabase(&hive_metastore.Database{
+		Name:        "db",
+		Description: "d",
+		LocationUri: "hdfs:///db",
+		Parameters:  map[string]string{"k": "v"},
+		CatalogName: &catName,
+		Privileges: &hive_metastore.PrincipalPrivilegeSet{
+			UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+				"alice": {{Privilege: "SELECT", Grantor: "bob", GrantorType: hive_metastore.PrincipalType_USER}},
+			},
+		},
+		Type:               hive_metastore.DatabaseTypePtr(hive_metastore.DatabaseType_REMOTE),
+		ConnectorName:      &connectorName,
+		RemoteDbname:       &remoteDbname,
+		ManagedLocationUri: &managedLocationURI,
+	})
+
+	got, err := c.GetDatabase(ctx, "db")
+	require.NoError(t, err)
+
+	got.Parameters = map[string]string{"k": "v2"}
+	require.NoError(t, c.AlterDatabase(ctx, "db", got))
+
+	after, err := c.GetDatabase(ctx, "db")
+	require.NoError(t, err)
+	stored := hms.DatabaseRaw(after)
+	require.NotNil(t, stored)
+	assert.Equal(t, "v2", stored.Parameters["k"], "the modelled field this test actually changed must still take effect")
+	require.NotNil(t, stored.Privileges, "Privileges must survive: hms.Database has no field for it")
+	assert.Equal(t, "bob", stored.Privileges.UserPrivileges["alice"][0].Grantor)
+	require.NotNil(t, stored.Type, "Type must survive: hms.Database has no field for it")
+	assert.Equal(t, hive_metastore.DatabaseType_REMOTE, *stored.Type)
+	require.NotNil(t, stored.ConnectorName, "ConnectorName must survive: hms.Database has no field for it")
+	assert.Equal(t, "mysql_connector", *stored.ConnectorName)
+	require.NotNil(t, stored.RemoteDbname, "RemoteDbname must survive: hms.Database has no field for it")
+	assert.Equal(t, "remote_db", *stored.RemoteDbname)
+	require.NotNil(t, stored.ManagedLocationUri, "ManagedLocationUri must survive: hms.Database has no field for it")
+	assert.Equal(t, "hdfs:///managed/db", *stored.ManagedLocationUri)
 }
 
 func TestGetDatabase_Hive23NonDefaultCatalogNotSupported(t *testing.T) {

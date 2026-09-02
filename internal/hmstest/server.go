@@ -244,6 +244,35 @@ func (s *Server) SeedTable(t *hive_metastore.Table) {
 	s.store.Tables[tblKey(catName, t.DbName, t.TableName)] = t
 }
 
+// SeedPartitions installs parts directly into the store under the table
+// named by catName (or "hive" when empty), dbName, and tblName, bypassing
+// AddPartitions and the hms package's own converters entirely -- the same
+// rationale as SeedTable, for a partition carrying a field hms.Partition
+// has no field for (e.g. Privileges, WriteId).
+func (s *Server) SeedPartitions(catName, dbName, tblName string, parts []*hive_metastore.Partition) {
+	if catName == "" {
+		catName = "hive"
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.Partitions[tblKey(catName, dbName, tblName)] = parts
+}
+
+// SeedDatabase installs db directly into the store under its own
+// CatalogName (or "hive" when nil/empty) and Name, bypassing CreateDatabase
+// and the hms package's own converters entirely -- the same rationale as
+// SeedTable, for a database carrying a field hms.Database has no field for
+// (e.g. Privileges, Type, ConnectorName, RemoteDbname, ManagedLocationUri).
+func (s *Server) SeedDatabase(db *hive_metastore.Database) {
+	catName := "hive"
+	if db.CatalogName != nil && *db.CatalogName != "" {
+		catName = *db.CatalogName
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.store.Databases[dbKey(catName, db.Name)] = db
+}
+
 // Panics returns, in the order they occurred, the messages recorded by
 // handleConn's recover for a panic in an unimplemented (nil embedded
 // ThriftHiveMetastore) or misbehaving handler method. The returned slice

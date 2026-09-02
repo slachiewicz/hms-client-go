@@ -65,6 +65,12 @@ type Catalog struct {
 }
 
 // Database is a Hive Metastore database (SPEC §5.3).
+//
+// Like Table, a Database returned by GetDatabase carries an internal,
+// read-only snapshot of every field the generated Thrift Database has;
+// AlterDatabase preserves whatever that snapshot carries but this struct
+// does not model (Privileges, Type, ConnectorName, RemoteDbname,
+// ManagedLocationUri). See Table's doc comment for the full contract.
 type Database struct {
 	// CatalogName is the catalog the database belongs to.
 	CatalogName string
@@ -85,8 +91,16 @@ type Database struct {
 	OwnerType PrincipalType
 	// CreateTime is when the database was created (1.0 addition). It is
 	// read-only: CreateDatabase never writes it, since the server assigns
-	// it itself.
+	// it itself. AlterDatabase, when db carries a raw snapshot (i.e. db
+	// came from GetDatabase), echoes the original value back rather than
+	// clearing it -- harmless, since the field is server-assigned and
+	// immutable -- but never writes one of its own.
 	CreateTime time.Time
+
+	// raw is a deep copy of the generated Thrift Database this value was
+	// converted from (databaseFromThrift), or nil for a Database this
+	// package never read off the wire. See Table.raw.
+	raw *hive_metastore.Database
 }
 
 // FieldSchema describes one column or partition key.

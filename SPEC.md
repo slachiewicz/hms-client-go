@@ -138,7 +138,7 @@ Package: `hms` at the module root (`import "github.com/slachiewicz/hms-client-go
 Every call that touches a catalog-scoped object resolves the *effective catalog* the same way, in this precedence order, highest first:
 
 1. A per-call `InCatalog(name)` (`CatalogOption`), when passed to that call.
-2. The struct's own `CatalogName` field, on a create/alter call that takes a struct (`CreateDatabase`, `CreateTable`; `AlterTable` honours `newTable.CatalogName` the same way — **1.0 fix**: today `AlterTable` only looks at its `opts ...CatalogOption` and ignores `newTable.CatalogName`).
+2. The struct's own `CatalogName` field, on a create/alter call that takes a struct: `CreateDatabase`, `CreateTable`, `AlterTable` (`newTable.CatalogName`), and `AlterDatabase` (`db.CatalogName`).
 3. `WithCatalog(name)`, the client-wide default set at construction.
 4. `"hive"`, the built-in default.
 
@@ -156,6 +156,7 @@ func WithConnectTimeout(d time.Duration) Option // dial / TLS handshake / SASL h
 func WithMaxRetries(n int) Option
 func WithRandomEndpointOrder() Option
 func WithPoolSize(n int) Option
+func WithChunkSize(n int) Option                // per-request chunk size for GetTables/AddPartitions/GetPartitionsByNames; default 1000; see §5.4, §5.5
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
@@ -265,11 +266,11 @@ type SkewedInfo struct {
 }
 ```
 
-These are the wire's first two `SkewedInfo` fields (`skewedColNames`, `skewedColValues`; plain `list<string>` / `list<list<string>>`), which are not affected by the THRIFT-2063 gate in §1.1. The wire's third field, `skewedColValueLocationMaps` (`map<list<string>, string>`), remains unmodelled -- it is dropped from the generated code until a Thrift Go release fixes THRIFT-2063 (Appendix A) -- but a value already on the wire is not lost across `GetTable` -> `AlterTable` even so; see "Round-trip fidelity" below.
+These are the wire's first two `SkewedInfo` fields (`skewedColNames`, `skewedColValues`; plain `list<string>` / `list<list<string>>`), which are not affected by the THRIFT-2063 gate in §1.1. The wire's third field, `skewedColValueLocationMaps` (`map<list<string>, string>`), remains unmodelled -- it is dropped from the generated IDL before generation entirely (§1.1, Appendix A), so the generated Thrift struct has no field for it at all, and the generated `Read` skips those bytes on the wire rather than storing them anywhere. Unlike every other unmodelled field (see "Round-trip fidelity" below), this one is genuinely lost the moment a `Table` or `Partition` is read: there is nothing for the round-trip snapshot to have captured, so it does not survive `GetTable` -> `AlterTable` either.
 
 #### Round-trip fidelity
 
-A `Table` or `Partition` returned by the server carries an internal, read-only snapshot of every field the generated Thrift struct has, not just the ones this package models. `AlterTable` and `AlterPartitions` build the outgoing struct from that snapshot and overwrite only the modelled fields, so a field this package does not expose -- `Privileges`, `RewriteEnabled`, `Id`, `TxnId`, `AccessType`, the capability lists, `SkewedInfo.skewedColValueLocationMaps`, and any field a future IDL bump adds -- survives a `GetTable` -> `AlterTable` (or `GetPartitions` -> `AlterPartitions`) round trip unchanged instead of being silently reset. A `Table` or `Partition` built directly (a struct literal, or one of the `NewXxxTable` builders in §6) carries no snapshot and behaves exactly as before this existed.
+A `Table`, `Partition`, or `Database` returned by the server carries an internal, read-only snapshot of every field the *generated* Thrift struct carries -- not the wire's full field set, since a field the IDL generation step itself drops (today, only `SkewedInfo.skewedColValueLocationMaps`, per §1.1) was never decoded into that struct to snapshot in the first place. `AlterTable`, `AlterPartitions`, and `AlterDatabase` build the outgoing struct from that snapshot and overwrite only the modelled fields, so a field this package does not expose but the generated bindings do -- `Table.Privileges`/`RewriteEnabled`/`Id`/`TxnId`/`AccessType`/the capability lists, `Partition.Privileges`/`WriteId`/the stats fields, `StorageDescriptor.SerdeInfo`'s `Description`/`SerializerClass`/`DeserializerClass`/`SerdeType`, `Database.Privileges`/`Type`/`ConnectorName`/`RemoteDbname`/`ManagedLocationUri`, and any field a future IDL bump adds -- survives a `GetTable` -> `AlterTable` (or `GetPartitions` -> `AlterPartitions`, `GetDatabase` -> `AlterDatabase`) round trip unchanged instead of being silently reset. A `Table`, `Partition`, or `Database` built directly (a struct literal, or one of the `NewXxxTable` builders in §6) carries no snapshot and behaves exactly as before this existed.
 
 ### 5.5. Partition Operations
 
@@ -498,6 +499,8 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `ConfigValSecurityException` (`get_config_value` on a key not beginning with `hive`, `mapred`, or `hdfs`) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` — target mapping; **planned for 1.0**, `classify` does not special-case this exception type today (it falls through to `hms.ErrMeta`) |
 
 `DropDatabase` on Hive 3.1 additionally maps a bare `MetaException(java.lang.NullPointerException)` from `drop_database` to `hms.ErrNotFound`; see Appendix A.
+
+`func Message(err error) string` extracts a generated exception's `Message` field (or a `TApplicationException`'s own text, or `err.Error()` as a last resort) without the Go struct dump the exception's default `Error()` would otherwise print; every error this package returns already uses it, so `err.Error()` is `"<op>: <message>"` with no further unwrapping needed.
 
 ---
 

@@ -75,18 +75,21 @@ func ConfigWantsSetUgi(opts ...Option) bool {
 // (default 30s), so ha_test.go can bound its waits to well under a second.
 func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval(d) }
 
-// TableRaw and PartitionRaw expose Table.raw and Partition.raw to hms_test,
-// the round-trip fidelity snapshot tableFromThrift/partitionFromThrift set
-// and tableToThrift/partitionToThrift build on (see Table's doc comment),
-// since raw is unexported.
+// TableRaw, PartitionRaw and DatabaseRaw expose Table.raw, Partition.raw and
+// Database.raw to hms_test, the round-trip fidelity snapshot
+// tableFromThrift/partitionFromThrift/databaseFromThrift set and
+// tableToThrift/partitionToThrift/databaseToThrift build on (see Table's
+// doc comment), since raw is unexported.
 func TableRaw(t *Table) *hive_metastore.Table             { return t.raw }
 func PartitionRaw(p *Partition) *hive_metastore.Partition { return p.raw }
+func DatabaseRaw(d *Database) *hive_metastore.Database    { return d.raw }
 
-// StripTableRaw and StripPartitionRaw return a shallow copy of t/p with the
-// round-trip fidelity snapshot cleared, for a black-box test that compares
-// a whole Table or Partition for equality (e.g. via testify's assert.Equal,
-// which does not ignore unexported fields) without wanting that
-// server-populated, unexported field to participate.
+// StripTableRaw, StripPartitionRaw and StripDatabaseRaw return a shallow
+// copy of t/p/d with the round-trip fidelity snapshot cleared, for a
+// black-box test that compares a whole Table, Partition or Database for
+// equality (e.g. via testify's assert.Equal, which does not ignore
+// unexported fields) without wanting that server-populated, unexported
+// field to participate.
 func StripTableRaw(t *Table) *Table {
 	if t == nil {
 		return nil
@@ -101,6 +104,15 @@ func StripPartitionRaw(p *Partition) *Partition {
 		return nil
 	}
 	cp := *p
+	cp.raw = nil
+	return &cp
+}
+
+func StripDatabaseRaw(d *Database) *Database {
+	if d == nil {
+		return nil
+	}
+	cp := *d
 	cp.raw = nil
 	return &cp
 }

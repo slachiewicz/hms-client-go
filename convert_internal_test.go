@@ -11,6 +11,11 @@ import (
 	"github.com/slachiewicz/hms-client-go/internal/hmstest"
 )
 
+// serdeTypePtr returns a pointer to v, mirroring ptr (convert.go) for the
+// generated SerdeType enum. Only test seeds need a *SerdeType literal, so
+// this lives here rather than in convert.go.
+func serdeTypePtr(v hive_metastore.SerdeType) *hive_metastore.SerdeType { return &v }
+
 // TestTableToThrift_DefaultsOwnerTypeAndWriteId covers the fix for
 // tableToThrift building a bare hive_metastore.Table{} literal, which left
 // the non-pointer "optional with default" fields OwnerType and WriteId at
@@ -110,10 +115,24 @@ func TestTableRoundTrip_PreservesUnmodelledFields(t *testing.T) {
 	seed.TableType = "EXTERNAL_TABLE"
 	seed.Parameters = map[string]string{"k": "v"}
 	seed.PartitionKeys = []*hive_metastore.FieldSchema{{Name: "dt", Type: "string"}}
+	stored := true
 	seed.Sd = &hive_metastore.StorageDescriptor{
 		SkewedInfo: &hive_metastore.SkewedInfo{
 			SkewedColNames:  []string{"region"},
 			SkewedColValues: [][]string{{"us"}, {"eu"}},
+		},
+		StoredAsSubDirectories: &stored,
+		// SerdeInfo's Description/SerializerClass/DeserializerClass/
+		// SerdeType have no field on hms.SerDeInfo (only Name,
+		// SerializationLib, and Parameters do); storageToThrift/
+		// serDeToThrift must thread the raw snapshot's SerdeInfo through
+		// so these survive too, not just the Table/Partition-level
+		// unmodelled fields below.
+		SerdeInfo: &hive_metastore.SerDeInfo{
+			Description:       ptr("a serde description"),
+			SerializerClass:   ptr("com.example.Serializer"),
+			DeserializerClass: ptr("com.example.Deserializer"),
+			SerdeType:         serdeTypePtr(hive_metastore.SerdeType_HIVE),
 		},
 	}
 
@@ -152,5 +171,61 @@ func TestTableRoundTrip_PreservesUnmodelledFields(t *testing.T) {
 	seed.TxnId = &txnID
 
 	got := tableToThrift(tableFromThrift(seed), ptr("hive"))
+	assert.Equal(t, seed, got)
+}
+
+// TestPartitionRoundTrip_PreservesUnmodelledFields is
+// TestTableRoundTrip_PreservesUnmodelledFields's counterpart for Partition:
+// before Partition.raw existed, partitionToThrift always started from a
+// bare hive_metastore.NewPartition(), so a
+// partitionFromThrift -> partitionToThrift round trip silently dropped
+// every field hms.Partition has no field for -- LastAccessTime, Privileges,
+// WriteId, IsStatsCompliant, ColStats, FileMetadata, and (one level down,
+// inside Sd) StorageDescriptor.SerdeInfo's Description/SerializerClass/
+// DeserializerClass/SerdeType -- exactly what a
+// GetPartitions -> AlterPartitions call would do to it.
+func TestPartitionRoundTrip_PreservesUnmodelledFields(t *testing.T) {
+	t.Parallel()
+
+	seed := hive_metastore.NewPartition() // WriteId: -1
+	seed.Values = []string{"2024-01-01"}
+	seed.DbName = "db"
+	seed.TableName = "t"
+	seed.CreateTime = 1700000000
+	seed.LastAccessTime = 1700000100
+	seed.CatName = ptr("hive")
+	seed.Parameters = map[string]string{"k": "v"}
+	seed.Sd = &hive_metastore.StorageDescriptor{
+		SerdeInfo: &hive_metastore.SerDeInfo{
+			Description:       ptr("a serde description"),
+			SerializerClass:   ptr("com.example.Serializer"),
+			DeserializerClass: ptr("com.example.Deserializer"),
+			SerdeType:         serdeTypePtr(hive_metastore.SerdeType_HIVE),
+		},
+	}
+
+	// Fields hms.Partition has no field for. See
+	// TestTableRoundTrip_PreservesUnmodelledFields for why
+	// GroupPrivileges/RolePrivileges are non-nil empty maps rather than
+	// left nil.
+	seed.Privileges = &hive_metastore.PrincipalPrivilegeSet{
+		UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+			"alice": {{Privilege: "SELECT", Grantor: "bob", GrantorType: hive_metastore.PrincipalType_USER}},
+		},
+		GroupPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{},
+		RolePrivileges:  map[string][]*hive_metastore.PrivilegeGrantInfo{},
+	}
+	statsCompliant := true
+	seed.IsStatsCompliant = &statsCompliant
+	seed.ColStats = &hive_metastore.ColumnStatistics{
+		StatsDesc: &hive_metastore.ColumnStatisticsDesc{
+			IsTblLevel: false,
+			DbName:     "db",
+			TableName:  "t",
+		},
+		StatsObj: []*hive_metastore.ColumnStatisticsObj{},
+	}
+
+	got := partitionToThrift(partitionFromThrift(seed), ptr("hive"), "db", "t")
 	assert.Equal(t, seed, got)
 }

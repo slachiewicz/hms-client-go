@@ -22,36 +22,65 @@ func deref(p *string) string {
 	return *p
 }
 
+// deepCopySer and deepCopyDeser are pooled thrift (de)serializers shared by
+// every deepCopyThrift call: thrift.TSerializer/TDeserializer allocate a
+// 1KB TMemoryBuffer apiece (see NewTSerializer/NewTDeserializer), and every
+// GetTable/GetPartitions/GetDatabase response pays for one of each just to
+// build its round-trip fidelity snapshot, so pooling them (via thrift's own
+// TSerializerPool/TDeserializerPool, which already handle the concurrency)
+// avoids that allocation on every call instead of only avoiding it within
+// one.
+var (
+	deepCopySer   = thrift.NewTSerializerPool(thrift.NewTSerializer)
+	deepCopyDeser = thrift.NewTDeserializerPool(thrift.NewTDeserializer)
+)
+
 // deepCopyThrift populates dst with a field-complete copy of src by
-// serialising src with a binary-protocol thrift.TSerializer and
-// deserialising the result into dst. This is used, rather than a
-// field-by-field Go copy, to back the round-trip fidelity snapshot
-// (Table.raw / Partition.raw, see tableFromThrift and their *ToThrift
-// counterparts): a serialize/deserialize round trip is guaranteed to stay
-// complete as the generated Thrift bindings gain fields across an IDL bump
-// (a Go copy would need a matching update every time), and the cost is
-// negligible next to the network round trip that always accompanies it.
-// dst must already be built from the same generated NewXxx() constructor
-// as src (see requests_internal_test.go's roundTrip, which this mirrors),
-// so a field the source never set decodes back to that constructor's
-// default rather than the Go zero value.
+// serialising src with a binary-protocol Thrift writer and deserialising
+// the result into dst (via the pooled deepCopySer/deepCopyDeser above).
+// This is used, rather than a field-by-field Go copy, to back the
+// round-trip fidelity snapshot (Table.raw / Partition.raw / Database.raw,
+// see tableFromThrift and their *ToThrift counterparts): a
+// serialize/deserialize round trip is guaranteed to stay complete as the
+// generated Thrift bindings gain fields across an IDL bump (a Go copy would
+// need a matching update every time), and the cost is negligible next to
+// the network round trip that always accompanies it. dst must already be
+// built from the same generated NewXxx() constructor as src (see
+// requests_internal_test.go's roundTrip, which this mirrors), so a field
+// the source never set decodes back to that constructor's default rather
+// than the Go zero value.
 func deepCopyThrift(src, dst thrift.TStruct) error {
-	ser := thrift.NewTSerializer()
-	b, err := ser.Write(context.Background(), src)
+	b, err := deepCopySer.Write(context.Background(), src)
 	if err != nil {
 		return err
 	}
-	deser := thrift.NewTDeserializer()
-	return deser.Read(context.Background(), dst, b)
+	return deepCopyDeser.Read(context.Background(), dst, b)
+}
+
+// rawTable returns a deep copy of t (see deepCopyThrift) for storage as
+// Table.raw, or nil if the copy fails. A failure here is not expected in
+// practice -- t was just decoded off the wire (or built by this same
+// package) by the same machinery the copy itself uses -- but when it does
+// happen, returning nil rather than a partially-populated Table is what
+// lets tableToThrift's rawTableOrNew degrade cleanly to the pre-snapshot
+// NewTable()-based path below: exactly the same path a Table this package
+// never read off the wire already takes, rather than caching a "snapshot"
+// that never actually captured anything.
+func rawTable(t *hive_metastore.Table) *hive_metastore.Table {
+	out := hive_metastore.NewTable()
+	if err := deepCopyThrift(t, out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // rawTableOrNew returns a fresh deep copy of raw (see deepCopyThrift) built
 // from hive_metastore.NewTable(), or a bare NewTable() when raw is nil or
-// the copy fails -- the latter is not expected in practice (raw was itself
-// either just decoded off the wire or built by this same package), but
-// tableToThrift must never propagate that failure silently as a corrupt
-// partial copy, so it falls back to the same "no snapshot" behavior as a
-// Table this package never read off the wire.
+// the copy fails. raw is nil either because the Table it came from was
+// never read off the wire, or because rawTable's own copy failed when it
+// was (see rawTable); a failure of this copy is not additionally expected,
+// since raw is already a well-formed in-memory struct, but tableToThrift
+// must never propagate that failure as a corrupt partial copy either.
 func rawTableOrNew(raw *hive_metastore.Table) *hive_metastore.Table {
 	out := hive_metastore.NewTable()
 	if raw == nil {
@@ -59,6 +88,15 @@ func rawTableOrNew(raw *hive_metastore.Table) *hive_metastore.Table {
 	}
 	if err := deepCopyThrift(raw, out); err != nil {
 		return hive_metastore.NewTable()
+	}
+	return out
+}
+
+// rawPartition is rawTable's counterpart for Partition.raw.
+func rawPartition(p *hive_metastore.Partition) *hive_metastore.Partition {
+	out := hive_metastore.NewPartition()
+	if err := deepCopyThrift(p, out); err != nil {
+		return nil
 	}
 	return out
 }
@@ -71,6 +109,27 @@ func rawPartitionOrNew(raw *hive_metastore.Partition) *hive_metastore.Partition 
 	}
 	if err := deepCopyThrift(raw, out); err != nil {
 		return hive_metastore.NewPartition()
+	}
+	return out
+}
+
+// rawDatabase is rawTable's counterpart for Database.raw.
+func rawDatabase(d *hive_metastore.Database) *hive_metastore.Database {
+	out := hive_metastore.NewDatabase()
+	if err := deepCopyThrift(d, out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// rawDatabaseOrNew is rawTableOrNew's counterpart for Database.raw.
+func rawDatabaseOrNew(raw *hive_metastore.Database) *hive_metastore.Database {
+	out := hive_metastore.NewDatabase()
+	if raw == nil {
+		return out
+	}
+	if err := deepCopyThrift(raw, out); err != nil {
+		return hive_metastore.NewDatabase()
 	}
 	return out
 }
@@ -110,6 +169,10 @@ func catalogToThrift(cat *Catalog) *hive_metastore.Catalog {
 // the returned Database.CatalogName reflects the catalog the caller actually
 // asked about, even on a server (e.g. Hive 2.3) that does not report or
 // understand catalogs. It returns nil for a nil input.
+//
+// The returned Database's raw field holds a deep copy of d (see
+// deepCopyThrift), independent of d itself; see tableFromThrift's identical
+// treatment and Table's doc comment for the round-trip fidelity contract.
 func databaseFromThrift(d *hive_metastore.Database, cat *string) *Database {
 	if d == nil {
 		return nil
@@ -121,6 +184,7 @@ func databaseFromThrift(d *hive_metastore.Database, cat *string) *Database {
 		Parameters:  copyStringMap(d.Parameters),
 		OwnerName:   deref(d.OwnerName),
 		CreateTime:  timeFromUnix32Ptr(d.CreateTime),
+		raw:         rawDatabase(d),
 	}
 	if d.OwnerType != nil {
 		out.OwnerType = PrincipalType(*d.OwnerType)
@@ -142,26 +206,45 @@ func databaseFromThrift(d *hive_metastore.Database, cat *string) *Database {
 // (possibly nil, when the connection is known not to support catalogs). It
 // returns nil for a nil input.
 //
-// db.CreateTime is never written: it is read-only (see Database's doc
-// comment), assigned by the server itself, so the wire CreateTime field is
-// always left absent here regardless of what db.CreateTime holds.
+// The result starts from a deep copy of db.raw (see deepCopyThrift) when db
+// was itself produced by databaseFromThrift, or from a bare
+// hive_metastore.NewDatabase() otherwise (rawDatabaseOrNew handles both),
+// so a field raw carries but this package's Database does not model --
+// Privileges, Type, ConnectorName, RemoteDbname, ManagedLocationUri, and
+// any field a future IDL bump adds -- survives GetDatabase -> AlterDatabase
+// unchanged (SPEC §5.4 "Round-trip fidelity"). Every field the exported
+// Database type does model is then unconditionally overwritten below,
+// exactly as before raw existed.
+//
+// db.CreateTime is not one of those overwritten fields: it is read-only
+// (see Database's doc comment), assigned by the server itself, so this
+// never writes a CreateTime of its own. A db with no raw snapshot (e.g.
+// CreateDatabase's own db, which is never the product of databaseFromThrift)
+// therefore still always leaves the wire CreateTime field absent, exactly
+// as before raw existed; a db that does carry one (e.g. AlterDatabase's,
+// when the caller passed back a Database GetDatabase itself returned)
+// echoes that original, server-assigned value forward instead, which is
+// harmless since the field is immutable.
 func databaseToThrift(db *Database, cat *string) *hive_metastore.Database {
 	if db == nil {
 		return nil
 	}
-	out := &hive_metastore.Database{
-		Name:        db.Name,
-		Description: db.Description,
-		LocationUri: db.LocationURI,
-		Parameters:  copyStringMap(db.Parameters),
-		CatalogName: cat,
-	}
+	out := rawDatabaseOrNew(db.raw)
+	out.Name = db.Name
+	out.Description = db.Description
+	out.LocationUri = db.LocationURI
+	out.Parameters = copyStringMap(db.Parameters)
+	out.CatalogName = cat
 	if db.OwnerName != "" {
 		out.OwnerName = ptr(db.OwnerName)
+	} else {
+		out.OwnerName = nil
 	}
 	if db.OwnerType != 0 {
 		pt := hive_metastore.PrincipalType(db.OwnerType)
 		out.OwnerType = &pt
+	} else {
+		out.OwnerType = nil
 	}
 	return out
 }
@@ -210,10 +293,13 @@ func copyStringSlices(s [][]string) [][]string {
 
 // skewedInfoFromThrift converts a generated SkewedInfo to the exported
 // SkewedInfo type. ColumnValueLocationMaps has no source field to read from
-// (SPEC §1.1: dropped from the generated bindings pending THRIFT-2063), so
-// it is simply absent from the result; a value already on the wire is not
-// lost even so, since it survives in Table.raw / Partition.raw (see
-// tableFromThrift). It returns nil for a nil input.
+// (SPEC §1.1: dropped from the generated IDL pending THRIFT-2063), so it is
+// simply absent from the result -- and, unlike every other field this
+// package does not model, genuinely lost rather than merely unexposed: the
+// generated SkewedInfo struct has no field for it either, so there is
+// nothing for Table.raw/Partition.raw to have captured (see Appendix A: the
+// generated Read skips those wire bytes without storing them anywhere). It
+// returns nil for a nil input.
 func skewedInfoFromThrift(si *hive_metastore.SkewedInfo) *SkewedInfo {
 	if si == nil {
 		return nil
@@ -330,16 +416,27 @@ func serDeFromThrift(s *hive_metastore.SerDeInfo) *SerDeInfo {
 }
 
 // serDeToThrift converts the exported SerDeInfo type to its generated wire
-// representation. It returns nil for a nil input.
-func serDeToThrift(s *SerDeInfo) *hive_metastore.SerDeInfo {
+// representation. base, when non-nil, seeds the result -- typically the
+// SerdeInfo already sitting inside the Table/Partition's own raw snapshot
+// (see storageToThrift, tableToThrift) -- so a field this package does not
+// model (Description, SerializerClass, DeserializerClass, SerdeType)
+// survives; Name, SerializationLib, and Parameters are then unconditionally
+// overwritten below regardless of what base held for them. A nil base (no
+// raw snapshot available) behaves exactly as before this parameter
+// existed. It returns nil for a nil s.
+func serDeToThrift(s *SerDeInfo, base *hive_metastore.SerDeInfo) *hive_metastore.SerDeInfo {
 	if s == nil {
 		return nil
 	}
-	return &hive_metastore.SerDeInfo{
-		Name:             s.Name,
-		SerializationLib: s.SerializationLib,
-		Parameters:       copyStringMap(s.Parameters),
+	out := hive_metastore.NewSerDeInfo()
+	if base != nil {
+		cp := *base
+		out = &cp
 	}
+	out.Name = s.Name
+	out.SerializationLib = s.SerializationLib
+	out.Parameters = copyStringMap(s.Parameters)
+	return out
 }
 
 // orderFromThrift converts a generated Order to the exported Order type. It
@@ -412,26 +509,43 @@ func storageFromThrift(sd *hive_metastore.StorageDescriptor) *StorageDescriptor 
 }
 
 // storageToThrift converts the exported StorageDescriptor type to its
-// generated wire representation. It returns nil for a nil input.
-func storageToThrift(sd *StorageDescriptor) *hive_metastore.StorageDescriptor {
+// generated wire representation. base, when non-nil, seeds the result --
+// typically the Sd already sitting inside the Table/Partition's own raw
+// snapshot (see tableToThrift, partitionToThrift) -- and base.SerdeInfo is
+// threaded into serDeToThrift the same way, so a field neither
+// StorageDescriptor nor SerDeInfo models survives. Every field this
+// package's StorageDescriptor does model is then unconditionally
+// overwritten below regardless of what base held for it -- today that is
+// every generated StorageDescriptor field (Cols through SkewedInfo), so a
+// non-nil base only actually matters one level down, inside SerdeInfo. A
+// nil base (no raw snapshot available) behaves exactly as before this
+// parameter existed. It returns nil for a nil sd.
+func storageToThrift(sd *StorageDescriptor, base *hive_metastore.StorageDescriptor) *hive_metastore.StorageDescriptor {
 	if sd == nil {
 		return nil
 	}
-	out := &hive_metastore.StorageDescriptor{
-		Cols:         fieldSchemasToThrift(sd.Columns),
-		Location:     sd.Location,
-		InputFormat:  sd.InputFormat,
-		OutputFormat: sd.OutputFormat,
-		Compressed:   sd.Compressed,
-		NumBuckets:   sd.NumBuckets,
-		SerdeInfo:    serDeToThrift(sd.SerDe),
-		BucketCols:   copyStrings(sd.BucketColumns),
-		SortCols:     ordersToThrift(sd.SortColumns),
-		Parameters:   copyStringMap(sd.Parameters),
+	out := hive_metastore.NewStorageDescriptor()
+	var baseSerde *hive_metastore.SerDeInfo
+	if base != nil {
+		cp := *base
+		out = &cp
+		baseSerde = base.SerdeInfo
 	}
+	out.Cols = fieldSchemasToThrift(sd.Columns)
+	out.Location = sd.Location
+	out.InputFormat = sd.InputFormat
+	out.OutputFormat = sd.OutputFormat
+	out.Compressed = sd.Compressed
+	out.NumBuckets = sd.NumBuckets
+	out.SerdeInfo = serDeToThrift(sd.SerDe, baseSerde)
+	out.BucketCols = copyStrings(sd.BucketColumns)
+	out.SortCols = ordersToThrift(sd.SortColumns)
+	out.Parameters = copyStringMap(sd.Parameters)
 	if sd.StoredAsSubDirectories {
 		v := true
 		out.StoredAsSubDirectories = &v
+	} else {
+		out.StoredAsSubDirectories = nil
 	}
 	out.SkewedInfo = skewedInfoToThrift(sd.Skewed)
 	return out
@@ -465,7 +579,7 @@ func tableFromThrift(t *hive_metastore.Table) *Table {
 		ViewOriginalText: t.ViewOriginalText,
 		ViewExpandedText: t.ViewExpandedText,
 		TableType:        TableType(t.TableType),
-		raw:              rawTableOrNew(t),
+		raw:              rawTable(t),
 	}
 	if t.CatName != nil {
 		out.CatalogName = *t.CatName
@@ -519,7 +633,7 @@ func tableToThrift(t *Table, cat *string) *hive_metastore.Table {
 	out.ViewExpandedText = t.ViewExpandedText
 	out.TableType = string(t.TableType)
 	out.CatName = cat
-	out.Sd = storageToThrift(t.Storage)
+	out.Sd = storageToThrift(t.Storage, out.Sd)
 	return out
 }
 
@@ -542,7 +656,7 @@ func partitionFromThrift(p *hive_metastore.Partition) *Partition {
 		CreateTime:   timeFromUnix32(p.CreateTime),
 		Storage:      storageFromThrift(p.Sd),
 		Parameters:   copyStringMap(p.Parameters),
-		raw:          rawPartitionOrNew(p),
+		raw:          rawPartition(p),
 	}
 	if p.CatName != nil {
 		out.CatalogName = *p.CatName
@@ -604,7 +718,7 @@ func partitionToThrift(p *Partition, cat *string, dbName, tableName string) *hiv
 	if p.TableName != "" {
 		out.TableName = p.TableName
 	}
-	out.Sd = storageToThrift(p.Storage)
+	out.Sd = storageToThrift(p.Storage, out.Sd)
 	return out
 }
 
