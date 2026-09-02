@@ -61,6 +61,15 @@ func TestDatabases_CreateGetRoundTrip(t *testing.T) {
 				require.NotNil(t, args.CatalogName)
 				assert.Equal(t, "hive", *args.CatalogName)
 			}
+
+			// An empty LocationURI is filled in client-side from the
+			// metastore's warehouse-dir configuration, the way Hive's
+			// own DDL path does (see (*Client).CreateDatabase), rather
+			// than reaching the server as "".
+			require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "nolocdb"}))
+			got2, err := c.GetDatabase(ctx, "nolocdb")
+			require.NoError(t, err)
+			assert.Equal(t, "file:///tmp/hms-warehouse/nolocdb.db", got2.LocationURI)
 		})
 	}
 }
@@ -111,12 +120,19 @@ func TestGetAllDatabases_NonDefaultCatalog(t *testing.T) {
 		c := mustNew(t, srv.URI())
 		ctx := context.Background()
 
-		require.NoError(t, c.CreateCatalog(ctx, &hms.Catalog{Name: "spark"}))
+		require.NoError(t, c.CreateCatalog(ctx, &hms.Catalog{Name: "spark", LocationURI: "hdfs:///spark-warehouse"}))
 		require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "a", CatalogName: "spark"}))
 
 		names, err := c.GetAllDatabases(ctx, hms.InCatalog("spark"))
 		require.NoError(t, err)
 		assert.Equal(t, []string{"a"}, names)
+
+		// db "a" was created without a LocationURI, so it derives from
+		// its catalog's LocationURI ("hive.metastore.warehouse.dir"
+		// only applies to the default catalog).
+		gotA, err := c.GetDatabase(ctx, "a", hms.InCatalog("spark"))
+		require.NoError(t, err)
+		assert.Equal(t, "hdfs:///spark-warehouse/a.db", gotA.LocationURI)
 
 		args, ok := srv.LastArgs("get_databases").(string)
 		require.True(t, ok)

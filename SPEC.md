@@ -174,6 +174,8 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error
 func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, cascade, ifExists bool, opts ...CatalogOption) error
 ```
 
+An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side as `<warehouse>/<db>.db` (or `<catalog-location>/<db>.db` for a non-default catalog) the way Hive's own DDL path does, since the generated `locationUri` field's default Thrift requiredness would otherwise put an empty string on the wire and the server rejects that outright.
+
 ### 5.4. Table Operations
 
 ```go

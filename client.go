@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -625,6 +626,18 @@ func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOp
 
 // CreateDatabase creates db. A non-empty db.CatalogName overrides the
 // client's default catalog for this call.
+//
+// When db.LocationURI is empty, CreateDatabase fills it in client-side
+// before issuing the RPC, the way Hive's own DDL path does: the generated
+// Database.locationUri field has default (not optional) Thrift
+// requiredness, so an unset Go LocationURI would otherwise be written to
+// the wire as "" rather than left absent as the Java client leaves it, and
+// the server rejects that with MetaException(IllegalArgumentException: Can
+// not create a Path from an empty string) instead of computing the
+// warehouse default itself. The filled-in location is
+// "<warehouse>/<db>.db" (lowercased db name) for the default catalog,
+// where warehouse is the "hive.metastore.warehouse.dir" configuration
+// value, or "<catalog-location>/<db>.db" for a non-default catalog.
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 	return c.call(ctx, "create_database", func(ctx context.Context, cn *conn) error {
 		var opts []CatalogOption
@@ -635,7 +648,32 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 		if err != nil {
 			return err
 		}
-		return cn.createDatabase(ctx, databaseToThrift(db, cat))
+
+		toCreate := db
+		if db.LocationURI == "" {
+			var base string
+			if cat != nil && *cat != defaultCatalog {
+				resp, err := cn.getCatalog(ctx, &hive_metastore.GetCatalogRequest{Name: *cat})
+				if err != nil {
+					return err
+				}
+				base = resp.Catalog.LocationUri
+			} else {
+				base, err = cn.getConfigValue(ctx, "hive.metastore.warehouse.dir", "")
+				if err != nil {
+					return err
+				}
+			}
+			base = strings.TrimRight(base, "/")
+			if base == "" {
+				return wrapAs("create_database", ErrInvalidOperation, errors.New("hms: LocationURI is empty and the metastore warehouse dir is unknown"))
+			}
+			cp := *db
+			cp.LocationURI = base + "/" + strings.ToLower(db.Name) + ".db"
+			toCreate = &cp
+		}
+
+		return cn.createDatabase(ctx, databaseToThrift(toCreate, cat))
 	})
 }
 

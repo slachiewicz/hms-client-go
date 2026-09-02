@@ -408,6 +408,14 @@ func (h *handler) GetDatabase(_ context.Context, name string) (*hive_metastore.D
 // form so later lookups by plain name succeed.
 func (h *handler) CreateDatabase(_ context.Context, db *hive_metastore.Database) error {
 	h.rec.record("create_database", db)
+	// A real Hive Metastore rejects an empty locationUri outright rather
+	// than computing a warehouse-relative default itself: Hive's DDL path
+	// (not the metastore) fills that default before the RPC is even
+	// issued, so the fake server mirrors the exact MetaException the
+	// client's own CreateDatabase (client.go) exists to avoid triggering.
+	if db.LocationUri == "" {
+		return &hive_metastore.MetaException{Message: "java.lang.IllegalArgumentException: Can not create a Path from an empty string"}
+	}
 	catName, name, err := resolveDB(h.v, db.Name)
 	if err != nil {
 		return err

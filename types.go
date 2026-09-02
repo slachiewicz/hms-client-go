@@ -70,7 +70,10 @@ type Database struct {
 	Name string
 	// Description is a free-text description.
 	Description string
-	// LocationURI is the database's root storage location.
+	// LocationURI is the database's root storage location. When left
+	// empty on a call to CreateDatabase, the client fills it in the way
+	// Hive's own DDL path does before the server ever sees it (see
+	// CreateDatabase).
 	LocationURI string
 	// Parameters holds arbitrary key/value metadata.
 	Parameters map[string]string

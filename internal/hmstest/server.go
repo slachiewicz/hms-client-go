@@ -121,6 +121,12 @@ func Start(t testing.TB, v Version, opts ...Option) *Server {
 	}
 
 	store := NewStore()
+	// CreateDatabase (client.go) resolves an unset Database.LocationURI
+	// through get_config_value("hive.metastore.warehouse.dir", ...) the
+	// way Hive's own DDL path does; seed the same default a freshly
+	// installed metastore reports so that path is exercised without every
+	// test having to set it itself.
+	store.Config["hive.metastore.warehouse.dir"] = "file:///tmp/hms-warehouse"
 	rec := &recorder{}
 
 	proc := hive_metastore.NewThriftHiveMetastoreProcessor(&handler{v: v, store: store, rec: rec})
