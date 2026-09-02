@@ -94,7 +94,7 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 
 // AddPartitions adds partitions to the table named tableName in database
 // dbName. Requests are chunked to at most the client's chunk size (see
-// withChunkSize; default 1000) partitions each (SPEC §2.3 Rule 5); chunks
+// WithChunkSize; default 1000) partitions each (SPEC §2.3 Rule 5); chunks
 // are sent sequentially, so a failure on a later chunk leaves the earlier
 // chunks already committed on the server. With ifNotExists true, a
 // partition whose values already exist is silently skipped; otherwise it

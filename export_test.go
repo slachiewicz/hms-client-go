@@ -75,12 +75,6 @@ func ConfigWantsSetUgi(opts ...Option) bool {
 // (default 30s), so ha_test.go can bound its waits to well under a second.
 func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval(d) }
 
-// WithChunkSize exposes withChunkSize, GetTables' and AddPartitions'
-// per-request chunk size, so a test can exercise chunking without needing
-// thousands of fixture rows and without racing t.Parallel() tests over a
-// shared package variable.
-var WithChunkSize = withChunkSize
-
 // TableRaw and PartitionRaw expose Table.raw and Partition.raw to hms_test,
 // the round-trip fidelity snapshot tableFromThrift/partitionFromThrift set
 // and tableToThrift/partitionToThrift build on (see Table's doc comment),

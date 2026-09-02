@@ -149,12 +149,10 @@ func withProbeInterval(d time.Duration) Option {
 	return func(c *config) { c.probeInterval = d }
 }
 
-// withChunkSize sets the per-request chunk size used by GetTables and
-// AddPartitions (SPEC §5.4, §2.3 Rule 5). The default is 1000. A value
-// below 1 is clamped to 1. test hook; not part of the public API:
-// export_test.go exposes it as WithChunkSize so tests can exercise
-// chunking without needing thousands of fixture rows.
-func withChunkSize(n int) Option {
+// WithChunkSize sets the per-request chunk size used by GetTables and
+// AddPartitions (SPEC §5.1, §5.4, §2.3 Rule 5). The default is 1000. A
+// value below 1 is clamped to 1.
+func WithChunkSize(n int) Option {
 	return func(c *config) { c.chunkSize = n }
 }
 

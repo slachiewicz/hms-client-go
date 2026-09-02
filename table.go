@@ -63,7 +63,7 @@ func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ..
 // GetTables returns the tables named in tableNames that exist in database
 // dbName, in request order, silently skipping any name the server does not
 // know. Requests are chunked to at most the client's chunk size (see
-// withChunkSize; default 1000) names each (SPEC §5.4).
+// WithChunkSize; default 1000) names each (SPEC §5.4).
 func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []string, opts ...CatalogOption) ([]*Table, error) {
 	var out []*Table
 	err := c.read(ctx, "get_table_objects_by_name_req", func(ctx context.Context, cn *conn) error {
