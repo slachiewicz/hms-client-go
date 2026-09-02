@@ -231,8 +231,8 @@ type Table struct {
 
 	// raw is a deep copy of the generated Thrift Table this value was
 	// converted from (tableFromThrift), or nil for a Table this package
-	// never read off the wire. tableToThrift starts from a fresh copy of
-	// it, when present, so a field raw carries but this struct does not
+	// never read off the wire. tableToThriftFrom starts from a fresh copy
+	// of it, when present, so a field raw carries but this struct does not
 	// model survives GetTable -> AlterTable unchanged. See the type's own
 	// doc comment for the sharing/read-only contract.
 	raw *hive_metastore.Table

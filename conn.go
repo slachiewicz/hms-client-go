@@ -101,6 +101,20 @@ type conn struct {
 	unlock    func(ctx context.Context, req *hive_metastore.UnlockRequest) error
 }
 
+// dialHookKey is the context key WithDialHookForTest (export_test.go) uses
+// to attach a test-only hook to a single call's ctx, so it applies only to
+// the dial that call triggers rather than every dial any parallel test
+// might be racing at the same time (a package-level hook variable would not
+// be safe for that, since every test in this package runs with
+// t.Parallel()).
+type dialHookKey struct{}
+
+// dialHookFromContext returns the hook ctx carries via dialHookKey, or nil.
+func dialHookFromContext(ctx context.Context) func() {
+	fn, _ := ctx.Value(dialHookKey{}).(func())
+	return fn
+}
+
 // newConn dials ep and binds every generated RPC method this client uses
 // into cn's func fields. The generated ThriftHiveMetastoreClient (g below)
 // is local to this function and is never stored, per AGENTS.md invariant
@@ -116,6 +130,14 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *
 			cfg.logger.Debug("dial succeeded", "endpoint", uri)
 		}
 	}()
+
+	// Test-only: see dialHookFromContext. Runs before any real dial work,
+	// so a test can hold this call open for as long as it needs to
+	// exercise a race against a concurrent Close, without a real slow (or
+	// fake) server.
+	if fn := dialHookFromContext(ctx); fn != nil {
+		fn()
+	}
 
 	var tc *transport.Conn
 	var err error

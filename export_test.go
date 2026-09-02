@@ -75,11 +75,22 @@ func ConfigWantsSetUgi(opts ...Option) bool {
 // (default 30s), so ha_test.go can bound its waits to well under a second.
 func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval(d) }
 
+// WithDialHookForTest returns a context derived from ctx that makes newConn
+// call fn before doing any real dial work, when that ctx is the one passed
+// to Client.acquire (e.g. via ClientAcquire). It lets a test hold a
+// specific, acquire-triggered dial open for as long as it needs -- to race
+// it against a concurrent Close, say -- without a real slow or fake server,
+// and without a package-level hook that every parallel test's own dials
+// would also trip.
+func WithDialHookForTest(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, dialHookKey{}, fn)
+}
+
 // TableRaw, PartitionRaw and DatabaseRaw expose Table.raw, Partition.raw and
 // Database.raw to hms_test, the round-trip fidelity snapshot
 // tableFromThrift/partitionFromThrift/databaseFromThrift set and
-// tableToThrift/partitionToThrift/databaseToThrift build on (see Table's
-// doc comment), since raw is unexported.
+// tableToThriftFrom/partitionToThriftFrom/databaseToThriftFrom build on (see
+// Table's doc comment), since raw is unexported.
 func TableRaw(t *Table) *hive_metastore.Table             { return t.raw }
 func PartitionRaw(p *Partition) *hive_metastore.Partition { return p.raw }
 func DatabaseRaw(d *Database) *hive_metastore.Database    { return d.raw }

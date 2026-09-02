@@ -65,6 +65,19 @@ type Client struct {
 	// for it.
 	probeCancel context.CancelFunc
 	probeDone   chan struct{}
+
+	// inFlightDials counts acquire's own dials (newConn calls made to grow
+	// a pool, as opposed to a conn merely taken from idle) that have started
+	// but not yet returned. acquire.Add(1)s it only under mu, and only after
+	// confirming closed is still false in that same critical section, so a
+	// dial can never start once Close has flipped closed; it Done()s once
+	// newConn returns, success or failure. Close waits on it, after
+	// draining every pool and the probe goroutine, before releasing the
+	// Kerberos session those dials authenticate with -- otherwise a dial
+	// already past that check could still be inside DialBinary's GSSAPI
+	// handshake, reading cfg.krbSession, when Close's krbSession.Close()
+	// (gokrb5 Destroy) mutates it out from under that read.
+	inFlightDials sync.WaitGroup
 }
 
 // New connects to the Hive Metastore endpoint(s) named by uris (a single
@@ -254,11 +267,20 @@ func (c *Client) Close() error {
 	if c.probeDone != nil {
 		<-c.probeDone
 	}
-	// Last, once no pooled conn and no probe can still dial with these
-	// credentials: closing the Kerberos session stops the gokrb5 client's
-	// session-renewal goroutine (SPEC §3.1). It is a no-op when
-	// WithKerberos was never configured, and idempotent, so the
-	// already-closed path above needs no counterpart.
+	// Wait for every dial acquire started before it observed closed (see
+	// acquire): one of those may still be inside DialBinary's GSSAPI
+	// handshake, reading cfg.krbSession, and krbSession.Close() below
+	// (gokrb5 Destroy) mutates that session unlocked. No dial can start
+	// after this point -- acquire's own closed check and this Wait() run
+	// under the same mu-guarded ordering as the closed flag itself -- so
+	// this Wait() is bounded by dials already racing this Close, not by
+	// every future acquire call.
+	c.inFlightDials.Wait()
+	// Last, once no pooled conn, no probe, and no in-flight dial can still
+	// use these credentials: closing the Kerberos session stops the
+	// gokrb5 client's session-renewal goroutine (SPEC §3.1). It is a
+	// no-op when WithKerberos was never configured, and idempotent, so
+	// the already-closed path above needs no counterpart.
 	c.cfg.krbSession.Close()
 	return errors.Join(errs...)
 }
@@ -306,7 +328,28 @@ func (c *Client) acquire(ctx context.Context, idx int) (*conn, error) {
 			break
 		}
 		if p.live.CompareAndSwap(cur, cur+1) {
+			// Re-check closed and register this dial as in-flight in the
+			// same critical section: this is the only gate that matters
+			// for the Kerberos-session race (the early check above is
+			// just a fast path), since it is the last point before
+			// newConn may start reading cfg.krbSession. If Close's own
+			// mu.Lock() below (which sets closed and then drains the
+			// pools) already ran, this loses the race cleanly -- no dial,
+			// no wg registration, so Close never has to wait for it; if
+			// it did not, inFlightDials.Add(1) is visible to Close's
+			// later Wait() no matter how the two goroutines interleave
+			// from here on.
+			c.mu.Lock()
+			if c.closed {
+				c.mu.Unlock()
+				p.live.Add(-1)
+				return nil, errClosed
+			}
+			c.inFlightDials.Add(1)
+			c.mu.Unlock()
+
 			cn, err := newConn(ctx, c.endpoints[idx], &c.cfg)
+			c.inFlightDials.Done()
 			if err != nil {
 				p.live.Add(-1)
 				return nil, err
@@ -866,7 +909,7 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 // AlterDatabase replaces the mutable properties (Description, LocationURI,
 // Parameters, OwnerName, OwnerType) of the database named name with db's
 // (SPEC §5.3, 1.0 addition); AlterDatabase itself never writes a
-// db.CreateTime of its own (see databaseToThrift), though a db that carries
+// db.CreateTime of its own (see databaseToThriftFrom), though a db that carries
 // a round-trip fidelity snapshot -- i.e. one GetDatabase itself returned --
 // echoes the original, server-assigned CreateTime back rather than clearing
 // it, which is harmless since the field is immutable; a field neither this

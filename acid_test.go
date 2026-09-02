@@ -184,8 +184,6 @@ func TestACID_Heartbeat_TxnOnlyAndLockOnly(t *testing.T) {
 	require.NoError(t, c.Heartbeat(ctx, 0, resp.LockID))
 }
 
-// TestLockLevel_LockType_LockState_String covers the enum String() methods
-// used in test failure output and any caller-side logging.
 // TestACID_NegativeIDsRejected covers SPEC §5.9's "0 means none": a
 // negative transaction or lock id is a caller mistake -- an uninitialised
 // or miscomputed id -- so it is ErrInvalidOperation, refused before any
@@ -232,6 +230,8 @@ func TestACID_NegativeIDsRejected(t *testing.T) {
 	})
 }
 
+// TestLockLevel_LockType_LockState_String covers the enum String() methods
+// used in test failure output and any caller-side logging.
 func TestLockLevel_LockType_LockState_String(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "DB", hms.LockLevelDB.String())

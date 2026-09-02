@@ -52,6 +52,8 @@ a release, so everything below is unreleased.
   classify as `hms.ErrUnavailable` instead of an unclassified error.
 - `ConfigValSecurityException` from `get_config_value` now maps to `hms.ErrInvalidOperation`
   instead of an unclassified error (SPEC §7).
+- `AddPartitions` and `AlterPartitions` now take the database and table from the call's own
+  `dbName`/`tableName` arguments; a `Partition.DatabaseName`/`TableName` no longer overrides them.
 
 ### Known issues
 
