@@ -156,6 +156,45 @@ func TestNew_MaxRetriesClamped(t *testing.T) {
 	}
 }
 
+// TestClient_ContextExpiredMidRPCDiscardsConn covers the fix for do()
+// releasing a conn whose fn failed only because the caller's own ctx was
+// already past its deadline: fn's error classifies as ErrUnavailable (via
+// ContextClient's ctx.Err() override, see internal/transport/ctxclient.go)
+// but ctx.Err() != nil, so the old code took the release branch and would
+// hand the next caller a conn that may still have a half-read response on
+// the wire. do() must discard whenever classify(err) is ErrUnavailable,
+// independent of ctx; MarkFailed/retry alone are gated on ctx.Err() == nil.
+func TestClient_ContextExpiredMidRPCDiscardsConn(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c, err := hms.New(context.Background(), srv.URI(), hms.WithPoolSize(1))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// New eagerly dials and pools one conn for endpoint 0.
+	require.Equal(t, int32(1), hms.ClientLiveConns(c, 0))
+
+	// A deadline already in the past makes ctx.Err() != nil (and its
+	// conn's socket deadline already elapsed) before fn ever runs,
+	// deterministically forcing the RPC to fail without racing a real
+	// in-flight cancellation.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Minute))
+	defer cancel()
+
+	_, err = c.GetAllDatabases(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hms.ErrUnavailable)
+
+	assert.Equal(t, int32(0), hms.ClientLiveConns(c, 0),
+		"a ctx-expired RPC failure must discard the conn, not release it")
+
+	// A fresh, valid call must still succeed: it dials a brand-new conn
+	// rather than reusing anything left over from the failed call.
+	_, err = c.GetAllDatabases(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), hms.ClientLiveConns(c, 0))
+}
+
 func TestClient_GetConfigValue(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

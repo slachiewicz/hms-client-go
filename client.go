@@ -295,12 +295,23 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 // (errClosed): either means every remaining endpoint would fail the same
 // way for a reason that has nothing to do with that endpoint's health, so
 // do returns immediately rather than calling MarkFailed on endpoints that
-// may be perfectly healthy. Once fn has started, a failure is retried only
-// when idempotent is true, it classifies as ErrUnavailable, and ctx is not
-// yet done; otherwise it is returned immediately. Attempts are bounded by
-// cfg.maxRetries (clamped to at least 1 by config.clamp). When every
-// endpoint is cooling, do returns ErrUnavailable joined with the last
-// error observed.
+// may be perfectly healthy.
+//
+// Once fn has started, two decisions are made separately. Whether the conn
+// is discarded rather than released back to its pool depends only on
+// whether classify(err) is ErrUnavailable: the connection's state on the
+// wire is unknown regardless of why fn failed, including when fn failed
+// because ctx was cancelled or its deadline passed mid-RPC -- releasing it
+// in that case would hand the next caller a conn with a half-read response
+// still on the wire. Whether the endpoint is additionally marked failed
+// and the call retried on another endpoint requires, on top of that, that
+// idempotent is true and ctx is not yet done: a caller's own
+// cancellation/deadline is not evidence the endpoint is unhealthy, so it
+// must not cool down an otherwise-fine endpoint, and re-issuing the call
+// on the caller's behalf after they've already given up would be wrong.
+// Attempts are bounded by cfg.maxRetries (clamped to at least 1 by
+// config.clamp). When every endpoint is cooling, do returns ErrUnavailable
+// joined with the last error observed.
 func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx context.Context, cn *conn) error) error {
 	var last error
 	for attempt := 0; attempt < c.cfg.maxRetries; attempt++ {
@@ -331,12 +342,14 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 			c.cluster.MarkHealthy(idx)
 			return nil
 		}
-		if errors.Is(classify(err), ErrUnavailable) && ctx.Err() == nil {
+		if errors.Is(classify(err), ErrUnavailable) {
 			c.discard(idx, cn)
-			c.cluster.MarkFailed(idx)
-			last = err
-			if idempotent {
-				continue
+			if ctx.Err() == nil {
+				c.cluster.MarkFailed(idx)
+				last = err
+				if idempotent {
+					continue
+				}
 			}
 		} else {
 			c.release(idx, cn)
