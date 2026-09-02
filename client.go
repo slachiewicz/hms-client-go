@@ -78,6 +78,15 @@ type Client struct {
 	// handshake, reading cfg.krbSession, when Close's krbSession.Close()
 	// (gokrb5 Destroy) mutates it out from under that read.
 	inFlightDials sync.WaitGroup
+
+	// warehouseRoots caches the warehouse root CreateDatabase resolves for
+	// an empty LocationURI, keyed by catalog name ("" for the "no catalog
+	// support" case, where get_config_value's answer is client-wide rather
+	// than per catalog). Filled lazily on first use and never invalidated:
+	// a warehouse directory changed on the server afterward is not picked
+	// up by a running Client -- construct a new one. See CreateDatabase's
+	// warehouseRoot.
+	warehouseRoots sync.Map // string -> string
 }
 
 // New connects to the Hive Metastore endpoint(s) named by uris (a single
@@ -871,6 +880,13 @@ func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOp
 // that key to its "metastore.warehouse.dir" alias the way Hive 4's does --
 // it answers empty instead -- so asking the catalog sidesteps the quirk
 // entirely rather than working around it.
+//
+// The resolved warehouse root is cached per Client per catalog name (see
+// warehouseRoot), so only the first CreateDatabase call with an empty
+// LocationURI for a given catalog pays for the get_catalog/get_config_value
+// round trip; every later one on this Client reuses the cached value
+// without issuing it again. A warehouse directory changed on the server
+// after that is not picked up by a running Client -- construct a new one.
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 	return c.call(ctx, "create_database", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCatFor(ctx, cn, db.CatalogName, nil)
@@ -880,20 +896,10 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 
 		toCreate := db
 		if db.LocationURI == "" {
-			var base string
-			if cat != nil {
-				resp, err := cn.getCatalog(ctx, &hive_metastore.GetCatalogRequest{Name: *cat})
-				if err != nil {
-					return err
-				}
-				base = resp.Catalog.LocationUri
-			} else {
-				base, err = cn.getConfigValue(ctx, "hive.metastore.warehouse.dir", "")
-				if err != nil {
-					return err
-				}
+			base, err := c.warehouseRoot(ctx, cn, cat)
+			if err != nil {
+				return err
 			}
-			base = strings.TrimRight(base, "/")
 			if base == "" {
 				return wrapAs("create_database", ErrInvalidOperation, errors.New("hms: LocationURI is empty and the metastore warehouse dir is unknown"))
 			}
@@ -904,6 +910,48 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 
 		return cn.createDatabase(ctx, databaseToThrift(toCreate, cat))
 	})
+}
+
+// warehouseRoot returns the warehouse root CreateDatabase fills an empty
+// LocationURI under for the resolved catalog cat (nil meaning the
+// default catalog on a server without catalog support, in which case there
+// is only one warehouse namespace to resolve at all): get_catalog's
+// LocationUri when cat is non-nil, else the "hive.metastore.warehouse.dir"
+// configuration value (see CreateDatabase's doc comment for why). The
+// result is cached on c.warehouseRoots, keyed by catalog name ("" for the
+// nil case), so every CreateDatabase call after the first for a given
+// catalog reuses it instead of repeating the RPC.
+func (c *Client) warehouseRoot(ctx context.Context, cn *conn, cat *string) (string, error) {
+	key := ""
+	if cat != nil {
+		key = *cat
+	}
+	if v, ok := c.warehouseRoots.Load(key); ok {
+		return v.(string), nil
+	}
+
+	var base string
+	if cat != nil {
+		resp, err := cn.getCatalog(ctx, &hive_metastore.GetCatalogRequest{Name: *cat})
+		if err != nil {
+			return "", err
+		}
+		base = resp.Catalog.LocationUri
+	} else {
+		v, err := cn.getConfigValue(ctx, "hive.metastore.warehouse.dir", "")
+		if err != nil {
+			return "", err
+		}
+		base = v
+	}
+	base = strings.TrimRight(base, "/")
+	if base != "" {
+		// A benign race with a concurrent CreateDatabase resolving the same
+		// catalog just overwrites this with the same deterministic answer,
+		// so a plain Store (rather than LoadOrStore) is enough.
+		c.warehouseRoots.Store(key, base)
+	}
+	return base, nil
 }
 
 // AlterDatabase replaces the mutable properties (Description, LocationURI,

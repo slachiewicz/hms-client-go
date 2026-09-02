@@ -224,7 +224,7 @@ func (c *Client) AlterDatabase(ctx context.Context, name string, db *Database, o
 func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, cascade, ifExists bool, opts ...CatalogOption) error
 ```
 
-An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side before the RPC is issued; see Appendix A for the warehouse-dir resolution rule and the Hive 3.1 `get_config_value` quirk it works around.
+An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side before the RPC is issued; see Appendix A for the warehouse-dir resolution rule and the Hive 3.1 `get_config_value` quirk it works around. The resolved warehouse root is cached per `Client` per catalog name, so only the first such call for a given catalog pays for the `get_catalog`/`get_config_value` round trip; a warehouse directory changed on the server afterward is not picked up by a running `Client` -- construct a new one.
 
 `Database.CreateTime` is read-only: it is populated by `GetDatabase` from the server's own timestamp, and `CreateDatabase` never writes it.
 

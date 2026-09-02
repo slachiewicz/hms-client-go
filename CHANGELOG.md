@@ -61,6 +61,10 @@ a release, so everything below is unreleased.
   `AddPartitions` batching (e.g. to bound request size against a server-side limit) must add
   `WithPartitionBatchSize` explicitly -- `AddPartitions` now always batches at the 1000-item
   default unless it is set.
+- `CreateDatabase` now caches the warehouse root it resolves for an empty `LocationURI`, per
+  `Client` per catalog name, instead of re-resolving it (`get_catalog`/`get_config_value`) on
+  every call (SPEC §5.3). A warehouse directory changed on the server after that is not picked
+  up by a running `Client` -- construct a new one.
 
 ### Known issues
 

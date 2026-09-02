@@ -82,6 +82,36 @@ func TestDatabases_CreateGetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreateDatabase_CachesWarehouseRoot covers the fix caching the
+// warehouse root CreateDatabase resolves for an empty LocationURI (SPEC
+// §5.3): a second CreateDatabase call on the same Client, also with an
+// empty LocationURI, must reuse the first call's resolved root instead of
+// issuing get_catalog again.
+func TestCreateDatabase_CachesWarehouseRoot(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "db1"}))
+	require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "db2"}))
+
+	got1, err := c.GetDatabase(ctx, "db1")
+	require.NoError(t, err)
+	assert.Equal(t, "file:///tmp/hms-warehouse/db1.db", got1.LocationURI)
+	got2, err := c.GetDatabase(ctx, "db2")
+	require.NoError(t, err)
+	assert.Equal(t, "file:///tmp/hms-warehouse/db2.db", got2.LocationURI)
+
+	n := 0
+	for _, call := range srv.Calls() {
+		if call == "get_catalog" {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "the warehouse root must be resolved once and cached, not once per CreateDatabase call")
+}
+
 // TestAlterDatabase_PreservesUnmodelledFields covers G3/SPEC §5.4's
 // round-trip fidelity guarantee for Database (finding 3 of the Task 3
 // review): before Database.raw existed, databaseToThrift always built a
