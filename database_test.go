@@ -63,9 +63,12 @@ func TestDatabases_CreateGetRoundTrip(t *testing.T) {
 			}
 
 			// An empty LocationURI is filled in client-side from the
-			// metastore's warehouse-dir configuration, the way Hive's
-			// own DDL path does (see (*Client).CreateDatabase), rather
-			// than reaching the server as "".
+			// warehouse root -- the default catalog's own LocationUri on a
+			// server that supports catalogs (hive31, hive40), or the
+			// "hive.metastore.warehouse.dir" config value on one that
+			// predates them (hive23) -- the way Hive's own DDL path does
+			// (see (*Client).CreateDatabase), rather than reaching the
+			// server as "".
 			require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "nolocdb"}))
 			got2, err := c.GetDatabase(ctx, "nolocdb")
 			require.NoError(t, err)

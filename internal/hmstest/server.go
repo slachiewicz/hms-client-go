@@ -121,12 +121,25 @@ func Start(t testing.TB, v Version, opts ...Option) *Server {
 	}
 
 	store := NewStore()
-	// CreateDatabase (client.go) resolves an unset Database.LocationURI
-	// through get_config_value("hive.metastore.warehouse.dir", ...) the
-	// way Hive's own DDL path does; seed the same default a freshly
-	// installed metastore reports so that path is exercised without every
-	// test having to set it itself.
-	store.Config["hive.metastore.warehouse.dir"] = "file:///tmp/hms-warehouse"
+	// CreateDatabase (client.go) resolves an unset Database.LocationURI to
+	// "<warehouse>/<db>.db". A real Hive 2.3 metastore predates catalogs,
+	// so CreateDatabase reads the warehouse root from
+	// get_config_value("hive.metastore.warehouse.dir", ...); seed that key
+	// so the path is exercised without every Hive23 test having to set it
+	// itself. A real Hive 3.1 metastore's get_config_value does not
+	// resolve that key to its "metastore.warehouse.dir" alias the way
+	// Hive 4's does -- it answers "" -- so CreateDatabase instead reads
+	// the warehouse root from the resolved catalog's own LocationUri
+	// (get_catalog) on any server that supports catalogs; mirror that
+	// here by seeding the default "hive" catalog's location instead, and
+	// deliberately leaving hive.metastore.warehouse.dir unset, so a
+	// regression that made CreateDatabase depend on it again would fail
+	// on Hive31 the way it does against a real server.
+	if v == Hive23 {
+		store.Config["hive.metastore.warehouse.dir"] = "file:///tmp/hms-warehouse"
+	} else {
+		store.Catalogs["hive"].LocationUri = "file:///tmp/hms-warehouse"
+	}
 	rec := &recorder{}
 
 	proc := hive_metastore.NewThriftHiveMetastoreProcessor(&handler{v: v, store: store, rec: rec})

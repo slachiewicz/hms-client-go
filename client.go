@@ -635,9 +635,18 @@ func (c *Client) GetDatabase(ctx context.Context, name string, opts ...CatalogOp
 // the server rejects that with MetaException(IllegalArgumentException: Can
 // not create a Path from an empty string) instead of computing the
 // warehouse default itself. The filled-in location is
-// "<warehouse>/<db>.db" (lowercased db name) for the default catalog,
-// where warehouse is the "hive.metastore.warehouse.dir" configuration
-// value, or "<catalog-location>/<db>.db" for a non-default catalog.
+// "<warehouse>/<db>.db" (lowercased db name).
+//
+// The warehouse root comes from the resolved catalog's own LocationUri
+// (get_catalog) on any server that supports catalogs (Hive 3.1+): the
+// default catalog's location IS the warehouse dir there, and a non-default
+// catalog's location is its own warehouse root by definition. Only a
+// server that predates catalogs (Hive 2.3, which has no catalog to ask)
+// falls back to the "hive.metastore.warehouse.dir" configuration value.
+// This split exists because Hive 3.1's get_config_value does not resolve
+// that key to its "metastore.warehouse.dir" alias the way Hive 4's does --
+// it answers empty instead -- so asking the catalog sidesteps the quirk
+// entirely rather than working around it.
 func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 	return c.call(ctx, "create_database", func(ctx context.Context, cn *conn) error {
 		var opts []CatalogOption
@@ -652,7 +661,7 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 		toCreate := db
 		if db.LocationURI == "" {
 			var base string
-			if cat != nil && *cat != defaultCatalog {
+			if cat != nil {
 				resp, err := cn.getCatalog(ctx, &hive_metastore.GetCatalogRequest{Name: *cat})
 				if err != nil {
 					return err

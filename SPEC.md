@@ -174,7 +174,7 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error
 func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, cascade, ifExists bool, opts ...CatalogOption) error
 ```
 
-An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side as `<warehouse>/<db>.db` (or `<catalog-location>/<db>.db` for a non-default catalog) the way Hive's own DDL path does, since the generated `locationUri` field's default Thrift requiredness would otherwise put an empty string on the wire and the server rejects that outright.
+An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side as `<warehouse>/<db>.db` the way Hive's own DDL path does, since the generated `locationUri` field's default Thrift requiredness would otherwise put an empty string on the wire and the server rejects that outright. The warehouse root is the resolved catalog's own `LocationUri` (`get_catalog`) on any server that supports catalogs (Hive 3.1+; a non-default catalog is its own warehouse root by definition), or the `hive.metastore.warehouse.dir` configuration value on a server that predates catalogs (Hive 2.3), since it has no catalog to ask. Hive 3.1's `get_config_value` does not resolve that key to its `metastore.warehouse.dir` alias the way Hive 4's does (it answers empty), which is why catalogs are asked instead of the config value wherever they exist.
 
 ### 5.4. Table Operations
 
