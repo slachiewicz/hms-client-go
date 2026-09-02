@@ -133,6 +133,7 @@ Defined in SPEC §5. Implementation notes:
 - [ ] `fallback.go`: `UNKNOWN_METHOD` detection, per-connection fallback cache, Rules 2–4 from SPEC §2.3.
 - [ ] `formats.go` builders per SPEC §6.
 - [ ] Unit tests with a fake Thrift server that can be told to reject any RPC with `UNKNOWN_METHOD`, proving each fallback path and that `catName` is absent on the wire for Hive 2 connections.
+- [ ] **Breaking changes** (Task 3 fix round, aligning the builders with xtable-hive-metastore's conventions, SPEC §6): `hms.DeltaInputFormat` and `hms.DeltaOutputFormat` are removed (Delta's `StorageDescriptor` now carries no input/output format at all, only the `DeltaStorageHandler`); `hms.HudiOutputFormat`'s value changes from the Hudi-specific output format to `org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat`. Allowed on the v0.x line by SPEC §8.
 
 ### Slice 4: High Availability (HA) & Clustering
 - [ ] `internal/ha/cluster.go`, multi-URI parsing, cooldown, sticky-active selection.
