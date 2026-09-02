@@ -20,6 +20,7 @@ jobs:
       matrix:
         include:
           - name: hive-2.3.9
+            image: slachiewicz/hive-metastore:2.3.9
             build: true
             expect_version: "2.3"
             uris: "thrift://127.0.0.1:9083"
