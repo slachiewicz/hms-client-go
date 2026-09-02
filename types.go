@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
 )
 
 // PrincipalType identifies the kind of principal that owns a database,
@@ -81,6 +83,10 @@ type Database struct {
 	OwnerName string
 	// OwnerType is the kind of principal that owns the database.
 	OwnerType PrincipalType
+	// CreateTime is when the database was created (1.0 addition). It is
+	// read-only: CreateDatabase never writes it, since the server assigns
+	// it itself.
+	CreateTime time.Time
 }
 
 // FieldSchema describes one column or partition key.
@@ -113,6 +119,25 @@ type Order struct {
 	Order int32
 }
 
+// SkewedInfo describes a table's or partition's skewed-storage optimization:
+// which columns Hive considers skewed and which value combinations it keeps
+// in dedicated storage locations (1.0 addition; SPEC §5.4).
+//
+// ColumnValueLocationMaps, the wire's third SkewedInfo field mapping each
+// skewed value combination to its own storage location, has no field here:
+// it is gated behind THRIFT-2063 (SPEC §1.1) and is dropped from the
+// generated Thrift bindings before this package ever sees it. A value
+// already on the wire is not lost across GetTable -> AlterTable even so;
+// see "Round-trip fidelity" below.
+type SkewedInfo struct {
+	// ColumnNames lists the columns Hive considers skewed, in
+	// ColumnValues' column order.
+	ColumnNames []string
+	// ColumnValues lists the skewed value combinations, one per skew,
+	// each in ColumnNames order.
+	ColumnValues [][]string
+}
+
 // StorageDescriptor describes where and how a table's or partition's data
 // is stored on disk.
 type StorageDescriptor struct {
@@ -139,9 +164,24 @@ type StorageDescriptor struct {
 	// StoredAsSubDirectories reports whether skewed values are stored in
 	// their own subdirectories.
 	StoredAsSubDirectories bool
+	// Skewed describes the skewed-storage optimization applied to this
+	// data, or nil if none (1.0 addition).
+	Skewed *SkewedInfo
 }
 
 // Table is a Hive Metastore table (SPEC §5.4).
+//
+// A Table returned by GetTable or GetTables carries an internal snapshot of
+// every field the generated Thrift Table has, including ones this struct
+// does not model (e.g. Privileges, RewriteEnabled, Id, TxnId, AccessType,
+// the capability lists). AlterTable starts from that snapshot and
+// overwrites only the fields modelled below, so round-tripping a table
+// fetched from the server through AlterTable does not silently reset the
+// unmodelled ones (SPEC §5.4 "Round-trip fidelity"). Copying a Table value
+// copies that snapshot's pointer, not its contents: the snapshot is shared
+// and read-only, and a Table built directly (a struct literal, or one of
+// the NewXxxTable constructors in formats.go) carries none, exactly as
+// before this existed.
 type Table struct {
 	// CatalogName is the catalog the table's database belongs to.
 	CatalogName string
@@ -151,6 +191,10 @@ type Table struct {
 	TableName string
 	// Owner is the owning principal's name.
 	Owner string
+	// OwnerType is the kind of principal that owns the table (1.0
+	// addition). A zero value is written to the wire as PrincipalUser,
+	// matching Hive's own default.
+	OwnerType PrincipalType
 	// CreateTime is when the table was created.
 	CreateTime time.Time
 	// LastAccessTime is when the table was last accessed.
@@ -169,9 +213,22 @@ type Table struct {
 	ViewExpandedText string
 	// TableType is the kind of table.
 	TableType TableType
+
+	// raw is a deep copy of the generated Thrift Table this value was
+	// converted from (tableFromThrift), or nil for a Table this package
+	// never read off the wire. tableToThrift starts from a fresh copy of
+	// it, when present, so a field raw carries but this struct does not
+	// model survives GetTable -> AlterTable unchanged. See the type's own
+	// doc comment for the sharing/read-only contract.
+	raw *hive_metastore.Table
 }
 
 // Partition is a Hive Metastore table partition (SPEC §5.5).
+//
+// Like Table, a Partition returned by the server carries an internal,
+// read-only snapshot of every field the generated Thrift Partition has;
+// AlterPartitions preserves whatever that snapshot carries but this struct
+// does not model. See Table's doc comment for the full contract.
 type Partition struct {
 	// CatalogName is the catalog the partition's table belongs to.
 	CatalogName string
@@ -188,6 +245,11 @@ type Partition struct {
 	Storage *StorageDescriptor
 	// Parameters holds arbitrary key/value metadata.
 	Parameters map[string]string
+
+	// raw is a deep copy of the generated Thrift Partition this value was
+	// converted from (partitionFromThrift), or nil for a Partition this
+	// package never read off the wire. See Table.raw.
+	raw *hive_metastore.Partition
 }
 
 // HiveVersion is a parsed Hive Metastore server version.

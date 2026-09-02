@@ -80,3 +80,77 @@ func TestPartitionToThrift_DefaultsWriteId(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, int64(-1), got.WriteId)
 }
+
+// TestTableRoundTrip_PreservesUnmodelledFields covers G3, round-trip
+// fidelity (SPEC §5.4): before Table.raw existed, tableToThrift always
+// started from a bare hive_metastore.NewTable(), so a
+// tableFromThrift -> tableToThrift round trip silently dropped every field
+// hms.Table has no field for -- Privileges, RewriteEnabled, Id, TxnId,
+// AccessType, the capability lists, Temporary, CreationMetadata, and
+// SkewedInfo's names/values -- exactly what a GetTable -> AlterTable call
+// against a table Spark or Trino registered would do to it. seed is built
+// with every modelled field also populated (and set to a value that itself
+// survives the modelled conversion unchanged, e.g. the CatName passed back
+// into tableToThrift matches seed.CatName), so this asserts whole-struct
+// equality rather than field-by-field: if any field, modelled or not, come
+// back different from seed, the round trip lost or altered something.
+func TestTableRoundTrip_PreservesUnmodelledFields(t *testing.T) {
+	t.Parallel()
+
+	seed := hive_metastore.NewTable() // OwnerType: USER, WriteId: -1
+	seed.DbName = "db"
+	seed.TableName = "t"
+	seed.Owner = "me"
+	seed.CreateTime = 1700000000
+	seed.LastAccessTime = 1700000100
+	seed.Retention = 42
+	seed.CatName = ptr("hive")
+	seed.ViewOriginalText = "SELECT 1"
+	seed.ViewExpandedText = "SELECT 1 FROM db.t"
+	seed.TableType = "EXTERNAL_TABLE"
+	seed.Parameters = map[string]string{"k": "v"}
+	seed.PartitionKeys = []*hive_metastore.FieldSchema{{Name: "dt", Type: "string"}}
+	seed.Sd = &hive_metastore.StorageDescriptor{
+		SkewedInfo: &hive_metastore.SkewedInfo{
+			SkewedColNames:  []string{"region"},
+			SkewedColValues: [][]string{{"us"}, {"eu"}},
+		},
+	}
+
+	// Fields hms.Table has no field for. GroupPrivileges and
+	// RolePrivileges are set to empty (non-nil) maps rather than left
+	// nil: PrincipalPrivilegeSet declares all three as required Thrift
+	// fields, and the wire round trip deepCopyThrift performs (a real
+	// serialize/deserialize, not an in-memory copy) decodes a required
+	// map field that was never sent as empty, not nil -- the same
+	// convention copyStringMap documents for this package's own
+	// converters, just observed here one level further down, inside a
+	// field this package does not itself convert.
+	seed.Privileges = &hive_metastore.PrincipalPrivilegeSet{
+		UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+			"alice": {{Privilege: "SELECT", Grantor: "bob", GrantorType: hive_metastore.PrincipalType_USER}},
+		},
+		GroupPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{},
+		RolePrivileges:  map[string][]*hive_metastore.PrivilegeGrantInfo{},
+	}
+	seed.Temporary = true
+	rewriteEnabled := true
+	seed.RewriteEnabled = &rewriteEnabled
+	seed.CreationMetadata = &hive_metastore.CreationMetadata{
+		CatName:    "hive",
+		DbName:     "db",
+		TblName:    "t",
+		TablesUsed: []string{"db.other"},
+	}
+	accessType := int8(1)
+	seed.AccessType = &accessType
+	seed.RequiredReadCapabilities = []string{"CONNECTORREAD"}
+	seed.RequiredWriteCapabilities = []string{"CONNECTORWRITE"}
+	id := int64(42)
+	seed.ID = &id
+	txnID := int64(99)
+	seed.TxnId = &txnID
+
+	got := tableToThrift(tableFromThrift(seed), ptr("hive"))
+	assert.Equal(t, seed, got)
+}

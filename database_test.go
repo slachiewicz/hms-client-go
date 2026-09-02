@@ -45,12 +45,17 @@ func TestDatabases_CreateGetRoundTrip(t *testing.T) {
 
 			got, err := c.GetDatabase(ctx, "mydb")
 			require.NoError(t, err)
+			// CreateTime is read-only, assigned by the server itself (1.0
+			// addition; see Database's doc comment); only its presence is
+			// asserted here, not a specific value.
+			require.False(t, got.CreateTime.IsZero())
 			assert.Equal(t, &hms.Database{
 				CatalogName: "hive",
 				Name:        "mydb",
 				Description: "d",
 				LocationURI: "hdfs:///mydb",
 				Parameters:  map[string]string{"k": "v"},
+				CreateTime:  got.CreateTime,
 			}, got)
 
 			args, ok := srv.LastArgs("create_database").(*hive_metastore.Database)

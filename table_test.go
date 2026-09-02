@@ -62,7 +62,14 @@ func TestTable_CreateGetRoundTrip(t *testing.T) {
 			want := *table
 			want.CatalogName = "hive"
 			want.CreateTime = got.CreateTime
-			assert.Equal(t, &want, got)
+			// OwnerType defaults to PrincipalUser on write (1.0 addition;
+			// see Table's doc comment) when left unset, as table is here.
+			want.OwnerType = hms.PrincipalUser
+			// got carries the round-trip fidelity snapshot GetTable
+			// populates (Table's raw field); strip it before this
+			// whole-struct equality check so it does not fail on an
+			// unexported field want (a plain struct literal) never has.
+			assert.Equal(t, &want, hms.StripTableRaw(got))
 
 			args, ok := srv.LastArgs("get_table_req").(*hive_metastore.GetTableRequest)
 			require.True(t, ok)
@@ -74,6 +81,54 @@ func TestTable_CreateGetRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAlterTable_PreservesUnmodelledFields is round-trip fidelity's
+// black-box counterpart to TestTableRoundTrip_PreservesUnmodelledFields
+// (convert_internal_test.go): it seeds a table carrying fields hms.Table
+// has no field for directly into the Hive40 fixture's store (bypassing
+// CreateTable), fetches it with GetTable, changes one Parameter, and
+// AlterTables it back, then reads the store directly and confirms the
+// unmodelled fields are still there -- proving the fidelity holds across
+// an actual client round trip, not just the bare converter functions.
+func TestAlterTable_PreservesUnmodelledFields(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	catName := "hive"
+	rewriteEnabled := true
+	id := int64(7)
+	seed := hive_metastore.NewTable()
+	seed.DbName = "db"
+	seed.TableName = "t"
+	seed.CatName = &catName
+	seed.Parameters = map[string]string{"x": "1"}
+	seed.RewriteEnabled = &rewriteEnabled
+	seed.ID = &id
+	seed.Privileges = &hive_metastore.PrincipalPrivilegeSet{
+		UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+			"alice": {{Privilege: "SELECT"}},
+		},
+	}
+	srv.SeedTable(seed)
+
+	got, err := c.GetTable(ctx, "db", "t")
+	require.NoError(t, err)
+
+	got.Parameters["x"] = "2"
+	require.NoError(t, c.AlterTable(ctx, "db", "t", got))
+
+	stored := srv.Store().Tables["hive.db.t"]
+	require.NotNil(t, stored)
+	assert.Equal(t, "2", stored.Parameters["x"], "the modelled field this test actually changed must still take effect")
+	require.NotNil(t, stored.RewriteEnabled, "RewriteEnabled must survive: hms.Table has no field for it")
+	assert.True(t, *stored.RewriteEnabled)
+	require.NotNil(t, stored.ID, "ID must survive: hms.Table has no field for it")
+	assert.Equal(t, int64(7), *stored.ID)
+	require.NotNil(t, stored.Privileges, "Privileges must survive: hms.Table has no field for it")
+	assert.Contains(t, stored.Privileges.UserPrivileges, "alice")
 }
 
 func TestGetTable_NotFound(t *testing.T) {

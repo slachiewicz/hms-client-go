@@ -206,6 +206,8 @@ func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, casc
 
 An empty `Database.LocationURI` passed to `CreateDatabase` is filled in client-side before the RPC is issued; see Appendix A for the warehouse-dir resolution rule and the Hive 3.1 `get_config_value` quirk it works around.
 
+`Database.CreateTime` is read-only: it is populated by `GetDatabase` from the server's own timestamp, and `CreateDatabase` never writes it.
+
 `AlterDatabase` wraps `alter_database(dbname, db)` (1.0 addition), replacing the named database's mutable properties (`Description`, `LocationURI`, `Parameters`, `OwnerName`, `OwnerType`) with `db`'s.
 
 ### 5.4. Table Operations
@@ -236,24 +238,22 @@ func (c *Client) AlterTable(ctx context.Context, dbName, tableName string, newTa
 func (c *Client) DropTable(ctx context.Context, dbName, tableName string, deleteData, ifExists bool, opts ...CatalogOption) error
 ```
 
-`GetTables` chunks `tableNames` into requests of at most 1000 names (default; `withChunkSize` test hook). Chunking is sequential, not parallel: chunks are sent one after another, and for a mutating chunked call (`AddPartitions`, §5.5) a failure partway through leaves every earlier chunk already committed on the server.
+`GetTables` chunks `tableNames` into requests of at most 1000 names (default; `WithChunkSize`, §5.1). Chunking is sequential, not parallel: chunks are sent one after another, and for a mutating chunked call (`AddPartitions`, §5.5) a failure partway through leaves every earlier chunk already committed on the server.
 
-`StorageDescriptor` has no `SkewedInfo` field today; exposing it is a 1.0 addition, targeting this shape:
+`StorageDescriptor` gains a `Skewed *SkewedInfo` field (1.0 addition):
 
 ```go
 type SkewedInfo struct {
-    ColumnNames             []string
-    ColumnValues            [][]string
-    ColumnValueLocationMaps []SkewedLocation
-}
-
-type SkewedLocation struct {
-    Values   []string
-    Location string
+    ColumnNames  []string
+    ColumnValues [][]string
 }
 ```
 
-`ColumnNames` and `ColumnValues` (wire fields 1 and 2, plain `list<string>` / `list<list<string>>`) are not affected by the THRIFT-2063 gate in §1.1 and ship as soon as the field is added. `ColumnValueLocationMaps` (wire field 3, `map<list<string>, string>`) is the gated part: it is dropped from the generated code until a Thrift Go release fixes THRIFT-2063 (Appendix A), exactly as it is dropped today.
+These are the wire's first two `SkewedInfo` fields (`skewedColNames`, `skewedColValues`; plain `list<string>` / `list<list<string>>`), which are not affected by the THRIFT-2063 gate in §1.1. The wire's third field, `skewedColValueLocationMaps` (`map<list<string>, string>`), remains unmodelled -- it is dropped from the generated code until a Thrift Go release fixes THRIFT-2063 (Appendix A) -- but a value already on the wire is not lost across `GetTable` -> `AlterTable` even so; see "Round-trip fidelity" below.
+
+#### Round-trip fidelity
+
+A `Table` or `Partition` returned by the server carries an internal, read-only snapshot of every field the generated Thrift struct has, not just the ones this package models. `AlterTable` and `AlterPartitions` build the outgoing struct from that snapshot and overwrite only the modelled fields, so a field this package does not expose -- `Privileges`, `RewriteEnabled`, `Id`, `TxnId`, `AccessType`, the capability lists, `SkewedInfo.skewedColValueLocationMaps`, and any field a future IDL bump adds -- survives a `GetTable` -> `AlterTable` (or `GetPartitions` -> `AlterPartitions`) round trip unchanged instead of being silently reset. A `Table` or `Partition` built directly (a struct literal, or one of the `NewXxxTable` builders in §6) carries no snapshot and behaves exactly as before this existed.
 
 ### 5.5. Partition Operations
 

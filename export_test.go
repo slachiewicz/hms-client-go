@@ -3,6 +3,8 @@ package hms
 import (
 	"context"
 	"time"
+
+	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
 )
 
 var (
@@ -78,3 +80,33 @@ func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval
 // thousands of fixture rows and without racing t.Parallel() tests over a
 // shared package variable.
 var WithChunkSize = withChunkSize
+
+// TableRaw and PartitionRaw expose Table.raw and Partition.raw to hms_test,
+// the round-trip fidelity snapshot tableFromThrift/partitionFromThrift set
+// and tableToThrift/partitionToThrift build on (see Table's doc comment),
+// since raw is unexported.
+func TableRaw(t *Table) *hive_metastore.Table             { return t.raw }
+func PartitionRaw(p *Partition) *hive_metastore.Partition { return p.raw }
+
+// StripTableRaw and StripPartitionRaw return a shallow copy of t/p with the
+// round-trip fidelity snapshot cleared, for a black-box test that compares
+// a whole Table or Partition for equality (e.g. via testify's assert.Equal,
+// which does not ignore unexported fields) without wanting that
+// server-populated, unexported field to participate.
+func StripTableRaw(t *Table) *Table {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	cp.raw = nil
+	return &cp
+}
+
+func StripPartitionRaw(p *Partition) *Partition {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	cp.raw = nil
+	return &cp
+}
