@@ -299,10 +299,13 @@ func TestNewHeartbeatRequest_OmitsZeroID(t *testing.T) {
 
 // TestNewLockComponent_KeepsIDLDefaultsOverWire covers acid.go's
 // newLockComponent building a hive_metastore.LockComponent via
-// NewLockComponent() rather than a bare struct literal, which would send
-// OperationType=SELECT (wire value 1, the Go zero value) instead of the
-// IDL default UNSET (5); this package's exported LockComponent has no
-// field for OperationType at all.
+// NewLockComponent() rather than a bare struct literal, matching every
+// other request builder in this package, while OperationType is deliberately
+// overwritten away from that constructor's own default
+// (DataOperationType_UNSET, wire value 5): a real metastore's
+// TxnHandler.lock rejects UNSET on a transactional lock component outright
+// (see lockOperationType's doc comment in acid.go), so LockTypeExclusive
+// maps to DataOperationType_NO_TXN (wire value 6) instead.
 func TestNewLockComponent_KeepsIDLDefaultsOverWire(t *testing.T) {
 	t.Parallel()
 	c := newLockComponent(LockComponent{Type: LockTypeExclusive, Level: LockLevelTable, Database: "db", Table: "tbl"})
@@ -316,7 +319,41 @@ func TestNewLockComponent_KeepsIDLDefaultsOverWire(t *testing.T) {
 	require.NotNil(t, got.Tablename)
 	assert.Equal(t, "tbl", *got.Tablename)
 	assert.Nil(t, got.Partitionname)
-	assert.Equal(t, hive_metastore.DataOperationType(5), got.OperationType)
+	assert.Equal(t, hive_metastore.DataOperationType_NO_TXN, got.OperationType)
+}
+
+// TestNewLockComponent_OperationTypeByLockType covers lockOperationType's
+// full mapping (acid.go) for every exported LockType, asserting the wire
+// DataOperationType newLockComponent actually sends -- the field a real
+// metastore's TxnHandler.lock rejects the request over when it is left at
+// NewLockComponent()'s own default (DataOperationType_UNSET); see
+// lockOperationType's doc comment for why each LockType maps where it does.
+func TestNewLockComponent_OperationTypeByLockType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   LockType
+		want hive_metastore.DataOperationType
+	}{
+		{"SharedRead", LockTypeSharedRead, hive_metastore.DataOperationType_SELECT},
+		{"SharedWrite", LockTypeSharedWrite, hive_metastore.DataOperationType_INSERT},
+		{"ExclWrite", LockTypeExclWrite, hive_metastore.DataOperationType_UPDATE},
+		{"Exclusive", LockTypeExclusive, hive_metastore.DataOperationType_NO_TXN},
+		{"unknown falls back to NO_TXN, not UNSET", LockType(99), hive_metastore.DataOperationType_NO_TXN},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := newLockComponent(LockComponent{Type: tt.in, Level: LockLevelTable, Database: "db", Table: "tbl"})
+
+			got := hive_metastore.NewLockComponent()
+			roundTrip(t, c, got)
+
+			assert.Equal(t, tt.want, got.OperationType)
+			assert.NotEqual(t, hive_metastore.DataOperationType_UNSET, got.OperationType,
+				"UNSET is rejected by a real metastore's TxnHandler.lock on a transactional lock component")
+		})
+	}
 }
 
 // TestNewLockRequest_KeepsIDLDefaultsOverWire covers acid.go's

@@ -269,17 +269,29 @@ func (c *Client) Heartbeat(ctx context.Context, txnID, lockID int64) error {
 }
 
 // newLockComponent builds a hive_metastore.LockComponent from
-// hive_metastore.NewLockComponent() rather than a bare struct literal, so
-// OperationType keeps NewLockComponent's default (DataOperationType_UNSET)
-// instead of falling back to the Go zero value (DataOperationType_SELECT,
-// wire value 1) -- this package's exported LockComponent has no field for
-// it, matching SPEC §5.9's minimal surface, and UNSET is what a real Hive
-// client sends for a lock that is not itself a DML operation.
+// hive_metastore.NewLockComponent() rather than a bare struct literal,
+// matching every other request builder in this package, but OperationType
+// is then overwritten by lockOperationType(lc.Type): a lock request with
+// Txnid set (SPEC §5.9's TxnID) and a component carrying
+// DataOperationType_UNSET -- NewLockComponent()'s own default -- is
+// rejected by the server's TxnHandler.lock with
+// "java.lang.IllegalStateException: Unexpected DataOperationType: UNSET",
+// verified on both Hive 2.3.9 (where it surfaces as the lock RPC's
+// connection closing outright, an unhandled exception on that version's
+// older Thrift server) and Hive 4.2.1 (a clean TApplicationException) by
+// decompiling org.apache.hadoop.hive.metastore.txn.jdbc.commands.
+// InsertTxnComponentsCommand.shouldUpdateTxnComponent from
+// hive-exec-4.2.1.jar/hive-standalone-metastore-server-4.2.1.jar. This
+// package's exported LockComponent has no field for OperationType (SPEC
+// §5.9's minimal surface), so lockOperationType infers a DML type from
+// LockType the same way Hive's own DbTxnManager picks one for the SQL
+// operation requesting the lock.
 func newLockComponent(lc LockComponent) *hive_metastore.LockComponent {
 	out := hive_metastore.NewLockComponent()
 	out.Type = hive_metastore.LockType(lc.Type)
 	out.Level = hive_metastore.LockLevel(lc.Level)
 	out.Dbname = lc.Database
+	out.OperationType = lockOperationType(lc.Type)
 	if lc.Table != "" {
 		out.Tablename = &lc.Table
 	}
@@ -287,6 +299,35 @@ func newLockComponent(lc LockComponent) *hive_metastore.LockComponent {
 		out.Partitionname = &lc.Partition
 	}
 	return out
+}
+
+// lockOperationType maps a LockType to the DataOperationType a real Hive
+// client would send for the kind of SQL operation that requests it, since
+// leaving DataOperationType_UNSET on a transactional lock component makes
+// the server reject the whole lock RPC (see newLockComponent's doc
+// comment). LockTypeSharedRead is a plain read (SELECT); LockTypeSharedWrite
+// is a concurrent, non-conflicting write (INSERT, e.g. dynamic-partition
+// inserts that do not overlap); LockTypeExclWrite is a write that does
+// conflict with any other writer of the same rows (UPDATE, matching
+// Hive's own use of EXCL_WRITE for UPDATE/DELETE/MERGE); LockTypeExclusive
+// is a whole-resource lock for a non-transactional operation (NO_TXN,
+// e.g. DROP TABLE, TRUNCATE), matching DataOperationType's own doc
+// comment in idl/hive_metastore.thrift. An unrecognized LockType (a value
+// outside the four exported constants) falls back to NO_TXN rather than
+// UNSET, so it fails open the same safe way LockTypeExclusive does instead
+// of reproducing this exact bug for a value this package does not know
+// about.
+func lockOperationType(t LockType) hive_metastore.DataOperationType {
+	switch t {
+	case LockTypeSharedRead:
+		return hive_metastore.DataOperationType_SELECT
+	case LockTypeSharedWrite:
+		return hive_metastore.DataOperationType_INSERT
+	case LockTypeExclWrite:
+		return hive_metastore.DataOperationType_UPDATE
+	default: // LockTypeExclusive, and any future/unknown value
+		return hive_metastore.DataOperationType_NO_TXN
+	}
 }
 
 // newLockRequest builds a hive_metastore.LockRequest from

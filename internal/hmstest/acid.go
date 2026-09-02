@@ -155,11 +155,32 @@ func (h *handler) Heartbeat(_ context.Context, req *hive_metastore.HeartbeatRequ
 // which case the whole request is queued (LockState_WAITING) rather than
 // denied outright -- matching a real metastore's lock manager, whose
 // caller is expected to poll CheckLock until the lock clears.
+//
+// A component with DataOperationType_UNSET on a transactional request
+// (Txnid set) is rejected the same way a real metastore's
+// TxnHandler.lock rejects it -- an unchecked
+// "java.lang.IllegalStateException: Unexpected DataOperationType: UNSET",
+// undeclared in lock's IDL throws clause, so the generated processor
+// turns it into a TApplicationException ("Internal error processing
+// lock: ..."), exactly like the plain error returned here does. Verified
+// against real Hive 2.3.9 and 4.2.1 servers (decompiling
+// InsertTxnComponentsCommand.shouldUpdateTxnComponent from
+// hive-standalone-metastore-server-4.2.1.jar for the latter); this
+// package's own acid.go.newLockComponent never sends UNSET, so this only
+// guards against a regression there.
 func (h *handler) Lock(_ context.Context, req *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error) {
 	h.rec.record("lock", req)
 	a := h.store.Acid
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if req.Txnid != nil {
+		for _, comp := range req.Component {
+			if comp.OperationType == hive_metastore.DataOperationType_UNSET {
+				return nil, fmt.Errorf("unexpected DataOperationType: UNSET agentInfo=%s txnid:%d", req.AgentInfo, *req.Txnid)
+			}
+		}
+	}
 
 	state := hive_metastore.LockState_ACQUIRED
 	for _, comp := range req.Component {

@@ -27,9 +27,12 @@
 package integration_test
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -159,6 +162,32 @@ func textStorage(location string, cols []*hms.FieldSchema) *hms.StorageDescripto
 			SerializationLib: "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
 		},
 	}
+}
+
+// decodeNotificationMessage returns ev.Message as plain text, undoing the
+// gzip+base64 envelope a real metastore wraps it in when ev.MessageFormat
+// is "gzip(json-2.0)" (Hive's GzipJSONMessageEncoder, the default message
+// factory since Hive 4 -- verified by decompiling
+// org.apache.hadoop.hive.metastore.messaging.json.gzip.Serializer from
+// hive-standalone-metastore-server-4.2.1.jar: MessageFactory.getInstance
+// registers it as "metastore.event.message.factory"'s default). SPEC.md
+// §5.7 deliberately exposes Message/MessageFormat as opaque strings rather
+// than decoding them in the client, so this stays test-only rather than
+// becoming exported API; any other MessageFormat (e.g. Hive 2/3's
+// "json-0.2") is returned unchanged.
+func decodeNotificationMessage(t *testing.T, ev hms.NotificationEvent) string {
+	t.Helper()
+	if ev.MessageFormat != "gzip(json-2.0)" {
+		return ev.Message
+	}
+	raw, err := base64.StdEncoding.DecodeString(ev.Message)
+	require.NoError(t, err, "base64-decoding notification message")
+	zr, err := gzip.NewReader(strings.NewReader(string(raw)))
+	require.NoError(t, err, "opening gzip notification message")
+	defer func() { _ = zr.Close() }()
+	decoded, err := io.ReadAll(zr)
+	require.NoError(t, err, "reading gzip notification message")
+	return string(decoded)
 }
 
 // TestDatabases_CRUD covers CreateDatabase/GetDatabase/GetAllDatabases/
@@ -576,17 +605,17 @@ func TestNotifications(t *testing.T) {
 	// 0 because NOTIFICATION_SEQUENCE was never advanced, and the event log
 	// is empty. That is a server configuration this test cannot assert
 	// against, not a client defect -- the listener is registered with
-	// metastore.event.listeners (hive.metastore.event.listeners before
-	// Hive 3), which the integration workflow sets when the image has the
-	// hcatalog server extensions to load it from.
+	// metastore.transactional.event.listeners (hive.metastore.transactional
+	// .event.listeners before Hive 3), which the integration workflow sets
+	// when the image has the hcatalog server extensions to load it from.
 	if sinceID == 0 && len(events) == 0 {
-		t.Skip("metastore has no DbNotificationListener configured (metastore.event.listeners)")
+		t.Skip("metastore has no DbNotificationListener configured (metastore.transactional.event.listeners)")
 	}
 
 	var found bool
 	for _, ev := range events {
 		assert.Greater(t, ev.ID, sinceID, "every returned event must be newer than sinceID")
-		if ev.Type == "CREATE_TABLE" && strings.Contains(ev.Message, tableName) {
+		if ev.Type == "CREATE_TABLE" && strings.Contains(decodeNotificationMessage(t, ev), tableName) {
 			found = true
 		}
 	}
@@ -595,10 +624,20 @@ func TestNotifications(t *testing.T) {
 
 // TestACID covers SPEC.md §5.9's minimal ACID surface against a real
 // metastore: open a transaction, lock SHARED_READ on the test db/table,
-// confirm CheckLock reports the same ACQUIRED state Lock did, release the
-// lock, and commit; a second transaction exercises the abort path instead.
-// open_txns/lock/check_lock/unlock/commit_txn/abort_txn all exist on every
-// supported version (Hive 2.3+, SPEC §5.9), so this is not version-gated.
+// confirm CheckLock reports the same ACQUIRED state Lock did, and commit;
+// a second transaction exercises the abort path instead. Neither subtest
+// calls Unlock on the transactional lock: a real metastore ties a lock
+// acquired with TxnID set to that transaction's lifecycle and releases it
+// automatically on commit_txn/abort_txn, rejecting an explicit unlock on
+// it with TxnOpenException ("Unlocking locks associated with transaction
+// not permitted") -- verified against a real Hive 4.2.1 server, which
+// returned exactly that once the OperationType fix below (acid.go's
+// lockOperationType) let the lock RPC itself succeed. Unlock's own
+// contract (releasing a lock taken without a transaction) is exercised by
+// TestACID_Heartbeat_TxnOnlyAndLockOnly and friends in acid_test.go
+// against the in-process fake server. open_txns/lock/check_lock/
+// commit_txn/abort_txn all exist on every supported version (Hive 2.3+,
+// SPEC §5.9), so this is not version-gated.
 func TestACID(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
@@ -630,7 +669,6 @@ func TestACID(t *testing.T) {
 		assert.Equal(t, hms.LockStateAcquired, checked.State)
 		assert.Equal(t, resp.LockID, checked.LockID)
 
-		require.NoError(t, c.Unlock(ctx, resp.LockID))
 		require.NoError(t, c.CommitTransaction(ctx, txnID))
 	})
 
@@ -647,8 +685,8 @@ func TestACID(t *testing.T) {
 			Host:  "localhost",
 		})
 		require.NoError(t, err)
+		require.Equal(t, hms.LockStateAcquired, resp.State)
 
-		require.NoError(t, c.Unlock(ctx, resp.LockID))
 		require.NoError(t, c.AbortTransaction(ctx, txnID))
 
 		err = c.CommitTransaction(ctx, txnID)

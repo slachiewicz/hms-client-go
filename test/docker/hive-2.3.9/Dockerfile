@@ -49,10 +49,15 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=12 \
 # --env HIVE_AUX_JARS_PATH=` (what the integration workflow passes for the
 # apache/hive images) does not blank them out, and both are skipped when
 # the distribution ships no such jar: the metastore then starts without a
-# listener and TestNotifications skips.
+# listener and TestNotifications skips. Registered only as a transactional
+# listener (hive.metastore.transactional.event.listeners): as a
+# non-transactional listener it writes DB_NOTIFICATION_EVENT_ID_KEY_NAME
+# outside the transaction that owns that parameter, and create_database
+# and friends fail with "Invalid attempt to overwrite a read-only
+# parameter" on the next write.
 CMD ["bash", "-c", "export HIVE_AUX_JARS_PATH=\"${HIVE_AUX_JARS_PATH:-$HIVE_HOME/hcatalog/share/hcatalog}\"; \
 if ls \"$HIVE_AUX_JARS_PATH\"/hive-hcatalog-server-extensions-*.jar >/dev/null 2>&1; then \
-  export HADOOP_CLIENT_OPTS=\"${HADOOP_CLIENT_OPTS:-} -Dhive.metastore.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener\"; \
+  export HADOOP_CLIENT_OPTS=\"${HADOOP_CLIENT_OPTS:-} -Dhive.metastore.transactional.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener\"; \
 else \
   echo 'no hcatalog server extensions found; starting without a notification listener' >&2; \
 fi; \

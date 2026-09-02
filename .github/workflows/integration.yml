@@ -90,10 +90,15 @@ jobs:
           # hcatalog jars when the image has them; when it does not, the
           # metastore starts with no listener and TestNotifications skips
           # rather than the container failing to come up.
+          # Registered only as a transactional listener: DbNotificationListener
+          # writes DB_NOTIFICATION_EVENT_ID_KEY_NAME as part of the
+          # transactional commit, and a second, non-transactional copy of the
+          # same listener then rejects its own overwrite of that read-only
+          # parameter (IllegalStateException on create_database and friends).
           dir=/opt/hive/hcatalog/share/hcatalog
           if docker run --rm --entrypoint ls "${{ matrix.image }}" "$dir" >/dev/null 2>&1; then
             echo "aux_jars=$dir" >> "$GITHUB_OUTPUT"
-            echo "listener_opts=-Dmetastore.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener -Dmetastore.transactional.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener" >> "$GITHUB_OUTPUT"
+            echo "listener_opts=-Dmetastore.transactional.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener" >> "$GITHUB_OUTPUT"
           else
             echo "no hcatalog jars in $dir; the metastore will run without a notification listener"
           fi
