@@ -78,11 +78,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Locate the hcatalog server extensions (apache/hive images)
+        if: "!matrix.build"
+        id: hcat
+        run: |
+          # bin/hive builds the metastore classpath from lib/, auxlib/ and
+          # HIVE_AUX_JARS_PATH only, so org.apache.hive.hcatalog.listener.
+          # DbNotificationListener -- which writes the NOTIFICATION_LOG rows
+          # TestNotifications reads -- is not loadable by default even
+          # though the image ships the jar. Point HIVE_AUX_JARS_PATH at the
+          # hcatalog jars when the image has them; when it does not, the
+          # metastore starts with no listener and TestNotifications skips
+          # rather than the container failing to come up.
+          dir=/opt/hive/hcatalog/share/hcatalog
+          if docker run --rm --entrypoint ls "${{ matrix.image }}" "$dir" >/dev/null 2>&1; then
+            echo "aux_jars=$dir" >> "$GITHUB_OUTPUT"
+            echo "listener_opts=-Dmetastore.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener -Dmetastore.transactional.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener" >> "$GITHUB_OUTPUT"
+          else
+            echo "no hcatalog jars in $dir; the metastore will run without a notification listener"
+          fi
+
       - name: Start metastore container (binary TCP)
         if: "!matrix.http"
         run: |
           docker run -d --name hms -p 9083:9083 \
             --env SERVICE_NAME=metastore \
+            --env HIVE_AUX_JARS_PATH="${{ steps.hcat.outputs.aux_jars }}" \
+            --env SERVICE_OPTS="${{ steps.hcat.outputs.listener_opts }}" \
             "${{ matrix.image }}"
 
       - name: Start metastore container (HTTP mode)
@@ -95,7 +117,8 @@ jobs:
           # Derby settings and breaks schema init).
           docker run -d --name hms -p 9083:9083 \
             --env SERVICE_NAME=metastore \
-            --env SERVICE_OPTS="-Dmetastore.server.thrift.transport.mode=http -Dmetastore.server.thrift.http.path=metastore" \
+            --env HIVE_AUX_JARS_PATH="${{ steps.hcat.outputs.aux_jars }}" \
+            --env SERVICE_OPTS="-Dmetastore.server.thrift.transport.mode=http -Dmetastore.server.thrift.http.path=metastore ${{ steps.hcat.outputs.listener_opts }}" \
             "${{ matrix.image }}"
 
       - name: Wait for the metastore to start

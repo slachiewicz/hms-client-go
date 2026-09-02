@@ -41,4 +41,19 @@ EXPOSE 9083
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=12 \
     CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/9083' || exit 1
 
-CMD ["hive", "--service", "metastore", "-p", "9083"]
+# The DbNotificationListener that fills NOTIFICATION_LOG -- what
+# TestNotifications reads -- lives in hive-hcatalog-server-extensions, and
+# bin/hive builds the metastore classpath from lib/, auxlib/ and
+# HIVE_AUX_JARS_PATH only, so the jar has to be named for the listener to
+# load at all. Both are set here rather than in ENV so that `docker run
+# --env HIVE_AUX_JARS_PATH=` (what the integration workflow passes for the
+# apache/hive images) does not blank them out, and both are skipped when
+# the distribution ships no such jar: the metastore then starts without a
+# listener and TestNotifications skips.
+CMD ["bash", "-c", "export HIVE_AUX_JARS_PATH=\"${HIVE_AUX_JARS_PATH:-$HIVE_HOME/hcatalog/share/hcatalog}\"; \
+if ls \"$HIVE_AUX_JARS_PATH\"/hive-hcatalog-server-extensions-*.jar >/dev/null 2>&1; then \
+  export HADOOP_CLIENT_OPTS=\"${HADOOP_CLIENT_OPTS:-} -Dhive.metastore.event.listeners=org.apache.hive.hcatalog.listener.DbNotificationListener\"; \
+else \
+  echo 'no hcatalog server extensions found; starting without a notification listener' >&2; \
+fi; \
+exec hive --service metastore -p 9083"]
