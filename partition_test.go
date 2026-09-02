@@ -264,6 +264,62 @@ func TestAlterPartitions(t *testing.T) {
 	}
 }
 
+// TestAddPartitions_DoesNotCarrySnapshot pins two create-path rules at
+// once (SPEC §5.4, §5.5): a Partition read from one table and added to
+// another lands in the table AddPartitions names -- its own
+// DatabaseName/TableName never override the call's arguments -- and it does
+// not carry the source partition's server-assigned fields (WriteId,
+// Privileges) with it, since the round-trip fidelity snapshot is scoped to
+// AlterPartitions.
+func TestAddPartitions_DoesNotCarrySnapshot(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	for _, name := range []string{"a", "b"} {
+		require.NoError(t, c.CreateTable(ctx, &hms.Table{
+			DatabaseName:  "db",
+			TableName:     name,
+			PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+		}))
+	}
+
+	// Seeded straight into the store, so the source partition carries the
+	// fields hms.Partition has no field for -- exactly what a real server
+	// would return from GetPartitions.
+	seed := hive_metastore.NewPartition()
+	seed.Values = []string{"2024-01-01"}
+	seed.DbName = "db"
+	seed.TableName = "a"
+	seed.CatName = ptrTo("hive")
+	seed.Parameters = map[string]string{"x": "1"}
+	seed.WriteId = 5
+	seed.Privileges = &hive_metastore.PrincipalPrivilegeSet{
+		UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+			"alice": {{Privilege: "SELECT"}},
+		},
+	}
+	srv.SeedPartitions("hive", "db", "a", []*hive_metastore.Partition{seed})
+
+	fromA, err := c.GetPartitions(ctx, "db", "a", -1)
+	require.NoError(t, err)
+	require.Len(t, fromA, 1)
+	require.NotNil(t, hms.PartitionRaw(fromA[0]), "GetPartitions must snapshot what it read")
+
+	require.NoError(t, c.AddPartitions(ctx, "db", "b", fromA, false))
+
+	req, ok := srv.LastArgs("add_partitions_req").(*hive_metastore.AddPartitionsRequest)
+	require.True(t, ok, "add_partitions_req args have unexpected type %T", srv.LastArgs("add_partitions_req"))
+	require.Len(t, req.Parts, 1)
+	sent := req.Parts[0]
+	assert.Equal(t, "db", sent.DbName)
+	assert.Equal(t, "b", sent.TableName, "the partition must land in the table the call names, not the one it was read from")
+	assert.Equal(t, "1", sent.Parameters["x"], "a modelled field still travels")
+	assert.Equal(t, int64(-1), sent.WriteId, "an added partition's write id is unassigned, not the source's")
+	assert.Nil(t, sent.Privileges, "the source partition's privileges must not define the new one")
+}
+
 func TestDropPartition(t *testing.T) {
 	t.Parallel()
 	t.Run("ifExists false on missing partition is not found", func(t *testing.T) {

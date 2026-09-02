@@ -201,35 +201,55 @@ func databaseFromThrift(d *hive_metastore.Database, cat *string) *Database {
 }
 
 // databaseToThrift converts the exported Database type to its generated
-// wire representation. cat is the effective catalog resolved for the call
-// (see (*Client).resolveCat); it becomes the wire CatalogName field
-// (possibly nil, when the connection is known not to support catalogs). It
-// returns nil for a nil input.
+// wire representation for CreateDatabase, always starting from a bare
+// hive_metastore.NewDatabase(). cat is the effective catalog resolved for
+// the call (see (*Client).resolveCat); it becomes the wire CatalogName
+// field (possibly nil, when the connection is known not to support
+// catalogs). It returns nil for a nil input.
 //
-// The result starts from a deep copy of db.raw (see deepCopyThrift) when db
-// was itself produced by databaseFromThrift, or from a bare
+// A create never carries the round-trip fidelity snapshot forward, even
+// when db came from databaseFromThrift: SPEC §5.4 scopes that snapshot to
+// the Alter* calls, whose job is to preserve the server's own view of an
+// existing object. Sending one object's server-assigned fields
+// (CreateTime, Privileges, and anything a future IDL bump adds) as the
+// definition of a new object would be a different thing entirely. Use
+// databaseToThriftFrom for AlterDatabase.
+func databaseToThrift(db *Database, cat *string) *hive_metastore.Database {
+	if db == nil {
+		return nil
+	}
+	return fillDatabase(hive_metastore.NewDatabase(), db, cat)
+}
+
+// databaseToThriftFrom is databaseToThrift for AlterDatabase: the result
+// starts from a deep copy of db.raw (see deepCopyThrift) when db was itself
+// produced by databaseFromThrift, or from a bare
 // hive_metastore.NewDatabase() otherwise (rawDatabaseOrNew handles both),
 // so a field raw carries but this package's Database does not model --
 // Privileges, Type, ConnectorName, RemoteDbname, ManagedLocationUri, and
 // any field a future IDL bump adds -- survives GetDatabase -> AlterDatabase
 // unchanged (SPEC §5.4 "Round-trip fidelity"). Every field the exported
-// Database type does model is then unconditionally overwritten below,
-// exactly as before raw existed.
+// Database type does model is then unconditionally overwritten, exactly as
+// for a create.
 //
 // db.CreateTime is not one of those overwritten fields: it is read-only
 // (see Database's doc comment), assigned by the server itself, so this
-// never writes a CreateTime of its own. A db with no raw snapshot (e.g.
-// CreateDatabase's own db, which is never the product of databaseFromThrift)
-// therefore still always leaves the wire CreateTime field absent, exactly
-// as before raw existed; a db that does carry one (e.g. AlterDatabase's,
-// when the caller passed back a Database GetDatabase itself returned)
-// echoes that original, server-assigned value forward instead, which is
-// harmless since the field is immutable.
-func databaseToThrift(db *Database, cat *string) *hive_metastore.Database {
+// never writes a CreateTime of its own. A db with no raw snapshot leaves
+// the wire CreateTime field absent; a db that does carry one (i.e. one
+// GetDatabase itself returned) echoes that original, server-assigned value
+// forward instead, which is harmless since the field is immutable.
+func databaseToThriftFrom(db *Database, cat *string) *hive_metastore.Database {
 	if db == nil {
 		return nil
 	}
-	out := rawDatabaseOrNew(db.raw)
+	return fillDatabase(rawDatabaseOrNew(db.raw), db, cat)
+}
+
+// fillDatabase overwrites every field the exported Database type models on
+// out, which is either a bare NewDatabase() (create) or the round-trip
+// fidelity snapshot (alter); see databaseToThrift and
+// databaseToThriftFrom.
+func fillDatabase(out *hive_metastore.Database, db *Database, cat *string) *hive_metastore.Database {
 	out.Name = db.Name
 	out.Description = db.Description
 	out.LocationUri = db.LocationURI
@@ -590,32 +610,54 @@ func tableFromThrift(t *hive_metastore.Table) *Table {
 }
 
 // tableToThrift converts the exported Table type to its generated wire
-// representation. cat is the effective catalog resolved for the call (see
-// (*Client).resolveCat); it becomes the wire CatName field (possibly nil,
-// when the connection is known not to support catalogs), taking precedence
-// over t.CatalogName (see (*Client).CreateTable, which folds a non-empty
-// t.CatalogName into the resolveCat call that produces cat). It returns nil
-// for a nil input.
+// representation for CreateTable, always starting from a bare
+// hive_metastore.NewTable(). cat is the effective catalog resolved for the
+// call (see (*Client).resolveCat); it becomes the wire CatName field
+// (possibly nil, when the connection is known not to support catalogs),
+// taking precedence over t.CatalogName (see (*Client).CreateTable, which
+// folds a non-empty t.CatalogName into the resolveCat call that produces
+// cat). It returns nil for a nil input.
 //
-// The result starts from a deep copy of t.raw (see deepCopyThrift) when t
-// was itself produced by tableFromThrift, or from a bare
-// hive_metastore.NewTable() otherwise (rawTableOrNew handles both), so a
-// field raw carries but this package's Table does not model -- Privileges,
-// RewriteEnabled, Id, TxnId, AccessType, the capability lists, and any
-// field a future IDL bump adds -- survives GetTable -> AlterTable unchanged
-// (SPEC §5.4 "Round-trip fidelity"). Every field the exported Table type
-// does model is then unconditionally overwritten below, exactly as before
-// raw existed, including the non-pointer "optional with default" fields
-// the exported Table type has no equivalent for -- OwnerType and WriteId --
-// which fall back to NewTable's defaults (PrincipalType_USER and -1)
-// instead of the Go zero value 0 when t.OwnerType is itself zero: writeId=0
-// is a real write id rather than "unassigned" (see NewTable's own IsSet
-// checks, which compare against these same defaults).
+// A create never carries the round-trip fidelity snapshot forward, even
+// when t came from tableFromThrift (a GetTable result reused as the
+// template for a new table, say): SPEC §5.4 scopes that snapshot to the
+// Alter* calls. Sending the source table's server-assigned identity --
+// Id, TxnId, WriteId, Privileges -- as the definition of a different table
+// would be a different thing entirely. Use tableToThriftFrom for
+// AlterTable.
 func tableToThrift(t *Table, cat *string) *hive_metastore.Table {
 	if t == nil {
 		return nil
 	}
-	out := rawTableOrNew(t.raw)
+	return fillTable(hive_metastore.NewTable(), t, cat)
+}
+
+// tableToThriftFrom is tableToThrift for AlterTable: the result starts from
+// a deep copy of t.raw (see deepCopyThrift) when t was itself produced by
+// tableFromThrift, or from a bare hive_metastore.NewTable() otherwise
+// (rawTableOrNew handles both), so a field raw carries but this package's
+// Table does not model -- Privileges, RewriteEnabled, Id, TxnId,
+// AccessType, the capability lists, and any field a future IDL bump adds --
+// survives GetTable -> AlterTable unchanged (SPEC §5.4 "Round-trip
+// fidelity"). Every field the exported Table type does model is then
+// unconditionally overwritten, exactly as for a create.
+func tableToThriftFrom(t *Table, cat *string) *hive_metastore.Table {
+	if t == nil {
+		return nil
+	}
+	return fillTable(rawTableOrNew(t.raw), t, cat)
+}
+
+// fillTable overwrites every field the exported Table type models on out,
+// which is either a bare NewTable() (create) or the round-trip fidelity
+// snapshot (alter); see tableToThrift and tableToThriftFrom. That includes
+// the non-pointer "optional with default" fields the exported Table type
+// has no equivalent for -- OwnerType and WriteId -- which keep NewTable's
+// defaults (PrincipalType_USER and -1) instead of falling back to the Go
+// zero value 0 when t.OwnerType is itself zero: writeId=0 is a real write
+// id rather than "unassigned" (see NewTable's own IsSet checks, which
+// compare against these same defaults).
+func fillTable(out *hive_metastore.Table, t *Table, cat *string) *hive_metastore.Table {
 	out.DbName = t.DatabaseName
 	out.TableName = t.TableName
 	out.Owner = t.Owner
@@ -680,57 +722,92 @@ func partitionsFromThrift(ps []*hive_metastore.Partition) []*Partition {
 }
 
 // partitionToThrift converts the exported Partition type to its generated
-// wire representation. cat is the effective catalog resolved for the call
-// (see (*Client).resolveCat); it becomes the wire CatName field (possibly
-// nil, when the connection is known not to support catalogs). dbName and
-// tableName are the call's own arguments (e.g. AddPartitions' dbName,
-// tableName parameters); they become the wire DbName/TableName fields
-// unless p itself already names a database or table, which then takes
-// precedence. It returns nil for a nil input.
+// wire representation for AddPartitions, always starting from a bare
+// hive_metastore.NewPartition(). cat is the effective catalog resolved for
+// the call (see (*Client).resolveCat); it becomes the wire CatName field
+// (possibly nil, when the connection is known not to support catalogs).
+// dbName and tableName are the call's own arguments (AddPartitions' dbName,
+// tableName parameters) and always become the wire DbName/TableName
+// fields: p.DatabaseName/p.TableName never override them, so a Partition
+// read from one table and added to another lands in the table the call
+// names rather than silently in the one it was read from. It returns nil
+// for a nil input.
 //
-// The result starts from a deep copy of p.raw (see deepCopyThrift) when p
-// was itself produced by partitionFromThrift, or from a bare
+// A create never carries the round-trip fidelity snapshot forward, even
+// when p came from partitionFromThrift: SPEC §5.4 scopes that snapshot to
+// the Alter* calls, so the source partition's WriteId, Privileges, and
+// stats are not offered as the definition of a new partition. WriteId
+// therefore keeps NewPartition's default of -1 ("unassigned") rather than
+// the source's own value. Use partitionToThriftFrom for AlterPartitions.
+func partitionToThrift(p *Partition, cat *string, dbName, tableName string) *hive_metastore.Partition {
+	if p == nil {
+		return nil
+	}
+	return fillPartition(hive_metastore.NewPartition(), p, cat, dbName, tableName)
+}
+
+// partitionToThriftFrom is partitionToThrift for AlterPartitions: the
+// result starts from a deep copy of p.raw (see deepCopyThrift) when p was
+// itself produced by partitionFromThrift, or from a bare
 // hive_metastore.NewPartition() otherwise (rawPartitionOrNew handles both),
 // so a field raw carries but this package's Partition does not model --
 // Privileges, WriteId, the stats fields, and any field a future IDL bump
 // adds -- survives GetPartitions -> AlterPartitions unchanged (SPEC §5.4
 // "Round-trip fidelity"). Every field the exported Partition type does
-// model is then unconditionally overwritten below, exactly as before raw
-// existed, including the non-pointer "optional with default" WriteId field
-// (which the exported Partition type has no equivalent for): it falls back
-// to NewPartition's default of -1 rather than the Go zero value 0, which is
-// a real write id rather than "unassigned" (see tableToThrift's identical
-// treatment of Table.WriteId).
-func partitionToThrift(p *Partition, cat *string, dbName, tableName string) *hive_metastore.Partition {
+// model is then unconditionally overwritten, exactly as for an add,
+// including DbName/TableName from the call's own arguments.
+func partitionToThriftFrom(p *Partition, cat *string, dbName, tableName string) *hive_metastore.Partition {
 	if p == nil {
 		return nil
 	}
-	out := rawPartitionOrNew(p.raw)
+	return fillPartition(rawPartitionOrNew(p.raw), p, cat, dbName, tableName)
+}
+
+// fillPartition overwrites every field the exported Partition type models
+// on out, which is either a bare NewPartition() (add) or the round-trip
+// fidelity snapshot (alter); see partitionToThrift and
+// partitionToThriftFrom. The non-pointer "optional with default" WriteId
+// field (which the exported Partition type has no equivalent for) is left
+// as out carries it: NewPartition's default of -1 for an add, the server's
+// own value for an alter -- 0 would be a real write id rather than
+// "unassigned" (see fillTable's identical treatment of Table.WriteId).
+func fillPartition(out *hive_metastore.Partition, p *Partition, cat *string, dbName, tableName string) *hive_metastore.Partition {
 	out.DbName = dbName
 	out.TableName = tableName
 	out.Values = copyStrings(p.Values)
 	out.CreateTime = unix32FromTime(p.CreateTime)
 	out.Parameters = copyStringMap(p.Parameters)
 	out.CatName = cat
-	if p.DatabaseName != "" {
-		out.DbName = p.DatabaseName
-	}
-	if p.TableName != "" {
-		out.TableName = p.TableName
-	}
 	out.Sd = storageToThrift(p.Storage, out.Sd)
 	return out
 }
 
-// partitionsToThrift converts a slice of the exported Partition type. It
-// returns nil for a nil or empty input (see copyStringMap).
+// partitionsToThrift converts a slice of the exported Partition type for
+// AddPartitions (see partitionToThrift). It returns nil for a nil or empty
+// input (see copyStringMap).
 func partitionsToThrift(ps []*Partition, cat *string, dbName, tableName string) []*hive_metastore.Partition {
+	return partitionsToThriftWith(partitionToThrift, ps, cat, dbName, tableName)
+}
+
+// partitionsToThriftFrom converts a slice of the exported Partition type
+// for AlterPartitions (see partitionToThriftFrom). It returns nil for a nil
+// or empty input (see copyStringMap).
+func partitionsToThriftFrom(ps []*Partition, cat *string, dbName, tableName string) []*hive_metastore.Partition {
+	return partitionsToThriftWith(partitionToThriftFrom, ps, cat, dbName, tableName)
+}
+
+// partitionsToThriftWith maps conv over ps, the one line partitionsToThrift
+// and partitionsToThriftFrom would otherwise each spell out.
+func partitionsToThriftWith(
+	conv func(*Partition, *string, string, string) *hive_metastore.Partition,
+	ps []*Partition, cat *string, dbName, tableName string,
+) []*hive_metastore.Partition {
 	if len(ps) == 0 {
 		return nil
 	}
 	out := make([]*hive_metastore.Partition, len(ps))
 	for i, p := range ps {
-		out[i] = partitionToThrift(p, cat, dbName, tableName)
+		out[i] = conv(p, cat, dbName, tableName)
 	}
 	return out
 }

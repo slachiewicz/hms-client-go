@@ -119,7 +119,7 @@ func (c *Client) AlterTable(ctx context.Context, dbName, tableName string, newTa
 		if err != nil {
 			return err
 		}
-		return cn.alterTable(ctx, qualifyDBName(cat, dbName), tableName, tableToThrift(newTable, cat))
+		return cn.alterTable(ctx, qualifyDBName(cat, dbName), tableName, tableToThriftFrom(newTable, cat))
 	})
 }
 

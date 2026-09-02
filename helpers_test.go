@@ -18,3 +18,7 @@ func mustNew(t *testing.T, uri string, opts ...hms.Option) *hms.Client {
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
+
+// ptrTo returns a pointer to v, for the optional fields of the generated
+// Thrift structs a test seeds directly into the fake server's store.
+func ptrTo[T any](v T) *T { return &v }

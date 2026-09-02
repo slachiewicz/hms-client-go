@@ -139,6 +139,53 @@ func TestAlterTable_PreservesUnmodelledFields(t *testing.T) {
 	assert.Contains(t, stored.Privileges.UserPrivileges, "alice")
 }
 
+// TestCreateTable_DoesNotCarrySnapshot is the create-path counterpart to
+// TestAlterTable_PreservesUnmodelledFields: the round-trip fidelity
+// snapshot is scoped to the Alter* calls (SPEC §5.4), so a Table fetched
+// with GetTable and then handed to CreateTable as the template for a new
+// table must not carry the source table's server-assigned identity -- Id,
+// TxnId, WriteId, Privileges -- onto the wire as the definition of the new
+// one.
+func TestCreateTable_DoesNotCarrySnapshot(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	c := mustNew(t, srv.URI())
+	ctx := context.Background()
+
+	catName := "hive"
+	id := int64(7)
+	txnID := int64(99)
+	seed := hive_metastore.NewTable()
+	seed.DbName = "db"
+	seed.TableName = "source"
+	seed.CatName = &catName
+	seed.Parameters = map[string]string{"x": "1"}
+	seed.ID = &id
+	seed.TxnId = &txnID
+	seed.WriteId = 5
+	seed.Privileges = &hive_metastore.PrincipalPrivilegeSet{
+		UserPrivileges: map[string][]*hive_metastore.PrivilegeGrantInfo{
+			"alice": {{Privilege: "SELECT"}},
+		},
+	}
+	srv.SeedTable(seed)
+
+	got, err := c.GetTable(ctx, "db", "source")
+	require.NoError(t, err)
+
+	got.TableName = "copy"
+	require.NoError(t, c.CreateTable(ctx, got))
+
+	sent, ok := srv.LastArgs("create_table").(*hive_metastore.Table)
+	require.True(t, ok, "create_table args have unexpected type %T", srv.LastArgs("create_table"))
+	assert.Equal(t, "copy", sent.TableName)
+	assert.Equal(t, "1", sent.Parameters["x"], "a modelled field still travels")
+	assert.Nil(t, sent.ID, "the source table's id must not define the new table")
+	assert.Nil(t, sent.TxnId, "the source table's transaction id must not define the new table")
+	assert.Nil(t, sent.Privileges, "the source table's privileges must not define the new table")
+	assert.Equal(t, int64(-1), sent.WriteId, "a created table's write id is unassigned, not the source's")
+}
+
 func TestGetTable_NotFound(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

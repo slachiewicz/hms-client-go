@@ -99,6 +99,14 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 // chunks already committed on the server. With ifNotExists true, a
 // partition whose values already exist is silently skipped; otherwise it
 // is reported as ErrAlreadyExists.
+//
+// Every partition lands in dbName.tableName: a Partition's own
+// DatabaseName and TableName are ignored, so one read from another table
+// (or another database) is added where this call says rather than where it
+// came from. Such a partition also arrives fresh -- the round-trip
+// fidelity snapshot is scoped to AlterPartitions (SPEC §5.4), so the
+// source partition's server-assigned write id, privileges, and statistics
+// are not offered as the definition of the new one.
 func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, ifNotExists bool, opts ...CatalogOption) error {
 	return c.call(ctx, "add_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
@@ -143,9 +151,15 @@ func newAlterPartitionsRequest(dbName, tableName string, cat *string, partitions
 }
 
 // AlterPartitions replaces existing partitions of the table named tableName
-// in database dbName, matched by their Values. Against a server lacking
-// alter_partitions_req (Hive 2.3 and 3.x), it degrades to the legacy
-// alter_partitions RPC (SPEC §2.3 Rule 3).
+// in database dbName, matched by their Values. As in AddPartitions, a
+// Partition's own DatabaseName and TableName are ignored: dbName and
+// tableName name the table being altered. A partition GetPartitions itself
+// returned keeps every field this package does not model -- its write id,
+// privileges, and statistics -- instead of having them reset (SPEC §5.4
+// "Round-trip fidelity").
+//
+// Against a server lacking alter_partitions_req (Hive 2.3 and 3.x), it
+// degrades to the legacy alter_partitions RPC (SPEC §2.3 Rule 3).
 func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, opts ...CatalogOption) error {
 	return c.call(ctx, "alter_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
@@ -154,12 +168,12 @@ func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, 
 		}
 		return cn.tryReq(ctx, "alter_partitions_req",
 			func(ctx context.Context) error {
-				req := newAlterPartitionsRequest(dbName, tableName, cat, partitionsToThrift(partitions, cat, dbName, tableName))
+				req := newAlterPartitionsRequest(dbName, tableName, cat, partitionsToThriftFrom(partitions, cat, dbName, tableName))
 				_, err := cn.alterPartitionsReq(ctx, req)
 				return err
 			},
 			func(ctx context.Context) error {
-				return cn.alterPartitions(ctx, qualifyDBName(cat, dbName), tableName, partitionsToThrift(partitions, cat, dbName, tableName))
+				return cn.alterPartitions(ctx, qualifyDBName(cat, dbName), tableName, partitionsToThriftFrom(partitions, cat, dbName, tableName))
 			},
 		)
 	})

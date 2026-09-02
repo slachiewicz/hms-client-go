@@ -856,7 +856,7 @@ func (c *Client) AlterDatabase(ctx context.Context, name string, db *Database, o
 		if err != nil {
 			return err
 		}
-		return cn.alterDatabase(ctx, qualifyDBName(cat, name), databaseToThrift(db, cat))
+		return cn.alterDatabase(ctx, qualifyDBName(cat, name), databaseToThriftFrom(db, cat))
 	})
 }
 

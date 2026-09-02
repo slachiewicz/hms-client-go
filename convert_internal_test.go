@@ -88,9 +88,9 @@ func TestPartitionToThrift_DefaultsWriteId(t *testing.T) {
 }
 
 // TestTableRoundTrip_PreservesUnmodelledFields covers G3, round-trip
-// fidelity (SPEC §5.4): before Table.raw existed, tableToThrift always
+// fidelity (SPEC §5.4): before Table.raw existed, the alter path too
 // started from a bare hive_metastore.NewTable(), so a
-// tableFromThrift -> tableToThrift round trip silently dropped every field
+// tableFromThrift -> tableToThriftFrom round trip silently dropped every field
 // hms.Table has no field for -- Privileges, RewriteEnabled, Id, TxnId,
 // AccessType, the capability lists, Temporary, CreationMetadata, and
 // SkewedInfo's names/values -- exactly what a GetTable -> AlterTable call
@@ -171,15 +171,15 @@ func TestTableRoundTrip_PreservesUnmodelledFields(t *testing.T) {
 	txnID := int64(99)
 	seed.TxnId = &txnID
 
-	got := tableToThrift(tableFromThrift(seed), ptr("hive"))
+	got := tableToThriftFrom(tableFromThrift(seed), ptr("hive"))
 	assert.Equal(t, seed, got)
 }
 
 // TestPartitionRoundTrip_PreservesUnmodelledFields is
 // TestTableRoundTrip_PreservesUnmodelledFields's counterpart for Partition:
-// before Partition.raw existed, partitionToThrift always started from a
+// before Partition.raw existed, partitionToThriftFrom always started from a
 // bare hive_metastore.NewPartition(), so a
-// partitionFromThrift -> partitionToThrift round trip silently dropped
+// partitionFromThrift -> partitionToThriftFrom round trip silently dropped
 // every field hms.Partition has no field for -- LastAccessTime, Privileges,
 // WriteId, IsStatsCompliant, ColStats, FileMetadata, and (one level down,
 // inside Sd) StorageDescriptor.SerdeInfo's Description/SerializerClass/
@@ -227,7 +227,7 @@ func TestPartitionRoundTrip_PreservesUnmodelledFields(t *testing.T) {
 		StatsObj: []*hive_metastore.ColumnStatisticsObj{},
 	}
 
-	got := partitionToThrift(partitionFromThrift(seed), ptr("hive"), "db", "t")
+	got := partitionToThriftFrom(partitionFromThrift(seed), ptr("hive"), "db", "t")
 	assert.Equal(t, seed, got)
 }
 
