@@ -40,6 +40,7 @@ Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `r
 | `get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req` | Y | Y | Y | Y |
 | `get_database`, `get_all_databases`, `create_database`, `drop_database`, `alter_database`, `get_all_tables`, `create_table`, `alter_table`, `drop_table`, `get_partitions`, `get_partition_names`, `alter_partitions`, `drop_partition`, `get_partitions_by_names`, `get_partitions_by_filter`, `get_partition_names_ps`, `get_config_value` | Y | Y | Y | Y |
 | `set_ugi` (caller identity over binary NOSASL, §3.1) | Y | Y | Y | Y |
+| `get_current_notificationEventId`, `get_next_notification` (§5.7) | Y | Y | Y | Y |
 | `get_table`, `get_table_objects_by_name` (legacy) | Y | Y | - | **no** |
 | `get_catalogs`, `get_catalog`, `create_catalog`, `drop_catalog` | - | Y | Y | Y |
 | `catName` fields on `Database`, `Table`, `Partition` and `*Request` structs | - | Y | Y | Y |
@@ -344,7 +345,7 @@ func (c *Client) GetNextNotifications(ctx context.Context, lastEventID int64, ma
 
 `CurrentNotificationID` wraps `get_current_notificationEventId`. `GetNextNotifications` wraps `get_next_notification`, requesting `NotificationEventRequest{LastEvent: lastEventID}` plus `MaxEvents` (a `*int32`, set only when `max > 0`, clamped rather than wrapped) and `EventTypeList` (set only when `eventTypes` is non-empty); `eventTypes` nil or empty means every event type. Both RPCs exist on 2.3+.
 
-`NotificationEventRequest`'s optional filter fields -- `EventTypeList`, `EventTypeSkipList`, `CatName`, `DbName`, `TableNames` -- are a Hive 4.x-only addition to the IDL: verified against `hive_metastore.thrift` at `rel/release-2.3.9` and `rel/release-3.1.3`, where `NotificationEventRequest` declares only `lastEvent` and `maxEvents`. A 2.3/3.x server's Thrift decoder silently ignores a field it does not recognize rather than rejecting the request, so `GetNextNotifications` sends `EventTypeList` unconditionally when `eventTypes` is non-empty but additionally filters the response by event type client-side, so `eventTypes` has the same effect on every supported version instead of silently becoming a no-op pre-4.0. `NotificationEvent.CatName` is the same 4.x-only addition on the response side; a nil wire `CatName` maps to `NotificationEvent.CatalogName` `"hive"`.
+`NotificationEventRequest`'s optional filter fields -- `EventTypeList`, `EventTypeSkipList`, `CatName`, `DbName`, `TableNames` -- are a Hive 4.x-only addition to the IDL: verified against `hive_metastore.thrift` at `rel/release-2.3.9` and `rel/release-3.1.3`, where `NotificationEventRequest` declares only `lastEvent` and `maxEvents`. A 2.3/3.x server's Thrift decoder silently ignores a field it does not recognize rather than rejecting the request, so `GetNextNotifications` sends `EventTypeList` unconditionally when `eventTypes` is non-empty but additionally filters the response by event type client-side, so `eventTypes` has the same effect on every supported version instead of silently becoming a no-op pre-4.0. On the response side `NotificationEvent.catName` exists from Hive 3.x (field 8 at `rel/release-3.1.3`) and is absent only on 2.3; a nil wire `CatName` maps to `NotificationEvent.CatalogName` `"hive"`.
 
 ### 5.8. Column Statistics
 
