@@ -36,31 +36,51 @@ type saslPlain struct {
 	open     bool
 }
 
-// NewSaslPlain wraps inner in a thrift.TTransport that authenticates with
-// SASL PLAIN (RFC 4616) on Open, using the Java TSaslTransport wire format:
-// every negotiation message is a 1 byte status, a 4 byte big-endian length,
-// and a payload; after the handshake completes, every data frame is a 4
-// byte big-endian length and a payload with no status byte.
-func NewSaslPlain(inner thrift.TTransport, user, password string) thrift.TTransport {
+// SaslTransport is a thrift.TTransport that also exposes the SASL PLAIN
+// handshake so a caller that already has a context in hand (see
+// DialBinary) can bound it, instead of Open()'s unconditional
+// context.Background().
+type SaslTransport interface {
+	thrift.TTransport
+	// OpenContext performs the same handshake as Open, but threads ctx
+	// through to every Flush the handshake issues, so a deadline or
+	// cancellation on ctx interrupts the handshake's writes.
+	OpenContext(ctx context.Context) error
+}
+
+// NewSaslPlain wraps inner in a SaslTransport that authenticates with SASL
+// PLAIN (RFC 4616) on Open, using the Java TSaslTransport wire format: every
+// negotiation message is a 1 byte status, a 4 byte big-endian length, and a
+// payload; after the handshake completes, every data frame is a 4 byte
+// big-endian length and a payload with no status byte.
+func NewSaslPlain(inner thrift.TTransport, user, password string) SaslTransport {
 	return &saslPlain{inner: inner, user: user, password: password}
 }
 
-// Open opens the inner transport if needed, then performs the SASL PLAIN
-// handshake: START with mechanism "PLAIN", then OK with the RFC 4616
+// Open performs the SASL PLAIN handshake with context.Background(),
+// satisfying thrift.TTransport. Callers that hold a context should call
+// OpenContext instead.
+func (s *saslPlain) Open() error {
+	return s.OpenContext(context.Background())
+}
+
+// OpenContext opens the inner transport if needed, then performs the SASL
+// PLAIN handshake: START with mechanism "PLAIN", then OK with the RFC 4616
 // initial response. It returns an error describing the server's rejection
 // message on BAD or ERROR, and propagates any inner Open or I/O failure
-// unwrapped.
-func (s *saslPlain) Open() error {
+// (including ctx cancellation, once the caller has arranged for that to
+// unblock the underlying I/O) unwrapped.
+func (s *saslPlain) OpenContext(ctx context.Context) error {
 	if !s.inner.IsOpen() {
 		if err := s.inner.Open(); err != nil {
 			return err
 		}
 	}
-	if err := s.sendNegotiate(saslStart, []byte("PLAIN")); err != nil {
+	if err := s.sendNegotiate(ctx, saslStart, []byte("PLAIN")); err != nil {
 		return err
 	}
 	initial := []byte("\x00" + s.user + "\x00" + s.password)
-	if err := s.sendNegotiate(saslOK, initial); err != nil {
+	if err := s.sendNegotiate(ctx, saslOK, initial); err != nil {
 		return err
 	}
 	status, payload, err := s.recvNegotiate()
@@ -79,8 +99,8 @@ func (s *saslPlain) Open() error {
 }
 
 // sendNegotiate writes one negotiation frame (status, length, payload) to
-// the inner transport and flushes it.
-func (s *saslPlain) sendNegotiate(status byte, payload []byte) error {
+// the inner transport and flushes it with ctx.
+func (s *saslPlain) sendNegotiate(ctx context.Context, status byte, payload []byte) error {
 	n := len(payload)
 	// gosec G115: len() never returns < 0, but the check is defensive.
 	if n < 0 || n > saslMaxFrame {
@@ -94,7 +114,7 @@ func (s *saslPlain) sendNegotiate(status byte, payload []byte) error {
 	if _, err := s.inner.Write(payload); err != nil {
 		return err
 	}
-	return s.inner.Flush(context.Background())
+	return s.inner.Flush(ctx)
 }
 
 // recvNegotiate reads one negotiation frame (status, length, payload) from

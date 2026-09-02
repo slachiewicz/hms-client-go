@@ -221,3 +221,73 @@ func TestDialBinary_SaslPlainRejectedFailsDial(t *testing.T) {
 	assert.Contains(t, err.Error(), "denied")
 	require.NoError(t, <-errs)
 }
+
+// startSilentServer listens on a loopback port and accepts connections but
+// never reads or writes anything on them, so a SASL PLAIN handshake against
+// it blocks forever on recvNegotiate's read of the server's reply. It is
+// used to prove DialBinary's handshake actually respects ctx/Timeout,
+// covering the fix for the handshake previously running on the raw conn
+// with no deadline at all (SocketTimeout is 0 and deadlineShield no-ops)
+// before ContextClient exists to own it.
+func startSilentServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}()
+
+	return ln.Addr().String()
+}
+
+// TestDialBinary_SaslHandshakeRespectsContextDeadline proves a ctx deadline
+// bounds the SASL PLAIN handshake itself, not just later RPCs.
+func TestDialBinary_SaslHandshakeRespectsContextDeadline(t *testing.T) {
+	t.Parallel()
+	addr := startSilentServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout:       5 * time.Second,
+		PlainUser:     "alice",
+		PlainPassword: "s3cret",
+	})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+
+	var netErr net.Error
+	isTimeout := errors.As(err, &netErr) && netErr.Timeout()
+	assert.True(t, errors.Is(err, context.DeadlineExceeded) || isTimeout,
+		"want error wrapping context.DeadlineExceeded or a net timeout, got %v", err)
+}
+
+// TestDialBinary_SaslHandshakeRespectsTimeoutFallback is
+// TestDialBinary_SaslHandshakeRespectsContextDeadline's counterpart for
+// BinaryConfig.Timeout, when ctx carries no deadline of its own.
+func TestDialBinary_SaslHandshakeRespectsTimeoutFallback(t *testing.T) {
+	t.Parallel()
+	addr := startSilentServer(t)
+
+	start := time.Now()
+	_, err := transport.DialBinary(context.Background(), addr, transport.BinaryConfig{
+		Timeout:       100 * time.Millisecond,
+		PlainUser:     "alice",
+		PlainPassword: "s3cret",
+	})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+
+	var netErr net.Error
+	isTimeout := errors.As(err, &netErr) && netErr.Timeout()
+	assert.True(t, errors.Is(err, context.DeadlineExceeded) || isTimeout,
+		"want error wrapping context.DeadlineExceeded or a net timeout, got %v", err)
+}

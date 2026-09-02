@@ -62,6 +62,15 @@ func (deadlineShield) SetWriteDeadline(time.Time) error { return nil }
 // handshake (see NewSaslPlain) before wrapping the transport for buffered
 // I/O; on handshake failure the raw connection is closed and the error is
 // returned unwrapped.
+//
+// The handshake runs before ContextClient exists to own raw's deadlines
+// (see deadlineShield), so DialBinary binds ctx to raw directly for the
+// handshake's duration: it sets a deadline from ctx.Deadline() (falling
+// back to time.Now().Add(cfg.Timeout) when cfg.Timeout > 0), and arranges
+// for ctx cancellation to unblock any in-flight handshake I/O by moving
+// that deadline to now, exactly as ContextClient.Call does for every later
+// RPC. The deadline is cleared again once the handshake returns, so
+// ContextClient starts from a clean slate.
 func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, error) {
 	d := net.Dialer{Timeout: cfg.Timeout}
 	raw, err := d.DialContext(ctx, "tcp", hostPort)
@@ -75,11 +84,32 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.Timeout}
 	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{raw}, tcfg)
 	if cfg.PlainUser != "" {
-		trans = NewSaslPlain(trans, cfg.PlainUser, cfg.PlainPassword)
-		if err := trans.Open(); err != nil {
+		sasl := NewSaslPlain(trans, cfg.PlainUser, cfg.PlainPassword)
+
+		deadline, ok := ctx.Deadline()
+		if !ok && cfg.Timeout > 0 {
+			deadline = time.Now().Add(cfg.Timeout)
+		}
+		if !deadline.IsZero() {
+			_ = raw.SetDeadline(deadline)
+		}
+		stop := context.AfterFunc(ctx, func() { _ = raw.SetDeadline(time.Now()) })
+		err := sasl.OpenContext(ctx)
+		stop()
+		_ = raw.SetDeadline(time.Time{})
+		if err != nil {
 			_ = raw.Close()
+			if ctx.Err() != nil {
+				// Report the context error so callers see
+				// Canceled/DeadlineExceeded rather than the net.Error
+				// timeout the deadline flip above produced, mirroring
+				// ContextClient.Call's identical override for every later
+				// RPC.
+				return nil, ctx.Err()
+			}
 			return nil, err
 		}
+		trans = sasl
 	}
 	trans = thrift.NewTBufferedTransport(trans, bufferSize)
 	proto := thrift.NewTBinaryProtocolConf(trans, tcfg)
