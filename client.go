@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -120,7 +121,7 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		}
 		cn, err := newConn(ctx, eps[idx], cfg)
 		if err != nil {
-			cluster.MarkFailed(idx)
+			c.markFailed(idx, "dial")
 			lastErr = err
 			continue
 		}
@@ -139,6 +140,48 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	go c.recoveryProbe(probeCtx)
 
 	return c, nil
+}
+
+// markFailed marks endpoint idx failed on the cluster and logs it at
+// slog.LevelInfo (SPEC §5.10), from every call site that observes a failure
+// worth cooling an endpoint down for: New's initial dial loop and do's own
+// retry loop.
+func (c *Client) markFailed(idx int, reason string) {
+	c.cluster.MarkFailed(idx)
+	c.cfg.logger.Info("endpoint marked failed", "endpoint", endpointURI(c.endpoints[idx]), "reason", reason)
+}
+
+// markHealthy marks endpoint idx healthy on the cluster and logs it at
+// slog.LevelInfo (SPEC §5.10), from every call site that observes an
+// endpoint working again: do's own success path and probeCooling's
+// successful getStatus probe.
+func (c *Client) markHealthy(idx int, reason string) {
+	c.cluster.MarkHealthy(idx)
+	c.cfg.logger.Info("endpoint marked healthy", "endpoint", endpointURI(c.endpoints[idx]), "reason", reason)
+}
+
+// observe invokes the configured WithRPCObserver function, if any, with the
+// completed attempt's RPCInfo (SPEC §5.10). It runs synchronously on do's
+// own goroutine, as the observer contract requires; a panic escaping f is
+// recovered and logged at slog.LevelError rather than propagated to do's
+// caller, so a misbehaving observer cannot fail an otherwise successful
+// RPC.
+func (c *Client) observe(op string, idx, attempt int, dur time.Duration, err error) {
+	if c.cfg.observer == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			c.cfg.logger.Error("observer panicked", "method", op, "recovered", r)
+		}
+	}()
+	c.cfg.observer(RPCInfo{
+		Method:   op,
+		Endpoint: endpointURI(c.endpoints[idx]),
+		Attempt:  attempt,
+		Duration: dur,
+		Err:      err,
+	})
 }
 
 // Close releases every pooled connection, stops the recovery-probe
@@ -167,8 +210,8 @@ func (c *Client) Close() error {
 	close(c.closeCh)
 
 	var errs []error
-	for _, p := range c.pools {
-		drainPool(p, &errs)
+	for idx, p := range c.pools {
+		drainPool(p, &errs, c.cfg.logger, endpointURI(c.endpoints[idx]))
 	}
 	c.mu.Unlock()
 
@@ -182,8 +225,9 @@ func (c *Client) Close() error {
 }
 
 // drainPool closes every conn currently idle in p, appending any close
-// error to errs. Client.mu must be held.
-func drainPool(p *endpointPool, errs *[]error) {
+// error to errs and logging each close at slog.LevelDebug against ep.
+// Client.mu must be held.
+func drainPool(p *endpointPool, errs *[]error, logger *slog.Logger, ep string) {
 	for {
 		select {
 		case cn := <-p.idle:
@@ -191,6 +235,7 @@ func drainPool(p *endpointPool, errs *[]error) {
 				*errs = append(*errs, err)
 			}
 			p.live.Add(-1)
+			logger.Debug("conn closed", "endpoint", ep)
 		default:
 			return
 		}
@@ -255,17 +300,20 @@ func (c *Client) release(idx int, cn *conn) {
 		c.mu.Unlock()
 		_ = cn.close()
 		p.live.Add(-1)
+		c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "client closed")
 		return
 	}
 	select {
 	case p.idle <- cn:
 		c.mu.Unlock()
+		c.cfg.logger.Debug("conn released", "endpoint", endpointURI(c.endpoints[idx]))
 		return
 	default:
 	}
 	c.mu.Unlock()
 	_ = cn.close()
 	p.live.Add(-1)
+	c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "pool full")
 }
 
 // discard closes cn without returning it to endpoint idx's pool, for use
@@ -274,6 +322,7 @@ func (c *Client) release(idx int, cn *conn) {
 func (c *Client) discard(idx int, cn *conn) {
 	_ = cn.close()
 	c.pools[idx].live.Add(-1)
+	c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "unavailable")
 }
 
 // call runs fn as a non-idempotent RPC (create_*, add_partitions*, drop_*,
@@ -320,8 +369,18 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 // Attempts are bounded by cfg.maxRetries (clamped to at least 1 by
 // config.clamp). When every endpoint is cooling, do returns ErrUnavailable
 // joined with the last error observed.
+//
+// Every time fn actually runs, the WithRPCObserver function (if any) is
+// invoked once, synchronously, with that attempt's RPCInfo -- Attempt is
+// 1-based and counts only attempts that reached fn, not acquire/dial
+// failures that never called it (SPEC §5.10); see observe. A dial/acquire
+// failure and a retry decision are logged at slog.LevelDebug through
+// WithLogger's logger; the endpoint transitions this loop drives (marked
+// failed, marked healthy) are logged at slog.LevelInfo by markFailed and
+// markHealthy themselves.
 func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx context.Context, cn *conn) error) error {
 	var last error
+	rpcAttempt := 0
 	for attempt := 0; attempt < c.cfg.maxRetries; attempt++ {
 		idx, ok := c.cluster.Pick()
 		if !ok {
@@ -339,23 +398,29 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 				// it.
 				return wrapError(op, err)
 			}
-			c.cluster.MarkFailed(idx)
+			c.markFailed(idx, "dial")
 			last = err
+			c.cfg.logger.Debug("retrying on next endpoint", "method", op, "endpoint", endpointURI(c.endpoints[idx]), "err", err)
 			continue // dial failures are always retryable
 		}
 
+		rpcAttempt++
+		start := time.Now()
 		err = fn(ctx, cn)
+		c.observe(op, idx, rpcAttempt, time.Since(start), err)
+
 		if err == nil {
 			c.release(idx, cn)
-			c.cluster.MarkHealthy(idx)
+			c.markHealthy(idx, op)
 			return nil
 		}
 		if errors.Is(classify(err), ErrUnavailable) {
 			c.discard(idx, cn)
 			if ctx.Err() == nil {
-				c.cluster.MarkFailed(idx)
+				c.markFailed(idx, op)
 				last = err
 				if idempotent {
+					c.cfg.logger.Debug("retrying on next endpoint", "method", op, "endpoint", endpointURI(c.endpoints[idx]), "err", err)
 					continue
 				}
 			}
@@ -390,18 +455,24 @@ func (c *Client) recoveryProbe(ctx context.Context) {
 // marks that endpoint healthy and hands the freshly dialed conn to its
 // pool (or closes it if the pool is already full or the client has been
 // closed in the meantime); a failed probe leaves the endpoint cooling and
-// closes the conn, if one was even dialed.
+// closes the conn, if one was even dialed. Every probe's outcome is logged
+// at slog.LevelDebug (SPEC §5.10); a successful one additionally gets
+// markHealthy's slog.LevelInfo "endpoint marked healthy" log.
 func (c *Client) probeCooling(ctx context.Context) {
 	for _, idx := range c.cluster.Cooling() {
+		ep := endpointURI(c.endpoints[idx])
 		cn, err := newConn(ctx, c.endpoints[idx], &c.cfg)
 		if err != nil {
+			c.cfg.logger.Debug("probe failed", "endpoint", ep, "err", err)
 			continue
 		}
 		if _, err := cn.getStatus(ctx); err != nil {
 			_ = cn.close()
+			c.cfg.logger.Debug("probe failed", "endpoint", ep, "err", err)
 			continue
 		}
-		c.cluster.MarkHealthy(idx)
+		c.cfg.logger.Debug("probe succeeded", "endpoint", ep)
+		c.markHealthy(idx, "probe")
 
 		p := c.pools[idx]
 		c.mu.Lock()

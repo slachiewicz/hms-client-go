@@ -71,6 +71,7 @@ func Message(err error) string {
 		txnAborted *hive_metastore.TxnAbortedException
 		txnOpen    *hive_metastore.TxnOpenException
 		noSuchLock *hive_metastore.NoSuchLockException
+		cfgSec     *hive_metastore.ConfigValSecurityException
 		appErr     thrift.TApplicationException
 	)
 	switch {
@@ -94,6 +95,8 @@ func Message(err error) string {
 		return txnOpen.Message
 	case errors.As(err, &noSuchLock):
 		return noSuchLock.Message
+	case errors.As(err, &cfgSec):
+		return cfgSec.Message
 	case errors.As(err, &appErr):
 		return appErr.Error()
 	default:
@@ -146,6 +149,7 @@ func classify(err error) error {
 		txnAborted *hive_metastore.TxnAbortedException
 		txnOpen    *hive_metastore.TxnOpenException
 		noSuchLock *hive_metastore.NoSuchLockException
+		cfgSec     *hive_metastore.ConfigValSecurityException
 		appErr     thrift.TApplicationException
 		transport  thrift.TTransportException
 		netErr     net.Error
@@ -182,6 +186,12 @@ func classify(err error) error {
 	case errors.As(err, &noSuchTxn), errors.As(err, &noSuchLock):
 		return ErrNotFound
 	case errors.As(err, &txnAborted), errors.As(err, &txnOpen):
+		return ErrInvalidOperation
+	// ConfigValSecurityException (SPEC §7): get_config_value rejects a key
+	// outside the hive/mapred/hdfs namespaces it treats as safe to
+	// expose. That is a caller mistake about which key it asked for, the
+	// same shape as InvalidOperationException above.
+	case errors.As(err, &cfgSec):
 		return ErrInvalidOperation
 	case isUnknownMethod(err):
 		return ErrNotSupported

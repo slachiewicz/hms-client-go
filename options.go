@@ -2,6 +2,7 @@ package hms
 
 import (
 	"crypto/tls"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -50,6 +51,14 @@ type config struct {
 	krbConf      string
 
 	tlsConfig *tls.Config
+
+	// logger and observer back WithLogger and WithRPCObserver (SPEC
+	// §5.10). logger is never nil: newConfig seeds it with a discarding
+	// handler, and WithLogger itself substitutes the same default for a
+	// nil *slog.Logger, so every call site can log through c.cfg.logger
+	// unconditionally. observer is nil unless WithRPCObserver was called.
+	logger   *slog.Logger
+	observer func(RPCInfo)
 }
 
 // wantsSetUgi reports whether newConn should issue set_ugi once a binary
@@ -72,6 +81,7 @@ func newConfig() *config {
 		poolSize:      defaultPoolSize,
 		probeInterval: defaultProbeInterval,
 		chunkSize:     defaultChunkSize,
+		logger:        slog.New(slog.DiscardHandler),
 	}
 }
 

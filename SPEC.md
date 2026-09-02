@@ -509,7 +509,7 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `TxnAbortedException`, `TxnOpenException` (§5.9) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 | Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4), `TApplicationException` in the frame-desync class (`BAD_SEQUENCE_ID`, `INVALID_MESSAGE_TYPE_EXCEPTION`, `PROTOCOL_ERROR`, `WRONG_METHOD_NAME`) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
 | `TApplicationException(UNKNOWN_METHOD)` with no fallback, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |
-| `ConfigValSecurityException` (`get_config_value` on a key not beginning with `hive`, `mapred`, or `hdfs`) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` — target mapping; **planned for 1.0**, `classify` does not special-case this exception type today (it falls through to `hms.ErrMeta`) |
+| `ConfigValSecurityException` (`get_config_value` on a key not beginning with `hive`, `mapred`, or `hdfs`) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 
 `DropDatabase` on Hive 3.1 additionally maps a bare `MetaException(java.lang.NullPointerException)` from `drop_database` to `hms.ErrNotFound`; see Appendix A.
 

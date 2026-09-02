@@ -104,8 +104,19 @@ type conn struct {
 // newConn dials ep and binds every generated RPC method this client uses
 // into cn's func fields. The generated ThriftHiveMetastoreClient (g below)
 // is local to this function and is never stored, per AGENTS.md invariant
-// #5.
-func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, error) {
+// #5. The outcome (success or failure, including a set_ugi failure that
+// closes the conn again below) is logged at slog.LevelDebug against ep's
+// URI (SPEC §5.10).
+func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *conn, outErr error) {
+	uri := endpointURI(ep)
+	defer func() {
+		if outErr != nil {
+			cfg.logger.Debug("dial failed", "endpoint", uri, "err", outErr)
+		} else {
+			cfg.logger.Debug("dial succeeded", "endpoint", uri)
+		}
+	}()
+
 	var tc *transport.Conn
 	var err error
 	switch ep.Scheme {
