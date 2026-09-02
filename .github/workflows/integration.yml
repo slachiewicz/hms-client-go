@@ -52,11 +52,27 @@ jobs:
 
       - name: Pull the Hive 2.3.9 image, or build it if unpublished (hive-2.3.9 only)
         if: matrix.build
-        run: |
-          # Published on demand by the hive-2.3.9-image workflow. Until the
-          # first publish (or if Docker Hub is unreachable) build it here.
-          docker pull "${{ matrix.image }}" || \
-            docker build -t "${{ matrix.image }}" test/docker/hive-2.3.9
+        id: pull
+        continue-on-error: true
+        run: docker pull "${{ matrix.image }}"
+
+      - uses: docker/setup-buildx-action@v4
+        if: matrix.build && steps.pull.outcome == 'failure'
+
+      - name: Build the Hive 2.3.9 image with layer cache (hive-2.3.9 only)
+        if: matrix.build && steps.pull.outcome == 'failure'
+        uses: docker/build-push-action@v7
+        with:
+          context: test/docker/hive-2.3.9
+          load: true
+          push: false
+          tags: ${{ matrix.image }}
+          # Layers (including the archive.apache.org downloads) are cached in
+          # the Actions cache; only the first build after a Dockerfile change
+          # or cache eviction fetches the tarballs. Publish the image with the
+          # hive-2.3.9-image workflow to skip this step entirely.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start metastore container (binary TCP)
         if: "!matrix.http"

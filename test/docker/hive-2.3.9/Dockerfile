@@ -14,8 +14,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz | tar -xz -C /opt \
-    && curl -fsSL https://archive.apache.org/dist/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz | tar -xz -C /opt
+# archive.apache.org is the only host for these releases and throttles
+# aggressively: the same download has taken 70 s and stalled past 30 min.
+# Fail fast and retry rather than hang; the workflow caches the resulting
+# layers so this runs once per cache lifetime.
+RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --speed-limit 50000 --speed-time 60 --max-time 1200 \
+      https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz | tar -xz -C /opt \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --speed-limit 50000 --speed-time 60 --max-time 1200 \
+      https://archive.apache.org/dist/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz | tar -xz -C /opt
 
 ENV HADOOP_HOME=/opt/hadoop-${HADOOP_VERSION}
 ENV HIVE_HOME=/opt/apache-hive-${HIVE_VERSION}-bin
