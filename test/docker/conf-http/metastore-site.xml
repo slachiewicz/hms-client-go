@@ -11,9 +11,22 @@
   MetastoreConf for every key, so this file is mounted instead via
   HIVE_CUSTOM_CONF_DIR, per that image's documented convention.
 
+  This file MUST be named metastore-site.xml, not hive-site*.xml or any
+  other name: the image copies every file under HIVE_CUSTOM_CONF_DIR into
+  the conf directory verbatim, but the standalone metastore's own config
+  loader (MetastoreConf) only ever reads metastore-site.xml and
+  hive-site.xml by that exact filename -- a file named e.g.
+  hive-site-http.xml is copied in but never read, silently leaving the
+  server in its default binary-transport mode (see the integration
+  workflow's hive-4.2.1-http job).
+
   Both the standalone-metastore property name and its "hive."-prefixed
   legacy alias are set, since HiveConf/MetastoreConf recognizes either
-  depending on version.
+  depending on version. metastore.thrift.port (ConfVars.SERVER_PORT,
+  default 9083) is the single port both transport modes listen on --
+  confirmed against MetastoreConf.java in the apache/hive rel/release-4.2.1
+  tag, which defines no separate HTTP-mode port key -- so it is set
+  explicitly here rather than relied on as a default.
 -->
 <configuration>
   <property>
@@ -31,5 +44,13 @@
   <property>
     <name>hive.metastore.server.thrift.http.path</name>
     <value>metastore</value>
+  </property>
+  <property>
+    <name>metastore.thrift.port</name>
+    <value>9083</value>
+  </property>
+  <property>
+    <name>hive.metastore.port</name>
+    <value>9083</value>
   </property>
 </configuration>

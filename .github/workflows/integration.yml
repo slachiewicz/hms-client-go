@@ -68,10 +68,16 @@ jobs:
       - name: Start metastore container (HTTP mode)
         if: matrix.http
         run: |
+          # The mounted file must be named metastore-site.xml: the image
+          # copies every file under HIVE_CUSTOM_CONF_DIR into the conf
+          # directory verbatim, but the standalone metastore's config
+          # loader only reads metastore-site.xml (and hive-site.xml) by
+          # that exact name -- a differently named file is copied in but
+          # never read, leaving the server in binary mode.
           docker run -d --name hms -p 9083:9083 \
             --env SERVICE_NAME=metastore \
             --env HIVE_CUSTOM_CONF_DIR=/hive_custom_conf \
-            -v "${{ github.workspace }}/test/docker/conf:/hive_custom_conf" \
+            -v "${{ github.workspace }}/test/docker/conf-http:/hive_custom_conf" \
             "${{ matrix.image }}"
 
       - name: Wait for metastore port 9083
