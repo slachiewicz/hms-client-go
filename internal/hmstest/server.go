@@ -73,16 +73,17 @@ func removedRPCs(v Version) []string {
 }
 
 // versionString is the version string the emulated version reports from
-// the fb303 getVersion RPC (see handler.GetVersion). Start no longer seeds
-// this under "hive.metastore.version"/"metastore.version": a test wanting
-// the get_config_value fallback path must seed those keys itself (see
+// the fb303 getVersion RPC (see handler.GetVersion). It mirrors real
+// servers: pre-4 metastores answer with the metastore schema line "3.0"
+// rather than their release, on Hive23 as well as Hive31, and only a
+// Hive40 server reports its actual release. Start no longer seeds this
+// under "hive.metastore.version"/"metastore.version": a test wanting the
+// get_config_value fallback path must seed those keys itself (see
 // TestServerVersion_NeitherConfigValueSet in client_test.go).
 func versionString(v Version) string {
 	switch v {
-	case Hive23:
-		return "2.3.9"
-	case Hive31:
-		return "3.1.3"
+	case Hive23, Hive31:
+		return "3.0"
 	default:
 		return "4.0.1"
 	}

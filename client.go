@@ -485,20 +485,39 @@ func (c *Client) GetConfigValue(ctx context.Context, name, defaultValue string) 
 	return out, err
 }
 
-// ServerVersion reports the connected metastore's version. It tries the
-// fb303 getVersion RPC first, then falls back to the
-// "hive.metastore.version" configuration value, then to "metastore.version"
-// (as Hive itself does) when getVersion errors or answers empty. It returns
-// an error wrapping ErrNotSupported if the server reports a version from
-// none of the three.
+// ServerVersion reports the connected metastore's release line. It tries
+// the fb303 getVersion RPC first: a Hive 4.x server answers with its real
+// release (e.g. "4.0.1") and that is returned as-is. Pre-4 metastores do
+// not report their release there -- they answer with the metastore schema
+// version line instead (every Hive 3.x release answers "3.0", and so does
+// Hive 2.3.x) -- so ServerVersion infers the line from capabilities probed
+// on the same connection: a server that supports catalogs (SPEC §2.3 Rule
+// 1) is Hive 3.x and is reported as HiveVersion{Major: 3, Minor: 0}; one
+// that does not is Hive 2.3.x and is reported as HiveVersion{Major: 2,
+// Minor: 3}. Raw always carries the server's literal getVersion answer, so
+// callers that need the true 3.x patch release cannot get it from this
+// RPC. As a last resort, when getVersion itself errors with
+// UNKNOWN_METHOD, ServerVersion falls back to the "hive.metastore.version"
+// configuration value, then to "metastore.version" (as Hive itself does);
+// no capability inference applies to that fallback value. It returns an
+// error wrapping ErrNotSupported if the server reports a version from none
+// of these.
 func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) {
 	var v string
+	var catalogs, haveCatalogs bool
 	err := c.read(ctx, "getVersion", func(ctx context.Context, cn *conn) error {
 		s, err := cn.getVersion(ctx)
 		if err != nil {
 			return err
 		}
 		v = s
+		if hv, perr := ParseHiveVersion(s); perr == nil && hv.Major < 4 {
+			ok, err := cn.supportsCatalogs(ctx)
+			if err != nil {
+				return err
+			}
+			catalogs, haveCatalogs = ok, true
+		}
 		return nil
 	})
 	if err != nil && !isUnknownMethod(err) {
@@ -519,7 +538,17 @@ func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) {
 	if v == "" {
 		return HiveVersion{}, fmt.Errorf("hms: server reported no metastore version: %w", ErrNotSupported)
 	}
-	return ParseHiveVersion(v)
+	hv, err := ParseHiveVersion(v)
+	if err != nil {
+		return HiveVersion{}, err
+	}
+	if haveCatalogs && hv.Major < 4 {
+		if catalogs {
+			return HiveVersion{Major: 3, Minor: 0, Raw: hv.Raw}, nil
+		}
+		return HiveVersion{Major: 2, Minor: 3, Raw: hv.Raw}, nil
+	}
+	return hv, nil
 }
 
 // GetCatalogs lists the names of every catalog on the connected metastore.

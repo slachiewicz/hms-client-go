@@ -193,11 +193,13 @@ type Partition struct {
 // HiveVersion is a parsed Hive Metastore server version.
 //
 // The fb303 getVersion RPC that ServerVersion prefers does not always
-// report the server's release number: on some releases (observed on every
-// 3.1.x release, which answers "3.0") it instead reports the metastore
-// schema version line. Callers that need the actual release should treat
-// Minor (and Patch) as unreliable there and compare only Major, which the
-// schema line and the release agree on.
+// report the server's release number: pre-4 metastores answer with the
+// metastore schema version line instead (every Hive 3.x release answers
+// "3.0", and so does Hive 2.3.x). ServerVersion tells the two apart by
+// probing catalog support on the connection and reports the inferred line
+// as Major/Minor; see its doc comment. Callers that need the true 3.x
+// patch release cannot get it from this RPC -- Raw always carries the
+// server's literal answer.
 type HiveVersion struct {
 	// Major is the major version component.
 	Major int

@@ -236,7 +236,7 @@ func (c *Client) GetConfigValue(ctx context.Context, name, defaultValue string) 
 func (c *Client) ServerVersion(ctx context.Context) (HiveVersion, error) // parsed from getVersion / get_config_value
 ```
 
-`getVersion` does not always report the server's release: every Hive 3.1.x metastore answers the metastore schema line "3.0" instead. `ParseHiveVersion` accepts both the three-component release form and this two-component schema-line form (defaulting `Patch` to 0); callers comparing against a known release should compare `Major` only.
+`getVersion` does not always report the server's release: every Hive 3.x metastore answers the metastore schema line "3.0" instead, and so does Hive 2.3.x. `ParseHiveVersion` accepts both the three-component release form and this two-component schema-line form (defaulting `Patch` to 0). When `getVersion` reports a schema line, `ServerVersion` tells 3.x from 2.3.x apart by probing catalog support (§2.3 Rule 1) on the same connection, since 2.3 predates catalogs.
 
 ---
 

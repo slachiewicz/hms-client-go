@@ -206,6 +206,36 @@ func TestClient_GetConfigValue(t *testing.T) {
 	assert.Equal(t, "fallback", v)
 }
 
+func TestServerVersion_InfersLineFromCatalogSupport(t *testing.T) {
+	t.Parallel()
+	// getVersion on a pre-4 metastore answers the metastore schema line
+	// "3.0" rather than its actual release (see hmstest.versionString), so
+	// ServerVersion must tell Hive 2.3 apart from Hive 3.x by probing
+	// catalog support on the same connection (SPEC §2.3 Rule 1; Hive 2.3
+	// predates catalogs, Hive 3.x has them).
+	tests := []struct {
+		name string
+		v    hmstest.Version
+		want hms.HiveVersion
+	}{
+		{"Hive23 has no catalogs, inferred as 2.3", hmstest.Hive23, hms.HiveVersion{Major: 2, Minor: 3, Raw: "3.0"}},
+		{"Hive31 has catalogs, inferred as 3.0", hmstest.Hive31, hms.HiveVersion{Major: 3, Minor: 0, Raw: "3.0"}},
+		{"Hive40 reports its real release directly", hmstest.Hive40, hms.HiveVersion{Major: 4, Minor: 0, Patch: 1, Raw: "4.0.1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, tt.v)
+			c := mustNew(t, srv.URI())
+
+			v, err := c.ServerVersion(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, v)
+			assert.Contains(t, srv.Calls(), "getVersion")
+		})
+	}
+}
+
 func TestServerVersion_Hive23FallsBackToHiveMetastoreVersion(t *testing.T) {
 	t.Parallel()
 	// WithoutRPC("getVersion") simulates a server whose fb303 service
