@@ -359,26 +359,115 @@ func tableFromThrift(t *hive_metastore.Table) *Table {
 // over t.CatalogName (see (*Client).CreateTable, which folds a non-empty
 // t.CatalogName into the resolveCat call that produces cat). It returns nil
 // for a nil input.
+//
+// The result is built from hive_metastore.NewTable() rather than a bare
+// struct literal so the non-pointer "optional with default" fields the
+// exported Table type has no equivalent for — OwnerType and WriteId — keep
+// NewTable's defaults (PrincipalType_USER and -1) instead of falling back
+// to the Go zero value 0: ownerType=0 is not a valid PrincipalType on the
+// wire, and writeId=0 is a real write id rather than "unassigned" (see
+// NewTable's own IsSet checks, which compare against these same defaults).
 func tableToThrift(t *Table, cat *string) *hive_metastore.Table {
 	if t == nil {
 		return nil
 	}
-	out := &hive_metastore.Table{
-		DbName:           t.DatabaseName,
-		TableName:        t.TableName,
-		Owner:            t.Owner,
-		CreateTime:       unix32FromTime(t.CreateTime),
-		LastAccessTime:   unix32FromTime(t.LastAccessTime),
-		Retention:        t.Retention,
-		PartitionKeys:    fieldSchemasToThrift(t.PartitionKeys),
-		Parameters:       copyStringMap(t.Parameters),
-		ViewOriginalText: t.ViewOriginalText,
-		ViewExpandedText: t.ViewExpandedText,
-		TableType:        string(t.TableType),
-		CatName:          cat,
-	}
+	out := hive_metastore.NewTable()
+	out.DbName = t.DatabaseName
+	out.TableName = t.TableName
+	out.Owner = t.Owner
+	out.CreateTime = unix32FromTime(t.CreateTime)
+	out.LastAccessTime = unix32FromTime(t.LastAccessTime)
+	out.Retention = t.Retention
+	out.PartitionKeys = fieldSchemasToThrift(t.PartitionKeys)
+	out.Parameters = copyStringMap(t.Parameters)
+	out.ViewOriginalText = t.ViewOriginalText
+	out.ViewExpandedText = t.ViewExpandedText
+	out.TableType = string(t.TableType)
+	out.CatName = cat
 	if t.Storage != nil {
 		out.Sd = storageToThrift(t.Storage)
+	}
+	return out
+}
+
+// partitionFromThrift converts a generated Partition to the exported
+// Partition type. A nil wire CatName defaults to the "hive" catalog,
+// matching Hive's own convention on a server that predates catalogs (Hive
+// 2.3). It returns nil for a nil input.
+func partitionFromThrift(p *hive_metastore.Partition) *Partition {
+	if p == nil {
+		return nil
+	}
+	out := &Partition{
+		DatabaseName: p.DbName,
+		TableName:    p.TableName,
+		Values:       copyStrings(p.Values),
+		CreateTime:   timeFromUnix32(p.CreateTime),
+		Storage:      storageFromThrift(p.Sd),
+		Parameters:   copyStringMap(p.Parameters),
+	}
+	if p.CatName != nil {
+		out.CatalogName = *p.CatName
+	} else {
+		out.CatalogName = defaultCatalog
+	}
+	return out
+}
+
+// partitionsFromThrift converts a slice of generated Partition values. It
+// returns nil for a nil or empty input (see copyStringMap).
+func partitionsFromThrift(ps []*hive_metastore.Partition) []*Partition {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]*Partition, len(ps))
+	for i, p := range ps {
+		out[i] = partitionFromThrift(p)
+	}
+	return out
+}
+
+// partitionToThrift converts the exported Partition type to its generated
+// wire representation. cat is the effective catalog resolved for the call
+// (see (*Client).resolveCat); it becomes the wire CatName field (possibly
+// nil, when the connection is known not to support catalogs). dbName and
+// tableName are the call's own arguments (e.g. AddPartitions' dbName,
+// tableName parameters); they become the wire DbName/TableName fields
+// unless p itself already names a database or table, which then takes
+// precedence. It returns nil for a nil input.
+func partitionToThrift(p *Partition, cat *string, dbName, tableName string) *hive_metastore.Partition {
+	if p == nil {
+		return nil
+	}
+	out := &hive_metastore.Partition{
+		DbName:     dbName,
+		TableName:  tableName,
+		Values:     copyStrings(p.Values),
+		CreateTime: unix32FromTime(p.CreateTime),
+		Parameters: copyStringMap(p.Parameters),
+		CatName:    cat,
+	}
+	if p.DatabaseName != "" {
+		out.DbName = p.DatabaseName
+	}
+	if p.TableName != "" {
+		out.TableName = p.TableName
+	}
+	if p.Storage != nil {
+		out.Sd = storageToThrift(p.Storage)
+	}
+	return out
+}
+
+// partitionsToThrift converts a slice of the exported Partition type. It
+// returns nil for a nil or empty input (see copyStringMap).
+func partitionsToThrift(ps []*Partition, cat *string, dbName, tableName string) []*hive_metastore.Partition {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]*hive_metastore.Partition, len(ps))
+	for i, p := range ps {
+		out[i] = partitionToThrift(p, cat, dbName, tableName)
 	}
 	return out
 }

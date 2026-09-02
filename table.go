@@ -62,6 +62,7 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 		if err != nil {
 			return err
 		}
+		var tables []*Table
 		for i := 0; i < len(tableNames); i += defaultChunkSize {
 			end := i + defaultChunkSize
 			if end > len(tableNames) {
@@ -76,9 +77,10 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 				return err
 			}
 			for _, t := range res.Tables {
-				out = append(out, tableFromThrift(t))
+				tables = append(tables, tableFromThrift(t))
 			}
 		}
+		out = tables
 		return nil
 	})
 	return out, err
