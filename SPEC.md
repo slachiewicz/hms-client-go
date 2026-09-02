@@ -39,6 +39,7 @@ Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `r
 | :--- | :-: | :-: | :-: | :-: |
 | `get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req` | Y | Y | Y | Y |
 | `get_database`, `get_all_databases`, `create_database`, `drop_database`, `get_all_tables`, `create_table`, `alter_table`, `drop_table`, `get_partitions`, `get_partition_names`, `alter_partitions`, `drop_partition`, `get_config_value` | Y | Y | Y | Y |
+| `set_ugi` (caller identity over binary NOSASL, §3.1) | Y | Y | Y | Y |
 | `get_table`, `get_table_objects_by_name` (legacy) | Y | Y | - | **no** |
 | `get_catalogs`, `get_catalog`, `create_catalog`, `drop_catalog` | - | Y | Y | Y |
 | `catName` fields on `Database`, `Table`, `Partition` and `*Request` structs | - | Y | Y | Y |
@@ -150,7 +151,7 @@ func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
 func WithUser(name string) Option               // x-actor-username over HTTP; set_ugi user over binary NOSASL (§3.1)
-func WithUserGroups(groups ...string) Option    // set_ugi groups over binary NOSASL; no effect over HTTP or non-NOSASL binary auth
+func WithUserGroups(groups ...string) Option    // set_ugi groups over binary NOSASL; repeated calls append; no effect over HTTP or non-NOSASL binary auth
 func WithPlainAuth(user, password string) Option // SASL PLAIN over binary TCP
 func WithKerberos(principal string, keytabOrCCache ...string) Option // SASL GSSAPI over binary TCP, pure Go (gokrb5); see §3.1
 func WithTLS(cfg *tls.Config) Option            // thrift:// (metastore.use.SSL=true) and https:// (overrides the http.Client's TLS config); see §3.1, §3.2
