@@ -448,6 +448,8 @@ type LockResponse struct {
 
 `OpenTransaction` wraps `open_txns` with `OpenTxnRequest{NumTxns: 1, User: user, Hostname: host}` and returns the single allocated `txn_ids[0]`. `Lock`, `CheckLock`, and `Unlock` wrap `lock`, `check_lock`, and `unlock` respectively; `Heartbeat` wraps `heartbeat` with `HeartbeatRequest{TxnId, LockId}` (either may be omitted by passing 0, matching the RPC's optional fields).
 
+`OpenTxnRequest.TxnType`, `LockRequest.ZeroWaitReadEnabled`/`ExclusiveCTAS`/`LocklessReadsEnabled`, and `LockResponse.ErrorMessage` are Hive 4.x-only wire additions, verified absent from both the 2.3.9 and 3.1.3 IDLs (`rel/release-2.3.9`/`rel/release-3.1.3` `hive_metastore.thrift` declare `OpenTxnRequest` with only `num_txns`/`user`/`hostname`/`agentInfo`, and `LockRequest`/`LockResponse` with only the fields listed in this section's Go types above). None of them has an exported equivalent; this package leaves them at their generated zero values, which a pre-4.x server's decoder never sees regardless (§2.3).
+
 ### 5.10. Observability
 
 ```go
@@ -503,6 +505,8 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `AlreadyExistsException` | `hms.ErrAlreadyExists` | `errors.Is(err, hms.ErrAlreadyExists)` |
 | `InvalidOperationException`, `InvalidObjectException`, `InvalidInputException` | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 | `MetaException` | `hms.ErrMeta` | `errors.Is(err, hms.ErrMeta)` |
+| `NoSuchTxnException`, `NoSuchLockException` (§5.9) | `hms.ErrNotFound` | `errors.Is(err, hms.ErrNotFound)` |
+| `TxnAbortedException`, `TxnOpenException` (§5.9) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 | Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4), `TApplicationException` in the frame-desync class (`BAD_SEQUENCE_ID`, `INVALID_MESSAGE_TYPE_EXCEPTION`, `PROTOCOL_ERROR`, `WRONG_METHOD_NAME`) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
 | `TApplicationException(UNKNOWN_METHOD)` with no fallback, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |
 | `ConfigValSecurityException` (`get_config_value` on a key not beginning with `hive`, `mapred`, or `hdfs`) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` — target mapping; **planned for 1.0**, `classify` does not special-case this exception type today (it falls through to `hms.ErrMeta`) |

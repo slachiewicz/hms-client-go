@@ -70,6 +70,12 @@ type Store struct {
 	// AddPartitionsReq/DropPartition (see recordEvent) and served by
 	// GetNextNotification/GetCurrentNotificationEventId.
 	Events []*hive_metastore.NotificationEvent
+	// Acid holds the transaction/lock table served by
+	// OpenTxns/CommitTxn/AbortTxn/Heartbeat/Lock/CheckLock/Unlock (SPEC
+	// §5.9), defined in acid.go alongside those handler methods. It has
+	// its own mutex (see acidState's doc comment) rather than sharing mu
+	// above.
+	Acid *acidState
 }
 
 // NewStore returns an empty Store pre-populated with the default "hive"
@@ -84,6 +90,7 @@ func NewStore() *Store {
 		Partitions:  map[string][]*hive_metastore.Partition{},
 		ColumnStats: map[string][]*hive_metastore.ColumnStatisticsObj{},
 		Config:      map[string]string{},
+		Acid:        newAcidState(),
 	}
 }
 

@@ -91,6 +91,14 @@ type conn struct {
 	getCurrentNotificationEventId func(ctx context.Context) (*hive_metastore.CurrentNotificationEventId, error)
 
 	getTableStatisticsReq func(ctx context.Context, req *hive_metastore.TableStatsRequest) (*hive_metastore.TableStatsResult_, error)
+
+	openTxns  func(ctx context.Context, req *hive_metastore.OpenTxnRequest) (*hive_metastore.OpenTxnsResponse, error)
+	commitTxn func(ctx context.Context, req *hive_metastore.CommitTxnRequest) error
+	abortTxn  func(ctx context.Context, req *hive_metastore.AbortTxnRequest) error
+	heartbeat func(ctx context.Context, req *hive_metastore.HeartbeatRequest) error
+	lock      func(ctx context.Context, req *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error)
+	checkLock func(ctx context.Context, req *hive_metastore.CheckLockRequest) (*hive_metastore.LockResponse, error)
+	unlock    func(ctx context.Context, req *hive_metastore.UnlockRequest) error
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
@@ -175,6 +183,14 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 		getCurrentNotificationEventId: g.GetCurrentNotificationEventId,
 
 		getTableStatisticsReq: g.GetTableStatisticsReq,
+
+		openTxns:  g.OpenTxns,
+		commitTxn: g.CommitTxn,
+		abortTxn:  g.AbortTxn,
+		heartbeat: g.Heartbeat,
+		lock:      g.Lock,
+		checkLock: g.CheckLock,
+		unlock:    g.Unlock,
 	}
 
 	// set_ugi establishes the caller's identity over binary NOSASL (SPEC

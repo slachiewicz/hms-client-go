@@ -48,14 +48,14 @@ func (e *hmsError) Unwrap() []error { return []error{e.sentinel, e.cause} }
 // cause, without the Go struct dump a generated Thrift exception's own
 // Error() produces (e.g. "NoSuchObjectException({Message:db x not
 // found})"): the Message field of a generated exception found anywhere in
-// err's tree (the six exceptions classify maps to a sentinel plus the ACID
-// ones, since none of those carry a sentinel of their own); failing that, a
-// thrift.TApplicationException's own Error() text (already clean: just its
-// message and type); failing that, err's own Error() text. It returns "" for
-// a nil err. hmsError.Error() uses this to build "<op>: <message>"; it is
-// exported so a caller holding only the sentinel error (via errors.Is) can
-// still recover the original server text via errors.As-free code, e.g.
-// hms.Message(err).
+// err's tree (every exception type classify maps to a sentinel -- the five
+// object-level exceptions plus the four ACID ones added for SPEC §5.9's
+// transaction/lock RPCs); failing that, a thrift.TApplicationException's
+// own Error() text (already clean: just its message and type); failing
+// that, err's own Error() text. It returns "" for a nil err. hmsError.Error()
+// uses this to build "<op>: <message>"; it is exported so a caller holding
+// only the sentinel error (via errors.Is) can still recover the original
+// server text via errors.As-free code, e.g. hms.Message(err).
 func Message(err error) string {
 	if err == nil {
 		return ""
@@ -136,15 +136,19 @@ func wrapAs(op string, sentinel, err error) error {
 // classify maps Thrift exceptions and transport errors to sentinel error types.
 func classify(err error) error {
 	var (
-		noSuch    *hive_metastore.NoSuchObjectException
-		exists    *hive_metastore.AlreadyExistsException
-		invOp     *hive_metastore.InvalidOperationException
-		invObj    *hive_metastore.InvalidObjectException
-		invIn     *hive_metastore.InvalidInputException
-		meta      *hive_metastore.MetaException
-		appErr    thrift.TApplicationException
-		transport thrift.TTransportException
-		netErr    net.Error
+		noSuch     *hive_metastore.NoSuchObjectException
+		exists     *hive_metastore.AlreadyExistsException
+		invOp      *hive_metastore.InvalidOperationException
+		invObj     *hive_metastore.InvalidObjectException
+		invIn      *hive_metastore.InvalidInputException
+		meta       *hive_metastore.MetaException
+		noSuchTxn  *hive_metastore.NoSuchTxnException
+		txnAborted *hive_metastore.TxnAbortedException
+		txnOpen    *hive_metastore.TxnOpenException
+		noSuchLock *hive_metastore.NoSuchLockException
+		appErr     thrift.TApplicationException
+		transport  thrift.TTransportException
+		netErr     net.Error
 
 		// TLS handshake failures (WithTLS, SPEC §3.1/§3.2): none of these
 		// implement net.Error or thrift.TTransportException, so without an
@@ -167,6 +171,18 @@ func classify(err error) error {
 		return ErrInvalidOperation
 	case errors.As(err, &meta):
 		return ErrMeta
+	// NoSuchTxnException and NoSuchLockException (SPEC §5.9/§7) mean the
+	// caller's txn or lock id is unknown to the metastore, the same
+	// "object not found" shape as NoSuchObjectException above.
+	// TxnAbortedException and TxnOpenException mean the RPC's own
+	// preconditions were violated (committing an already-aborted
+	// transaction; opening one when the metastore does not expect it),
+	// the same shape as InvalidOperationException above -- none of the
+	// four carries a sentinel of its own.
+	case errors.As(err, &noSuchTxn), errors.As(err, &noSuchLock):
+		return ErrNotFound
+	case errors.As(err, &txnAborted), errors.As(err, &txnOpen):
+		return ErrInvalidOperation
 	case isUnknownMethod(err):
 		return ErrNotSupported
 	case isDesyncError(err):

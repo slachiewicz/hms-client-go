@@ -34,6 +34,15 @@ func TestWrapError(t *testing.T) {
 		{"invalid object", &hive_metastore.InvalidObjectException{Message: "obj"}, hms.ErrInvalidOperation},
 		{"invalid input", &hive_metastore.InvalidInputException{Message: "in"}, hms.ErrInvalidOperation},
 		{"meta", &hive_metastore.MetaException{Message: "boom"}, hms.ErrMeta},
+		// ACID exceptions (SPEC §5.9/§7): NoSuchTxnException and
+		// NoSuchLockException are "object not found" for a txn/lock id,
+		// the same shape as NoSuchObjectException above;
+		// TxnAbortedException and TxnOpenException are a violated RPC
+		// precondition, the same shape as InvalidOperationException.
+		{"no such transaction", &hive_metastore.NoSuchTxnException{Message: "txn 1"}, hms.ErrNotFound},
+		{"no such lock", &hive_metastore.NoSuchLockException{Message: "lock 1"}, hms.ErrNotFound},
+		{"transaction aborted", &hive_metastore.TxnAbortedException{Message: "txn 1 aborted"}, hms.ErrInvalidOperation},
+		{"transaction open", &hive_metastore.TxnOpenException{Message: "txn 1 open"}, hms.ErrInvalidOperation},
 		{"unknown method", thrift.NewTApplicationException(thrift.UNKNOWN_METHOD, "get_partitions_req"), hms.ErrNotSupported},
 		// The frame-desync class of TApplicationException means the
 		// shared connection's framing is corrupted, not merely that this
@@ -112,6 +121,9 @@ func TestMessage(t *testing.T) {
 		{"no such object extracts Message field", &hive_metastore.NoSuchObjectException{Message: "db x not found"}, "db x not found"},
 		{"meta exception extracts Message field", &hive_metastore.MetaException{Message: "boom"}, "boom"},
 		{"txn aborted extracts Message field", &hive_metastore.TxnAbortedException{Message: "txn 1 aborted"}, "txn 1 aborted"},
+		{"no such transaction extracts Message field", &hive_metastore.NoSuchTxnException{Message: "no such txn 1"}, "no such txn 1"},
+		{"txn open extracts Message field", &hive_metastore.TxnOpenException{Message: "txn 1 already open"}, "txn 1 already open"},
+		{"no such lock extracts Message field", &hive_metastore.NoSuchLockException{Message: "no such lock 1"}, "no such lock 1"},
 		{
 			"exception wrapped further down the chain still extracts Message field",
 			fmt.Errorf("get_table_req: %w", &hive_metastore.NoSuchObjectException{Message: "db x not found"}),

@@ -581,6 +581,69 @@ func TestNotifications(t *testing.T) {
 	assert.True(t, found, "no CREATE_TABLE event for %s.%s found in %d events after %d", dbName, tableName, len(events), sinceID)
 }
 
+// TestACID covers SPEC.md §5.9's minimal ACID surface against a real
+// metastore: open a transaction, lock SHARED_READ on the test db/table,
+// confirm CheckLock reports the same ACQUIRED state Lock did, release the
+// lock, and commit; a second transaction exercises the abort path instead.
+// open_txns/lock/check_lock/unlock/commit_txn/abort_txn all exist on every
+// supported version (Hive 2.3+, SPEC §5.9), so this is not version-gated.
+func TestACID(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	ctx := context.Background()
+
+	dbName := uniqueName("it_aciddb_")
+	createDB(t, c, ctx, dbName, "")
+	const tableName = "it_acid_tbl"
+
+	t.Run("commit", func(t *testing.T) {
+		txnID, err := c.OpenTransaction(ctx, "hms-client-go-integration", "localhost")
+		require.NoError(t, err)
+		assert.Greater(t, txnID, int64(0))
+
+		resp, err := c.Lock(ctx, hms.LockRequest{
+			Components: []hms.LockComponent{
+				{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: dbName, Table: tableName},
+			},
+			TxnID: txnID,
+			User:  "hms-client-go-integration",
+			Host:  "localhost",
+		})
+		require.NoError(t, err)
+		require.Equal(t, hms.LockStateAcquired, resp.State)
+		require.Greater(t, resp.LockID, int64(0))
+
+		checked, err := c.CheckLock(ctx, resp.LockID)
+		require.NoError(t, err)
+		assert.Equal(t, hms.LockStateAcquired, checked.State)
+		assert.Equal(t, resp.LockID, checked.LockID)
+
+		require.NoError(t, c.Unlock(ctx, resp.LockID))
+		require.NoError(t, c.CommitTransaction(ctx, txnID))
+	})
+
+	t.Run("abort", func(t *testing.T) {
+		txnID, err := c.OpenTransaction(ctx, "hms-client-go-integration", "localhost")
+		require.NoError(t, err)
+
+		resp, err := c.Lock(ctx, hms.LockRequest{
+			Components: []hms.LockComponent{
+				{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: dbName, Table: tableName},
+			},
+			TxnID: txnID,
+			User:  "hms-client-go-integration",
+			Host:  "localhost",
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, c.Unlock(ctx, resp.LockID))
+		require.NoError(t, c.AbortTransaction(ctx, txnID))
+
+		err = c.CommitTransaction(ctx, txnID)
+		require.ErrorIs(t, err, hms.ErrInvalidOperation, "committing an aborted transaction must fail")
+	})
+}
+
 // TestTLS connects to a metastore configured with metastore.use.SSL=true
 // via hms.WithTLS (SPEC §3.1) and confirms a basic RPC round-trips over
 // the encrypted socket. It skips unless HMS_TLS_URIS is set; see

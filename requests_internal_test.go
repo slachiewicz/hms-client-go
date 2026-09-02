@@ -222,3 +222,166 @@ func TestNewTableStatsRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
 	assert.Equal(t, "hive", got.Engine)
 	assert.Equal(t, int64(-1), got.ID)
 }
+
+// TestNewOpenTxnRequest_SetsFields covers acid.go's OpenTransaction
+// building an OpenTxnRequest via NewOpenTxnRequest(), overriding its
+// AgentInfo default ("Unknown") with this package's own identifier.
+func TestNewOpenTxnRequest_SetsFields(t *testing.T) {
+	t.Parallel()
+	req := newOpenTxnRequest("alice", "host1")
+
+	got := hive_metastore.NewOpenTxnRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int32(1), got.NumTxns)
+	assert.Equal(t, "alice", got.User)
+	assert.Equal(t, "host1", got.Hostname)
+	assert.Equal(t, "hms-client-go", got.AgentInfo)
+}
+
+// TestNewCommitTxnRequest_KeepsIDLDefaultsOverWire covers acid.go's
+// CommitTransaction building a CommitTxnRequest via
+// NewCommitTxnRequest() rather than a bare struct literal, which would
+// send ExclWriteEnabled=false on the wire instead of the IDL default
+// (true); it has no equivalent on the exported API.
+func TestNewCommitTxnRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	req := newCommitTxnRequest(5)
+
+	got := hive_metastore.NewCommitTxnRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int64(5), got.Txnid)
+	assert.True(t, got.ExclWriteEnabled)
+}
+
+// TestNewAbortTxnRequest_SetsFields covers acid.go's AbortTransaction
+// building an AbortTxnRequest via NewAbortTxnRequest().
+func TestNewAbortTxnRequest_SetsFields(t *testing.T) {
+	t.Parallel()
+	req := newAbortTxnRequest(5)
+
+	got := hive_metastore.NewAbortTxnRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int64(5), got.Txnid)
+}
+
+// TestNewHeartbeatRequest_OmitsZeroID covers acid.go's Heartbeat building
+// a HeartbeatRequest via NewHeartbeatRequest() and setting only the
+// non-zero id: a 0 id must stay nil ("omitted") over the wire rather than
+// becoming a real 0 the server would look up as an actual id.
+func TestNewHeartbeatRequest_OmitsZeroID(t *testing.T) {
+	t.Parallel()
+	t.Run("txn only", func(t *testing.T) {
+		t.Parallel()
+		req := newHeartbeatRequest(5, 0)
+
+		got := hive_metastore.NewHeartbeatRequest()
+		roundTrip(t, req, got)
+
+		require.NotNil(t, got.Txnid)
+		assert.Equal(t, int64(5), *got.Txnid)
+		assert.Nil(t, got.Lockid)
+	})
+	t.Run("lock only", func(t *testing.T) {
+		t.Parallel()
+		req := newHeartbeatRequest(0, 7)
+
+		got := hive_metastore.NewHeartbeatRequest()
+		roundTrip(t, req, got)
+
+		require.NotNil(t, got.Lockid)
+		assert.Equal(t, int64(7), *got.Lockid)
+		assert.Nil(t, got.Txnid)
+	})
+}
+
+// TestNewLockComponent_KeepsIDLDefaultsOverWire covers acid.go's
+// newLockComponent building a hive_metastore.LockComponent via
+// NewLockComponent() rather than a bare struct literal, which would send
+// OperationType=SELECT (wire value 1, the Go zero value) instead of the
+// IDL default UNSET (5); this package's exported LockComponent has no
+// field for OperationType at all.
+func TestNewLockComponent_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	c := newLockComponent(LockComponent{Type: LockTypeExclusive, Level: LockLevelTable, Database: "db", Table: "tbl"})
+
+	got := hive_metastore.NewLockComponent()
+	roundTrip(t, c, got)
+
+	assert.Equal(t, hive_metastore.LockType_EXCLUSIVE, got.Type)
+	assert.Equal(t, hive_metastore.LockLevel_TABLE, got.Level)
+	assert.Equal(t, "db", got.Dbname)
+	require.NotNil(t, got.Tablename)
+	assert.Equal(t, "tbl", *got.Tablename)
+	assert.Nil(t, got.Partitionname)
+	assert.Equal(t, hive_metastore.DataOperationType(5), got.OperationType)
+}
+
+// TestNewLockRequest_KeepsIDLDefaultsOverWire covers acid.go's
+// newLockRequest building a hive_metastore.LockRequest via
+// NewLockRequest() rather than a bare struct literal, which would send
+// AgentInfo="" instead of the IDL default "Unknown"; this package's
+// exported LockRequest has no field for AgentInfo. TxnID 0 must stay
+// omitted (nil) over the wire.
+func TestNewLockRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	req := newLockRequest(LockRequest{
+		Components: []LockComponent{{Type: LockTypeSharedRead, Level: LockLevelDB, Database: "db"}},
+		User:       "alice",
+		Host:       "host1",
+	})
+
+	got := hive_metastore.NewLockRequest()
+	roundTrip(t, req, got)
+
+	require.Len(t, got.Component, 1)
+	assert.Equal(t, "alice", got.User)
+	assert.Equal(t, "host1", got.Hostname)
+	assert.Equal(t, "Unknown", got.AgentInfo)
+	assert.Nil(t, got.Txnid)
+}
+
+// TestNewLockRequest_SetsTxnIDWhenPositive covers newLockRequest's other
+// branch: a positive TxnID is sent on the wire.
+func TestNewLockRequest_SetsTxnIDWhenPositive(t *testing.T) {
+	t.Parallel()
+	req := newLockRequest(LockRequest{
+		Components: []LockComponent{{Type: LockTypeSharedRead, Level: LockLevelDB, Database: "db"}},
+		TxnID:      9,
+		User:       "alice",
+		Host:       "host1",
+	})
+
+	got := hive_metastore.NewLockRequest()
+	roundTrip(t, req, got)
+
+	require.NotNil(t, got.Txnid)
+	assert.Equal(t, int64(9), *got.Txnid)
+}
+
+// TestNewCheckLockRequest_SetsLockid covers acid.go's CheckLock building a
+// CheckLockRequest via NewCheckLockRequest().
+func TestNewCheckLockRequest_SetsLockid(t *testing.T) {
+	t.Parallel()
+	req := newCheckLockRequest(7)
+
+	got := hive_metastore.NewCheckLockRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int64(7), got.Lockid)
+	assert.Nil(t, got.Txnid)
+}
+
+// TestNewUnlockRequest_SetsLockid covers acid.go's Unlock building an
+// UnlockRequest via NewUnlockRequest().
+func TestNewUnlockRequest_SetsLockid(t *testing.T) {
+	t.Parallel()
+	req := newUnlockRequest(9)
+
+	got := hive_metastore.NewUnlockRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int64(9), got.Lockid)
+}
