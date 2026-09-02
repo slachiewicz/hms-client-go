@@ -114,6 +114,15 @@ func TestHA_MaxRetriesOfOneNeverTriesTheSecondEndpoint(t *testing.T) {
 // hands it to a pool outside of an actual RPC; natural cooldown expiry
 // alone, or endpoint 0's own unrelated cooldown, never touches it), which
 // is why the assertion checks the pool rather than Pick.
+//
+// MarkFailed draws its cooldown from a full-jitter [0, ceiling) window
+// (ceiling starting at 1s), so a single call before the Eventually loop
+// could let the window expire before the 20ms probe ticker ever fires,
+// making the test flake. Calling MarkFailed again on every Eventually
+// poll (also every 20ms) keeps re-arming that window -- and, since each
+// consecutive failure without an intervening MarkHealthy doubles the
+// ceiling, quickly grows it well past the polling interval -- so a
+// cooling window is essentially always open by the time the probe ticks.
 func TestHA_RecoveryProbeReenablesCooledEndpoint(t *testing.T) {
 	t.Parallel()
 	srv1 := hmstest.Start(t, hmstest.Hive40)
@@ -129,9 +138,8 @@ func TestHA_RecoveryProbeReenablesCooledEndpoint(t *testing.T) {
 	before := hms.ClientLiveConns(c, 1)
 	require.Equal(t, int32(1), before, "New must have dialed and pooled the one conn to srv2 (endpoint 1)")
 
-	hms.ClientMarkFailed(c, 1)
-
 	require.Eventually(t, func() bool {
+		hms.ClientMarkFailed(c, 1)
 		return hms.ClientLiveConns(c, 1) > before
 	}, 500*time.Millisecond, 20*time.Millisecond, "recovery probe must dial and pool a fresh conn to the healthy endpoint")
 }
