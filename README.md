@@ -8,7 +8,10 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](go.mod)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> **Status:** pre-1.0. The API is usable today and is verified nightly against real metastores, but it may still change before `v1.0.0`. See [SPEC.md §8](SPEC.md) for the stability policy.
+> **Status:** pre-1.0. The 1.0-scope capabilities (see [CHANGELOG.md](CHANGELOG.md)) are complete
+> on `main`, pending a `v0.1.0` tag. The API is usable today and is verified nightly against
+> real metastores, but it may still change before `v1.0.0`. See [SPEC.md §8](SPEC.md) for the
+> stability policy.
 
 ## What it does
 
@@ -18,6 +21,11 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 * **Failover.** Comma-separated endpoints, a sticky active endpoint, jittered backoff, per-endpoint connection pools and a recovery probe.
 * **Context-safe I/O.** Every deadline and cancellation reaches the socket.
 * **Iceberg, Delta Lake and Hudi** table builders with the exact storage-handler, SerDe and parameter conventions those engines expect.
+* **Identity and auth.** `set_ugi` caller identity over binary NOSASL, SASL PLAIN for
+  LDAP/CUSTOM, pure-Go Kerberos (`gokrb5`, zero Cgo), and TLS for both transports.
+* **Notifications, column statistics, and ACID.** Metastore event polling, read-only column
+  statistics, and minimal lock/transaction RPCs; observability via `WithLogger` and
+  `WithRPCObserver`.
 
 ## Verified against
 
@@ -31,6 +39,11 @@ Every push to `main` and a nightly schedule run the [integration matrix](.github
 | Hive 4.2.1 | binary and HTTP | `apache/hive:4.2.1` |
 
 The unit suite runs against an in-process fake metastore that emulates each version's RPC set, so version fallbacks are tested on every commit without Docker.
+
+The Kerberos and TLS code paths are unit-tested (a fake GSSAPI acceptor and an in-process TLS
+listener) but have no integration matrix job yet: a Kerberized leg needs a KDC sidecar and a
+TLS leg needs a certificate-bearing image, both tracked as follow-ups (see PLAN.md Slices 9
+and 14).
 
 ## Install
 

@@ -148,9 +148,9 @@ Defined in SPEC §5. Implementation notes:
 - [x] `.github/workflows/integration.yml` with the matrix above. First fully green run: 2026-09-02, all five jobs (2.3.9, 3.1.3, 4.0.1, 4.2.1 binary, 4.2.1 HTTP).
 
 ### Slice 7: `set_ugi` over binary NOSASL
-- [ ] `options.go`: `WithUserGroups`. `client.go`/`conn.go`: on a newly dialed binary connection with no SASL auth configured and `WithUser` set, call `set_ugi(user, groups)` once before the connection is used for anything else. See SPEC §3.1 and §5.1.
-- [ ] `internal/hmstest`: a `set_ugi` handler recording the `(user, groups)` it was called with, so a test can assert it fired exactly once per new connection and never over HTTP or under SASL PLAIN/Kerberos.
-- [ ] Integration matrix: no new job; covered by the existing binary-TCP legs (2.3.9, 3.1.3, 4.0.1, 4.2.1) asserting `set_ugi` is accepted.
+- [x] `options.go`: `WithUserGroups`. `client.go`/`conn.go`: on a newly dialed binary connection with no SASL auth configured and `WithUser` set, call `set_ugi(user, groups)` once before the connection is used for anything else. See SPEC §3.1 and §5.1.
+- [x] `internal/hmstest`: a `set_ugi` handler recording the `(user, groups)` it was called with, so a test can assert it fired exactly once per new connection and never over HTTP or under SASL PLAIN/Kerberos.
+- [x] Integration matrix: no new job; covered by the existing binary-TCP legs (2.3.9, 3.1.3, 4.0.1, 4.2.1) asserting `set_ugi` is accepted.
 
 ### Slice 8: Partition lookups & `AlterDatabase`
 - [x] `partition.go`: `GetPartitionsByNames`, `GetPartitionsByFilter`, `GetPartitionNamesByValues` per SPEC §5.5. `GetPartitionsByNames` is chunked like `AddPartitions` and, like `GetPartitions`/`AlterPartitions`, tries the 4.x-only `get_partitions_by_names_req`/`get_partition_names_ps_req` request variants first (SPEC §2.3 Rules 6/7) before falling back to the legacy RPCs, which -- unlike `get_partitions_req`/`alter_partitions_req` -- exist on every supported version. `client.go`: `AlterDatabase` per SPEC §5.3. `conn.go`: bind `get_partitions_by_names(_req)`, `get_partitions_by_filter`, `get_partition_names_ps(_req)`, `alter_database`.
@@ -160,31 +160,33 @@ Defined in SPEC §5. Implementation notes:
 - [x] Integration matrix: extended every leg (2.3+, since the legacy RPCs predate catalogs) with a partition-by-names lookup, a partition-filter lookup, a partial-values name lookup, and a database alter.
 
 ### Slice 9: Binary and HTTP TLS
-- [ ] `options.go`: `WithTLS` per SPEC §5.1. `internal/transport/binary.go`: wrap the dialed socket in `tls.Client` before the SASL/binary protocol layers, for `thrift://` against a `metastore.use.SSL=true` server. `internal/transport/http.go`: apply the configured `*tls.Config` to the `*http.Client`'s `Transport.TLSClientConfig` for `https://`. See SPEC §3.1, §3.2.
-- [ ] Unit tests: binary TLS handshake against an in-process TLS listener wrapping `internal/hmstest`; HTTP TLS client config applied and overridable by a caller-supplied `WithHTTPClient`.
-- [ ] Integration matrix: no new job; a TLS-enabled 4.2.1 leg is tracked as a follow-up, not required for 1.0 sign-off, since it needs a certificate-bearing Docker image.
+- [x] `options.go`: `WithTLS` per SPEC §5.1. `internal/transport/binary.go`: wrap the dialed socket in `tls.Client` before the SASL/binary protocol layers, for `thrift://` against a `metastore.use.SSL=true` server. `internal/transport/http.go`: apply the configured `*tls.Config` to the `*http.Client`'s `Transport.TLSClientConfig` for `https://`. See SPEC §3.1, §3.2.
+- [x] Unit tests: binary TLS handshake against an in-process TLS listener wrapping `internal/hmstest`; HTTP TLS client config applied and overridable by a caller-supplied `WithHTTPClient`.
+- [ ] **Deferred**: Integration matrix: no new job; a TLS-enabled 4.2.1 leg needs a certificate-bearing Docker image and is not required for 1.0 sign-off. `test/integration_test.go`'s `TestTLS` is the placeholder — it skips unless `HMS_TLS_URIS` is set.
 
 ### Slice 10: Notifications
-- [ ] `client.go` (or a new `notification.go`): `CurrentNotificationID`, `GetNextNotifications`, `NotificationEvent` per SPEC §5.7. `conn.go`: bind `get_current_notificationEventId`, `get_next_notification`. `convert.go`: `NotificationEvent` conversion.
-- [ ] `internal/hmstest`: an append-only event log driven by the store's own mutations (create/drop/alter), plus handlers for the two RPCs.
-- [ ] Unit tests: event ordering, `eventTypes` filtering, `lastEventID` pagination.
-- [ ] Integration matrix: extend every leg (2.3+) with a notification-id check after a table create.
+- [x] `client.go` (or a new `notification.go`): `CurrentNotificationID`, `GetNextNotifications`, `NotificationEvent` per SPEC §5.7. `conn.go`: bind `get_current_notificationEventId`, `get_next_notification`. `convert.go`: `NotificationEvent` conversion.
+- [x] `internal/hmstest`: an append-only event log driven by the store's own mutations (create/drop/alter), plus handlers for the two RPCs.
+- [x] Unit tests: event ordering, `eventTypes` filtering, `lastEventID` pagination.
+- [x] Integration matrix: extend every leg (2.3+) with a notification-id check after a table create (`TestNotifications`).
 
 ### Slice 11: Column statistics (read-only)
-- [ ] A new `stats.go`: `GetTableColumnStatistics` and the `ColumnStatistics`/`*ColumnStats`/`Decimal` types per SPEC §5.8. `conn.go`: bind `get_table_statistics_req`. `convert.go`: the `ColumnStatisticsData` union-arm conversion.
-- [ ] `internal/hmstest`: a `get_table_statistics_req` handler serving fixture stats for at least one column of each of the seven exposed types (bool/long/double/string/binary/decimal/date).
-- [ ] Unit tests: each union arm converts to the right `ColumnStatistics` field with the rest nil; an unset optional low/high value stays nil, not a zero-valued pointer.
-- [ ] Integration matrix: extend the 3.x/4.x legs with a column-statistics read after `ANALYZE TABLE` (or an equivalent stats-populating step) on a fixture table.
+- [x] A new `stats.go`: `GetTableColumnStatistics` and the `ColumnStatistics`/`*ColumnStats`/`Decimal` types per SPEC §5.8. `conn.go`: bind `get_table_statistics_req`. `convert.go`: the `ColumnStatisticsData` union-arm conversion. Widened beyond the original seven types to eight: `TimestampColumnStats` was added alongside the rest (see the fix-round note in the ledger).
+- [x] `internal/hmstest`: a `get_table_statistics_req` handler serving fixture stats for at least one column of each of the eight exposed types (bool/long/double/string/binary/decimal/date/timestamp).
+- [x] Unit tests: each union arm converts to the right `ColumnStatistics` field with the rest nil; an unset optional low/high value stays nil, not a zero-valued pointer.
+- [x] Integration matrix: a column-statistics read on an Iceberg fixture table, exercised in `TestTables_FormatBuildersAndLifecycle`.
 
 ### Slice 12: ACID locks and transactions
-- [ ] A new `txn.go`: `OpenTransaction`, `CommitTransaction`, `AbortTransaction`, `Heartbeat`, `Lock`, `CheckLock`, `Unlock`, and the `Lock*`/`LockRequest`/`LockResponse` types per SPEC §5.9. `conn.go`: bind `open_txns`, `commit_txn`, `abort_txn`, `heartbeat`, `lock`, `check_lock`, `unlock`.
-- [ ] `internal/hmstest`: a minimal txn/lock table (open txn ids, lock ids and their state) backing the seven handlers above.
-- [ ] Unit tests: open/commit/abort round-trip, a lock request that returns `LockStateWaiting` then `LockStateAcquired` on `CheckLock`, heartbeat on a txn-only and lock-only request.
-- [ ] Integration matrix: extend the 2.3+ legs with an open/lock/heartbeat/commit cycle against a fixture table.
+- [x] A new `txn.go`: `OpenTransaction`, `CommitTransaction`, `AbortTransaction`, `Heartbeat`, `Lock`, `CheckLock`, `Unlock`, and the `Lock*`/`LockRequest`/`LockResponse` types per SPEC §5.9. `conn.go`: bind `open_txns`, `commit_txn`, `abort_txn`, `heartbeat`, `lock`, `check_lock`, `unlock`.
+- [x] `internal/hmstest`: a minimal txn/lock table (open txn ids, lock ids and their state) backing the seven handlers above.
+- [x] Unit tests: open/commit/abort round-trip, a lock request that returns `LockStateWaiting` then `LockStateAcquired` on `CheckLock`, heartbeat on a txn-only and lock-only request.
+- [x] Integration matrix: `TestACID` covers an open/lock/checklock/unlock cycle and a heartbeat, extended to every 2.3+ leg. **Unrun as of this commit**: it assumes the ACID TXN tables Hive's `schematool` creates already exist in each image's Derby metastore DB; nobody has confirmed a green run yet (deferred to the final wave per the ledger).
+- Minors deferred to a later wave (per review): the fixture's lock-conflict handling ignores `LockComponent.Level`; `Heartbeat(0, 0)`'s behaviour is undocumented; `LockComponent` field comment style.
 
 ### Slice 13: `SkewedInfo` exposure (gated)
-- [ ] Gate: track the upstream Thrift Go fix for THRIFT-2063 (PR 3778). Not started until a `github.com/apache/thrift` release containing it is available to pin in `go.mod`.
-- [ ] Once ungated: `scripts/gen-thrift.sh` stops removing `skewedColValueLocationMaps` from the IDL; regenerate `gen/`. `types.go`: `SkewedInfo`, `SkewedLocation` per SPEC §5.4. `convert.go`: `StorageDescriptor.SkewedInfo` conversion, including the list-keyed map.
+- [x] `SkewedInfo.ColumnNames`/`ColumnValues` (the wire's `skewedColNames`/`skewedColValues`, unaffected by the THRIFT-2063 gate) shipped early as part of Slice 3's struct additions: `types.go`, `convert.go`, round-trip fidelity. See SPEC §5.4.
+- [ ] **Still gated**: `skewedColValueLocationMaps` (the list-keyed `map<list<string>, string>`) remains unmodelled and genuinely lost on read (SPEC §1.1, §5.4) pending the upstream Thrift Go fix for THRIFT-2063 (PR 3778). Not started until a `github.com/apache/thrift` release containing it is available to pin in `go.mod`.
+- [ ] Once ungated: `scripts/gen-thrift.sh` stops removing `skewedColValueLocationMaps` from the IDL; regenerate `gen/`. `types.go`: `SkewedLocation` (or equivalent) per SPEC §5.4. `convert.go`: the list-keyed map conversion.
 - [ ] `internal/hmstest`: a fixture table with skewed columns, values, and at least one location-map entry.
 - [ ] Unit tests: round-trip of `ColumnValueLocationMaps` through `CreateTable`/`GetTable`.
 - [ ] Integration matrix: extend the 3.x/4.x legs (skew is unsupported on 2.3) with a skewed-table create/read.
@@ -196,9 +198,9 @@ Defined in SPEC §5. Implementation notes:
 - [ ] Integration matrix: a Kerberized 4.2.1 leg is tracked as a follow-up (needs a KDC sidecar in the Docker Compose fixture), not required for 1.0 sign-off. `test/integration_test.go`'s `TestKerberos` is the placeholder: it skips unless `HMS_KRB5_URIS` is set, so the leg is a matter of adding the fixture and the environment, not new test code.
 
 ### Slice 15: Observability & API stability
-- [ ] `options.go`: `WithLogger`, `WithRPCObserver` per SPEC §5.10. `client.go`: emit `RPCInfo` from the `call`/`read` retry loop (`do`); log connection dial/close, `MarkFailed`/`MarkHealthy` transitions, and recovery-probe sweeps through the configured logger.
-- [ ] `go.mod`/tag policy: confirm module tags stay `v0.x` until the `polytable` adoption note below ships, per SPEC §8.
-- [ ] Unit tests: an observer sees one `RPCInfo` per attempt (including retried attempts) with the right `Attempt`/`Err`; a logger sees a dial/close pair and a failover transition under a simulated endpoint outage.
+- [ ] `options.go`: `WithLogger`, `WithRPCObserver` per SPEC §5.10. `client.go`: emit `RPCInfo` from the `call`/`read` retry loop (`do`); log connection dial/close, `MarkFailed`/`MarkHealthy` transitions, and recovery-probe sweeps through the configured logger. **In progress as of this commit**: landing as a separate, concurrently-dispatched commit (Task 8 in the ledger); SPEC §5.10 already documents the shipped shape, but `client.go`/`conn.go`/`errors.go`/`options.go`/`observe.go` are uncommitted on this branch as this task runs, so this checkbox is left unticked until that commit lands.
+- [x] `go.mod`/tag policy: confirmed module tags stay `v0.x` until the `polytable` adoption note below ships, per SPEC §8 (no change needed — the policy was already correctly stated).
+- [ ] Unit tests: an observer sees one `RPCInfo` per attempt (including retried attempts) with the right `Attempt`/`Err`; a logger sees a dial/close pair and a failover transition under a simulated endpoint outage. Not yet present on disk as this task runs; see the note above.
 - [ ] Integration matrix: no new job; observability is exercised incidentally by the other legs via `WithLogger` attached to the test harness's own logger.
 
 ### Downstream: adoption in `polytable`
