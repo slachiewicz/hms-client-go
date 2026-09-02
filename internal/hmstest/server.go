@@ -64,9 +64,13 @@ func removedRPCs(v Version) []string {
 		return []string{
 			"get_catalogs", "get_catalog", "create_catalog", "drop_catalog",
 			"alter_partitions_req", "get_partitions_req",
+			"get_partitions_by_names_req", "get_partition_names_ps_req",
 		}
 	case Hive31:
-		return []string{"alter_partitions_req", "get_partitions_req"}
+		return []string{
+			"alter_partitions_req", "get_partitions_req",
+			"get_partitions_by_names_req", "get_partition_names_ps_req",
+		}
 	default:
 		return nil
 	}

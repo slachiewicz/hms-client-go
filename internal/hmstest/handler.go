@@ -6,6 +6,7 @@ import (
 	"context"
 	"math"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -186,6 +187,122 @@ func truncateParts(parts []*hive_metastore.Partition, maxParts int16) []*hive_me
 	return out
 }
 
+// partitionsMatchingNames returns, in parts order, the partitions of tbl
+// whose computed name (partitionName) is in names.
+func partitionsMatchingNames(tbl *hive_metastore.Table, parts []*hive_metastore.Partition, names []string) []*hive_metastore.Partition {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	var out []*hive_metastore.Partition
+	for _, p := range parts {
+		if want[partitionName(tbl, p)] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// partitionMatchesPartialValues reports whether p's Values match
+// partialValues as a prefix, treating an empty string in partialValues as
+// a wildcard for that position (get_partition_names_ps's "partial values"
+// semantics: unset trailing -- or interior -- key positions match any
+// value).
+func partitionMatchesPartialValues(p *hive_metastore.Partition, partialValues []string) bool {
+	for i, v := range partialValues {
+		if v == "" {
+			continue
+		}
+		if i >= len(p.Values) || p.Values[i] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// partitionsMatchingPartialValues returns, in parts order, the partitions
+// matching partialValues (see partitionMatchesPartialValues).
+func partitionsMatchingPartialValues(parts []*hive_metastore.Partition, partialValues []string) []*hive_metastore.Partition {
+	var out []*hive_metastore.Partition
+	for _, p := range parts {
+		if partitionMatchesPartialValues(p, partialValues) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// parsePartitionFilter parses the fake server's supported subset of Hive's
+// partition-filter expression grammar (SPEC §5.5): one or more
+// "key = 'value'" equality terms joined by "and" (case-insensitive), e.g.
+// "dt = '2024-01-01' and region = 'eu'". This fake server implements no
+// general expression grammar (no OR, no other operators, no unquoted or
+// numeric literals); anything outside that subset is rejected with a
+// MetaException, mirroring how a real metastore reports a filter it
+// cannot parse. An empty filter matches every partition.
+func parsePartitionFilter(filter string) (map[string]string, error) {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return nil, nil
+	}
+	terms := filterAndSplit.Split(filter, -1)
+	out := make(map[string]string, len(terms))
+	for _, term := range terms {
+		key, val, ok := parseFilterEqTerm(term)
+		if !ok {
+			return nil, &hive_metastore.MetaException{Message: "unsupported partition filter (only \"key = 'value'\" terms joined by \"and\" are supported): " + filter}
+		}
+		out[key] = val
+	}
+	return out, nil
+}
+
+// filterAndSplit splits a partition filter on "and", case-insensitively,
+// used by parsePartitionFilter.
+var filterAndSplit = regexp.MustCompile(`(?i)\s+and\s+`)
+
+// parseFilterEqTerm parses one "key = 'value'" term, as used by
+// parsePartitionFilter. It reports ok=false for anything else, including
+// an unquoted or missing value.
+func parseFilterEqTerm(term string) (key, val string, ok bool) {
+	idx := strings.Index(term, "=")
+	if idx < 0 {
+		return "", "", false
+	}
+	key = strings.TrimSpace(term[:idx])
+	raw := strings.TrimSpace(term[idx+1:])
+	if key == "" || len(raw) < 2 || raw[0] != '\'' || raw[len(raw)-1] != '\'' {
+		return "", "", false
+	}
+	inner := raw[1 : len(raw)-1]
+	if strings.Contains(inner, "'") {
+		// A quote character inside the value means raw isn't actually one
+		// quoted literal, e.g. an "or"-joined term this fake server
+		// doesn't support ("dt = '1' or region = 'us'") that happens to
+		// both start and end with a single quote.
+		return "", "", false
+	}
+	return key, inner, true
+}
+
+// partitionMatchesFilterTerms reports whether p satisfies every key=value
+// term in terms, resolving each key against tbl.PartitionKeys.
+func partitionMatchesFilterTerms(tbl *hive_metastore.Table, p *hive_metastore.Partition, terms map[string]string) bool {
+	for k, v := range terms {
+		idx := -1
+		for i, fk := range tbl.PartitionKeys {
+			if fk.Name == k {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 || idx >= len(p.Values) || p.Values[idx] != v {
+			return false
+		}
+	}
+	return true
+}
+
 func partitionName(tbl *hive_metastore.Table, p *hive_metastore.Partition) string {
 	segs := make([]string, len(tbl.PartitionKeys))
 	for i, k := range tbl.PartitionKeys {
@@ -252,6 +369,38 @@ type DropPartitionArgs struct {
 	TblName    string
 	PartVals   []string
 	DeleteData bool
+}
+
+// GetPartitionsByNamesArgs is the recorded LastArgs value for
+// GetPartitionsByNames.
+type GetPartitionsByNamesArgs struct {
+	DbName  string
+	TblName string
+	Names   []string
+}
+
+// GetPartitionsByFilterArgs is the recorded LastArgs value for
+// GetPartitionsByFilter.
+type GetPartitionsByFilterArgs struct {
+	DbName   string
+	TblName  string
+	Filter   string
+	MaxParts int16
+}
+
+// GetPartitionNamesPsArgs is the recorded LastArgs value for
+// GetPartitionNamesPs.
+type GetPartitionNamesPsArgs struct {
+	DbName   string
+	TblName  string
+	PartVals []string
+	MaxParts int16
+}
+
+// AlterDatabaseArgs is the recorded LastArgs value for AlterDatabase.
+type AlterDatabaseArgs struct {
+	Name string
+	Db   *hive_metastore.Database
 }
 
 // SetUgiArgs is the recorded LastArgs value for SetUgi.
@@ -454,6 +603,27 @@ func (h *handler) CreateDatabase(_ context.Context, db *hive_metastore.Database)
 		t := now32()
 		stored.CreateTime = &t
 	}
+	h.store.Databases[key] = &stored
+	return nil
+}
+
+// AlterDatabase replaces a database's mutable properties (Description,
+// LocationURI, Parameters, OwnerName, OwnerType) with db's, keyed by the
+// existing (possibly catalog-qualified) name.
+func (h *handler) AlterDatabase(_ context.Context, name string, db *hive_metastore.Database) error {
+	h.rec.record("alter_database", AlterDatabaseArgs{Name: name, Db: db})
+	catName, dbName, err := resolveDB(h.v, name)
+	if err != nil {
+		return err
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := dbKey(catName, dbName)
+	if _, ok := h.store.Databases[key]; !ok {
+		return &hive_metastore.NoSuchObjectException{Message: "database " + dbName + " not found"}
+	}
+	stored := *db
+	stored.Name = dbName
 	h.store.Databases[key] = &stored
 	return nil
 }
@@ -788,4 +958,129 @@ func (h *handler) DropPartition(_ context.Context, dbName, tblName string, partV
 	}
 	h.store.Partitions[key] = append(existing[:idx], existing[idx+1:]...)
 	return true, nil
+}
+
+// GetPartitionsByNames returns the partitions of a table whose computed
+// name (partitionName) is in names.
+func (h *handler) GetPartitionsByNames(_ context.Context, dbName, tblName string, names []string) ([]*hive_metastore.Partition, error) {
+	h.rec.record("get_partitions_by_names", GetPartitionsByNamesArgs{DbName: dbName, TblName: tblName, Names: names})
+	catName, db, err := resolveDB(h.v, dbName)
+	if err != nil {
+		return nil, err
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := tblKey(catName, db, tblName)
+	tbl, ok := h.store.Tables[key]
+	if !ok {
+		return nil, &hive_metastore.NoSuchObjectException{Message: "table " + db + "." + tblName + " not found"}
+	}
+	return partitionsMatchingNames(tbl, h.store.Partitions[key], names), nil
+}
+
+// GetPartitionsByNamesReq is GetPartitionsByNames' request-variant RPC. Its
+// request struct carries no CatName field (unlike GetPartitionNamesPsReq):
+// a non-default catalog is instead expressed as a "@<cat>#<db>" qualifier
+// on DbName, the same convention get_partitions_by_names itself uses (see
+// newGetPartitionsByNamesRequest in partition.go).
+func (h *handler) GetPartitionsByNamesReq(_ context.Context, req *hive_metastore.GetPartitionsByNamesRequest) (*hive_metastore.GetPartitionsByNamesResult_, error) {
+	h.rec.record("get_partitions_by_names_req", req)
+	if req.Engine != "hive" {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field Engine"}
+	}
+	if req.ID != -1 {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field ID"}
+	}
+	catName, db, err := resolveDB(h.v, req.DbName)
+	if err != nil {
+		return nil, err
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := tblKey(catName, db, req.TblName)
+	tbl, ok := h.store.Tables[key]
+	if !ok {
+		return nil, &hive_metastore.NoSuchObjectException{Message: "table " + db + "." + req.TblName + " not found"}
+	}
+	return &hive_metastore.GetPartitionsByNamesResult_{Partitions: partitionsMatchingNames(tbl, h.store.Partitions[key], req.Names)}, nil
+}
+
+// GetPartitionsByFilter returns up to maxParts partitions of a table
+// matching filter (see parsePartitionFilter for the supported subset).
+func (h *handler) GetPartitionsByFilter(_ context.Context, dbName, tblName, filter string, maxParts int16) ([]*hive_metastore.Partition, error) {
+	h.rec.record("get_partitions_by_filter", GetPartitionsByFilterArgs{DbName: dbName, TblName: tblName, Filter: filter, MaxParts: maxParts})
+	catName, db, err := resolveDB(h.v, dbName)
+	if err != nil {
+		return nil, err
+	}
+	terms, err := parsePartitionFilter(filter)
+	if err != nil {
+		return nil, err
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := tblKey(catName, db, tblName)
+	tbl, ok := h.store.Tables[key]
+	if !ok {
+		return nil, &hive_metastore.NoSuchObjectException{Message: "table " + db + "." + tblName + " not found"}
+	}
+	var matched []*hive_metastore.Partition
+	for _, p := range h.store.Partitions[key] {
+		if partitionMatchesFilterTerms(tbl, p, terms) {
+			matched = append(matched, p)
+		}
+	}
+	return truncateParts(matched, maxParts), nil
+}
+
+// GetPartitionNamesPs returns up to maxParts partition names of a table
+// whose Values match partVals as a prefix (see
+// partitionMatchesPartialValues).
+func (h *handler) GetPartitionNamesPs(_ context.Context, dbName, tblName string, partVals []string, maxParts int16) ([]string, error) {
+	h.rec.record("get_partition_names_ps", GetPartitionNamesPsArgs{DbName: dbName, TblName: tblName, PartVals: partVals, MaxParts: maxParts})
+	catName, db, err := resolveDB(h.v, dbName)
+	if err != nil {
+		return nil, err
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := tblKey(catName, db, tblName)
+	tbl, ok := h.store.Tables[key]
+	if !ok {
+		return nil, &hive_metastore.NoSuchObjectException{Message: "table " + db + "." + tblName + " not found"}
+	}
+	matched := truncateParts(partitionsMatchingPartialValues(h.store.Partitions[key], partVals), maxParts)
+	names := make([]string, len(matched))
+	for i, p := range matched {
+		names[i] = partitionName(tbl, p)
+	}
+	return names, nil
+}
+
+// GetPartitionNamesPsReq is GetPartitionNamesPs' request-variant RPC.
+// Unlike GetPartitionsByNamesReq, its request struct does carry a CatName
+// field, resolved the same way get_partitions_req's does (see the cat
+// helper).
+func (h *handler) GetPartitionNamesPsReq(_ context.Context, req *hive_metastore.GetPartitionNamesPsRequest) (*hive_metastore.GetPartitionNamesPsResponse, error) {
+	h.rec.record("get_partition_names_ps_req", req)
+	catName, err := cat(h.v, req.CatName)
+	if err != nil {
+		return nil, err
+	}
+	if req.ID != -1 {
+		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field ID"}
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	key := tblKey(catName, req.DbName, req.TblName)
+	tbl, ok := h.store.Tables[key]
+	if !ok {
+		return nil, &hive_metastore.NoSuchObjectException{Message: "table " + req.DbName + "." + req.TblName + " not found"}
+	}
+	matched := truncateParts(partitionsMatchingPartialValues(h.store.Partitions[key], req.PartValues), req.MaxParts)
+	names := make([]string, len(matched))
+	for i, p := range matched {
+		names[i] = partitionName(tbl, p)
+	}
+	return &hive_metastore.GetPartitionNamesPsResponse{Names: names}, nil
 }

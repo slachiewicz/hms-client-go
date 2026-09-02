@@ -38,12 +38,12 @@ Verified against the `hive_metastore.thrift` IDL at tags `rel/release-2.3.9`, `r
 | RPC | 2.3.x | 3.x | 4.x | In 4.2.1 IDL |
 | :--- | :-: | :-: | :-: | :-: |
 | `get_table_req`, `get_table_objects_by_name_req`, `add_partitions_req` | Y | Y | Y | Y |
-| `get_database`, `get_all_databases`, `create_database`, `drop_database`, `get_all_tables`, `create_table`, `alter_table`, `drop_table`, `get_partitions`, `get_partition_names`, `alter_partitions`, `drop_partition`, `get_config_value` | Y | Y | Y | Y |
+| `get_database`, `get_all_databases`, `create_database`, `drop_database`, `alter_database`, `get_all_tables`, `create_table`, `alter_table`, `drop_table`, `get_partitions`, `get_partition_names`, `alter_partitions`, `drop_partition`, `get_partitions_by_names`, `get_partitions_by_filter`, `get_partition_names_ps`, `get_config_value` | Y | Y | Y | Y |
 | `set_ugi` (caller identity over binary NOSASL, §3.1) | Y | Y | Y | Y |
 | `get_table`, `get_table_objects_by_name` (legacy) | Y | Y | - | **no** |
 | `get_catalogs`, `get_catalog`, `create_catalog`, `drop_catalog` | - | Y | Y | Y |
 | `catName` fields on `Database`, `Table`, `Partition` and `*Request` structs | - | Y | Y | Y |
-| `alter_partitions_req`, `get_partitions_req` | - | - | Y | Y |
+| `alter_partitions_req`, `get_partitions_req`, `get_partitions_by_names_req`, `get_partition_names_ps_req` | - | - | Y | Y |
 | Thrift-over-HTTP transport (`metastore.server.thrift.transport.mode=http`) | - | - | Y | n/a |
 
 ### 2.2. Transport availability
@@ -63,6 +63,8 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **Rule 3 (`alter_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `alter_partitions(dbName, tblName, parts)`.
 * **Rule 4 (`get_partitions_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partitions(dbName, tblName, maxParts)`.
 * **Rule 5 (batching)**: `add_partitions_req` and `get_table_objects_by_name_req` are chunked (default 1000 items per request) on every version to bound request size.
+* **Rule 6 (`get_partitions_by_names_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partitions_by_names(dbName, tblName, names)`; chunked like Rule 5.
+* **Rule 7 (`get_partition_names_ps_req`)**: On `UNKNOWN_METHOD` (Hive 2.3 and 3.x) the client degrades to `get_partition_names_ps(dbName, tblName, partVals, maxParts)`.
 
 ---
 

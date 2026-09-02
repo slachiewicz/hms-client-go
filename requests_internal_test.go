@@ -107,6 +107,40 @@ func TestPartitionToThrift_KeepsIDLDefaultsOverWire(t *testing.T) {
 	assert.Equal(t, int64(-1), got.WriteId)
 }
 
+// TestNewGetPartitionsByNamesRequest_KeepsIDLDefaultsOverWire covers
+// partition.go's GetPartitionsByNames building a
+// hive_metastore.GetPartitionsByNamesRequest via
+// NewGetPartitionsByNamesRequest() rather than a bare struct literal,
+// which would send Engine="" and ID=0 on the wire instead of the IDL
+// defaults ("hive" and -1); neither field has an equivalent on the
+// exported API.
+func TestNewGetPartitionsByNamesRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	req := newGetPartitionsByNamesRequest("db", "tbl", nil, []string{"dt=1"})
+
+	got := hive_metastore.NewGetPartitionsByNamesRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, "hive", got.Engine)
+	assert.Equal(t, int64(-1), got.ID)
+}
+
+// TestNewGetPartitionNamesPsRequest_KeepsIDLDefaultsOverWire covers
+// partition.go's GetPartitionNamesByValues building a
+// hive_metastore.GetPartitionNamesPsRequest via
+// NewGetPartitionNamesPsRequest() rather than a bare struct literal, which
+// would send ID=0 on the wire instead of the IDL default -1; ID has no
+// equivalent on the exported API.
+func TestNewGetPartitionNamesPsRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
+	t.Parallel()
+	req := newGetPartitionNamesPsRequest("db", "tbl", nil, []string{"v"}, -1)
+
+	got := hive_metastore.NewGetPartitionNamesPsRequest()
+	roundTrip(t, req, got)
+
+	assert.Equal(t, int64(-1), got.ID)
+}
+
 // TestDatabaseToThrift_CopiesParameters covers the fix for
 // databaseToThrift assigning db.Parameters directly instead of copying it
 // through copyStringMap like every other converter in convert.go: the wire

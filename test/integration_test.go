@@ -162,8 +162,8 @@ func textStorage(location string, cols []*hms.FieldSchema) *hms.StorageDescripto
 }
 
 // TestDatabases_CRUD covers CreateDatabase/GetDatabase/GetAllDatabases/
-// DropDatabase, ErrAlreadyExists on a duplicate create, and ErrNotFound on
-// a get/drop after the database is gone (SPEC.md §5.3).
+// AlterDatabase/DropDatabase, ErrAlreadyExists on a duplicate create, and
+// ErrNotFound on a get/drop after the database is gone (SPEC.md §5.3).
 func TestDatabases_CRUD(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
@@ -189,6 +189,18 @@ func TestDatabases_CRUD(t *testing.T) {
 	names, err := c.GetAllDatabases(ctx)
 	require.NoError(t, err)
 	assert.Contains(t, names, name)
+
+	// AlterDatabase (1.0 addition, SPEC.md §5.3): change a parameter and
+	// the owner, and read them back.
+	altered := *got
+	altered.Parameters = map[string]string{"created_by": "hms-client-go-integration", "updated_by": "hms-client-go-integration"}
+	altered.OwnerName = "hms-client-go-integration"
+	require.NoError(t, c.AlterDatabase(ctx, name, &altered))
+
+	gotAltered, err := c.GetDatabase(ctx, name)
+	require.NoError(t, err)
+	assert.Equal(t, "hms-client-go-integration", gotAltered.Parameters["updated_by"])
+	assert.Equal(t, "hms-client-go-integration", gotAltered.OwnerName)
 
 	require.NoError(t, c.DropDatabase(ctx, name, false, false, false))
 
@@ -326,6 +338,35 @@ func TestPartitions_AddGetAlterDrop(t *testing.T) {
 	names, err := c.GetPartitionNames(ctx, dbName, tableName, -1)
 	require.NoError(t, err)
 	assert.Len(t, names, partitionCount)
+
+	// GetPartitionsByNames (1.0 addition, SPEC.md §5.5): look up a subset
+	// of partitions by their computed names.
+	wantNames := names[:5]
+	byNames, err := c.GetPartitionsByNames(ctx, dbName, tableName, wantNames)
+	require.NoError(t, err)
+	assert.Len(t, byNames, 5)
+	gotByNames := make(map[string]bool, len(byNames))
+	for _, p := range byNames {
+		require.Len(t, p.Values, 1)
+		gotByNames["dt="+p.Values[0]] = true
+	}
+	for _, n := range wantNames {
+		assert.True(t, gotByNames[n], "GetPartitionsByNames missing %s", n)
+	}
+
+	// GetPartitionsByFilter (1.0 addition, SPEC.md §5.5): a Hive
+	// partition-filter expression on the "dt" key created above.
+	byFilter, err := c.GetPartitionsByFilter(ctx, dbName, tableName, fmt.Sprintf("dt = '%s'", parts[0].Values[0]), -1)
+	require.NoError(t, err)
+	require.Len(t, byFilter, 1)
+	assert.Equal(t, parts[0].Values, byFilter[0].Values)
+
+	// GetPartitionNamesByValues (1.0 addition, SPEC.md §5.5): "dt" is this
+	// table's only partition key, so a full value is itself the whole
+	// "prefix".
+	byValues, err := c.GetPartitionNamesByValues(ctx, dbName, tableName, []string{parts[1].Values[0]}, -1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dt=" + parts[1].Values[0]}, byValues)
 
 	altered := []*hms.Partition{all[0]}
 	altered[0].Parameters = map[string]string{"altered_by": "hms-client-go-integration"}

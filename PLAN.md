@@ -152,11 +152,11 @@ Defined in SPEC §5. Implementation notes:
 - [ ] Integration matrix: no new job; covered by the existing binary-TCP legs (2.3.9, 3.1.3, 4.0.1, 4.2.1) asserting `set_ugi` is accepted.
 
 ### Slice 8: Partition lookups & `AlterDatabase`
-- [ ] `partition.go`: `GetPartitionsByNames`, `GetPartitionsByFilter`, `GetPartitionNamesByValues`, chunked per SPEC §5.5. `client.go`: `AlterDatabase` per SPEC §5.3. `conn.go`: bind `get_partitions_by_names`, `get_partitions_by_filter`, `get_partition_names_ps`, `alter_database`.
-- [ ] Fold in the SPEC §5.0 catalog-resolution fix: `AlterTable` honours `newTable.CatalogName` the same way `CreateTable` does.
-- [ ] `internal/hmstest`: handlers for the four RPCs above, backed by the existing in-memory store.
-- [ ] Unit tests: chunking boundary for `GetPartitionsByNames`, filter string passed through verbatim, prefix matching for `GetPartitionNamesByValues`, `AlterDatabase` round-trip.
-- [ ] Integration matrix: extend the 3.x/4.x legs (these RPCs are unavailable on 2.3 per SPEC §2.1) with a partition-filter and partition-by-names lookup, and a database alter.
+- [x] `partition.go`: `GetPartitionsByNames`, `GetPartitionsByFilter`, `GetPartitionNamesByValues` per SPEC §5.5. `GetPartitionsByNames` is chunked like `AddPartitions` and, like `GetPartitions`/`AlterPartitions`, tries the 4.x-only `get_partitions_by_names_req`/`get_partition_names_ps_req` request variants first (SPEC §2.3 Rules 6/7) before falling back to the legacy RPCs, which -- unlike `get_partitions_req`/`alter_partitions_req` -- exist on every supported version. `client.go`: `AlterDatabase` per SPEC §5.3. `conn.go`: bind `get_partitions_by_names(_req)`, `get_partitions_by_filter`, `get_partition_names_ps(_req)`, `alter_database`.
+- [x] Fold in the SPEC §5.0 catalog-resolution fix: `AlterTable` honours `newTable.CatalogName` the same way `CreateTable` does (already in place from an earlier slice).
+- [x] `internal/hmstest`: handlers for the six RPCs above (the four legacy plus the two 4.x-only request variants), backed by the existing in-memory store; `GetPartitionsByFilter`'s fixture supports the `key = 'value'` subset of Hive's filter grammar, joined by `and`, rejecting anything else with `MetaException`.
+- [x] Unit tests: chunking boundary for `GetPartitionsByNames`, fallback caching for the two request variants, filter string passed through verbatim (plus the fixture's supported/unsupported grammar), prefix matching for `GetPartitionNamesByValues`, `AlterDatabase` round-trip and `ErrNotFound` on a missing database.
+- [x] Integration matrix: extended every leg (2.3+, since the legacy RPCs predate catalogs) with a partition-by-names lookup, a partition-filter lookup, a partial-values name lookup, and a database alter.
 
 ### Slice 9: Binary and HTTP TLS
 - [ ] `options.go`: `WithTLS` per SPEC §5.1. `internal/transport/binary.go`: wrap the dialed socket in `tls.Client` before the SASL/binary protocol layers, for `thrift://` against a `metastore.use.SSL=true` server. `internal/transport/http.go`: apply the configured `*tls.Config` to the `*http.Client`'s `Transport.TLSClientConfig` for `https://`. See SPEC §3.1, §3.2.

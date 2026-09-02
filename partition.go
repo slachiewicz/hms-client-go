@@ -165,6 +165,155 @@ func (c *Client) AlterPartitions(ctx context.Context, dbName, tableName string, 
 	})
 }
 
+// newGetPartitionsByNamesRequest builds a GetPartitionsByNamesRequest from
+// hive_metastore.NewGetPartitionsByNamesRequest() rather than a bare struct
+// literal, so the non-pointer "optional with default" field ID (no
+// equivalent on this package's exported API) keeps
+// NewGetPartitionsByNamesRequest's default of -1 instead of falling back
+// to the Go zero value 0 (see newPartitionsRequest's identical treatment).
+//
+// The generated GetPartitionsByNamesRequest carries no CatName field (a
+// gap in the 4.2.1 IDL, unlike PartitionsRequest and
+// GetPartitionNamesPsRequest), so a non-default catalog is instead
+// expressed the way every other RPC without a dedicated catalog field
+// expresses it: a "@<cat>#<db>" qualifier on DbName (qualifyDBName).
+func newGetPartitionsByNamesRequest(dbName, tableName string, cat *string, names []string) *hive_metastore.GetPartitionsByNamesRequest {
+	req := hive_metastore.NewGetPartitionsByNamesRequest()
+	req.DbName = qualifyDBName(cat, dbName)
+	req.TblName = tableName
+	req.Names = names
+	return req
+}
+
+// GetPartitionsByNames returns the partitions of the table named
+// tableName in database dbName whose partition name (as returned by
+// GetPartitionNames, e.g. "dt=2024-01-01") is in names, in the order the
+// server returns them per chunk. Requests are chunked to at most the
+// client's chunk size (see WithChunkSize; default 1000) names each,
+// mirroring AddPartitions/GetTables (SPEC §2.3 Rule 5); chunks are sent
+// sequentially. Against a server lacking get_partitions_by_names_req
+// (Hive 2.3 and 3.x), it degrades to the legacy get_partitions_by_names
+// RPC (SPEC §2.3).
+func (c *Client) GetPartitionsByNames(ctx context.Context, dbName, tableName string, names []string, opts ...CatalogOption) ([]*Partition, error) {
+	var out []*Partition
+	err := c.read(ctx, "get_partitions_by_names_req", func(ctx context.Context, cn *conn) error {
+		cat, err := c.resolveCat(ctx, cn, opts)
+		if err != nil {
+			return err
+		}
+		var parts []*Partition
+		for i := 0; i < len(names); i += c.cfg.chunkSize {
+			end := i + c.cfg.chunkSize
+			if end > len(names) {
+				end = len(names)
+			}
+			chunk := names[i:end]
+			err := cn.tryReq(ctx, "get_partitions_by_names_req",
+				func(ctx context.Context) error {
+					resp, err := cn.getPartitionsByNamesReq(ctx, newGetPartitionsByNamesRequest(dbName, tableName, cat, chunk))
+					if err != nil {
+						return err
+					}
+					parts = append(parts, partitionsFromThrift(resp.Partitions)...)
+					return nil
+				},
+				func(ctx context.Context) error {
+					ps, err := cn.getPartitionsByNames(ctx, qualifyDBName(cat, dbName), tableName, chunk)
+					if err != nil {
+						return err
+					}
+					parts = append(parts, partitionsFromThrift(ps)...)
+					return nil
+				},
+			)
+			if err != nil {
+				return err
+			}
+		}
+		out = parts
+		return nil
+	})
+	return out, err
+}
+
+// GetPartitionsByFilter returns up to maxParts partitions of the table
+// named tableName in database dbName matching filter, Hive's partition
+// filter expression grammar (e.g. "year = 2024 AND month > 6"); a
+// negative maxParts means "all partitions". filter is passed through to
+// the server verbatim -- this package neither parses nor validates it.
+// GetPartitionsByFilter has no request-variant RPC (SPEC §2.3): it always
+// calls the legacy get_partitions_by_filter, on every supported version.
+func (c *Client) GetPartitionsByFilter(ctx context.Context, dbName, tableName, filter string, maxParts int, opts ...CatalogOption) ([]*Partition, error) {
+	var out []*Partition
+	err := c.read(ctx, "get_partitions_by_filter", func(ctx context.Context, cn *conn) error {
+		cat, err := c.resolveCat(ctx, cn, opts)
+		if err != nil {
+			return err
+		}
+		parts, err := cn.getPartitionsByFilter(ctx, qualifyDBName(cat, dbName), tableName, filter, clampParts(maxParts))
+		if err != nil {
+			return err
+		}
+		out = partitionsFromThrift(parts)
+		return nil
+	})
+	return out, err
+}
+
+// newGetPartitionNamesPsRequest builds a GetPartitionNamesPsRequest from
+// hive_metastore.NewGetPartitionNamesPsRequest() rather than a bare struct
+// literal, so the non-pointer "optional with default" field ID (no
+// equivalent on this package's exported API) keeps
+// NewGetPartitionNamesPsRequest's default of -1 instead of falling back to
+// the Go zero value 0 (see newPartitionsRequest's identical treatment).
+// Unlike GetPartitionsByNamesRequest, this request struct does carry a
+// CatName field, so it is set directly rather than folded into DbName.
+func newGetPartitionNamesPsRequest(dbName, tableName string, cat *string, partialValues []string, maxParts int16) *hive_metastore.GetPartitionNamesPsRequest {
+	req := hive_metastore.NewGetPartitionNamesPsRequest()
+	req.CatName = cat
+	req.DbName = dbName
+	req.TblName = tableName
+	req.PartValues = partialValues
+	req.MaxParts = maxParts
+	return req
+}
+
+// GetPartitionNamesByValues returns the names of up to maxParts partitions
+// of the table named tableName in database dbName whose leading
+// partition-key values equal partialValues (a prefix; trailing keys are
+// wildcarded); a negative maxParts means "all partitions". Against a
+// server lacking get_partition_names_ps_req (Hive 2.3 and 3.x), it
+// degrades to the legacy get_partition_names_ps RPC (SPEC §2.3).
+func (c *Client) GetPartitionNamesByValues(ctx context.Context, dbName, tableName string, partialValues []string, maxParts int, opts ...CatalogOption) ([]string, error) {
+	var out []string
+	err := c.read(ctx, "get_partition_names_ps_req", func(ctx context.Context, cn *conn) error {
+		cat, err := c.resolveCat(ctx, cn, opts)
+		if err != nil {
+			return err
+		}
+		mp := clampParts(maxParts)
+		return cn.tryReq(ctx, "get_partition_names_ps_req",
+			func(ctx context.Context) error {
+				resp, err := cn.getPartitionNamesPsReq(ctx, newGetPartitionNamesPsRequest(dbName, tableName, cat, partialValues, mp))
+				if err != nil {
+					return err
+				}
+				out = resp.Names
+				return nil
+			},
+			func(ctx context.Context) error {
+				names, err := cn.getPartitionNamesPs(ctx, qualifyDBName(cat, dbName), tableName, partialValues, mp)
+				if err != nil {
+					return err
+				}
+				out = names
+				return nil
+			},
+		)
+	})
+	return out, err
+}
+
 // DropPartition removes the partition identified by partVals (in
 // partition-key order) from the table named tableName in database dbName.
 // deleteData is forwarded to the server. With ifExists true, a missing

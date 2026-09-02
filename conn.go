@@ -77,6 +77,14 @@ type conn struct {
 	// invariant #5), but newConn only ever calls it for a binary NOSASL
 	// dial with a configured user (config.wantsSetUgi); see newConn.
 	setUgi func(ctx context.Context, userName string, groupNames []string) ([]string, error)
+
+	alterDatabase func(ctx context.Context, dbname string, db *hive_metastore.Database) error
+
+	getPartitionsByNames    func(ctx context.Context, dbName, tblName string, names []string) ([]*hive_metastore.Partition, error)
+	getPartitionsByNamesReq func(ctx context.Context, req *hive_metastore.GetPartitionsByNamesRequest) (*hive_metastore.GetPartitionsByNamesResult_, error)
+	getPartitionsByFilter   func(ctx context.Context, dbName, tblName, filter string, maxParts int16) ([]*hive_metastore.Partition, error)
+	getPartitionNamesPs     func(ctx context.Context, dbName, tblName string, partVals []string, maxParts int16) ([]string, error)
+	getPartitionNamesPsReq  func(ctx context.Context, req *hive_metastore.GetPartitionNamesPsRequest) (*hive_metastore.GetPartitionNamesPsResponse, error)
 }
 
 // newConn dials ep and binds every generated RPC method this client uses
@@ -148,6 +156,14 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 		getVersion:     fb.GetVersion,
 
 		setUgi: g.SetUgi,
+
+		alterDatabase: g.AlterDatabase,
+
+		getPartitionsByNames:    g.GetPartitionsByNames,
+		getPartitionsByNamesReq: g.GetPartitionsByNamesReq,
+		getPartitionsByFilter:   g.GetPartitionsByFilter,
+		getPartitionNamesPs:     g.GetPartitionNamesPs,
+		getPartitionNamesPsReq:  g.GetPartitionNamesPsReq,
 	}
 
 	// set_ugi establishes the caller's identity over binary NOSASL (SPEC

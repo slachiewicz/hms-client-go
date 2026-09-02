@@ -727,6 +727,23 @@ func (c *Client) CreateDatabase(ctx context.Context, db *Database) error {
 	})
 }
 
+// AlterDatabase replaces the mutable properties (Description, LocationURI,
+// Parameters, OwnerName, OwnerType) of the database named name with db's
+// (SPEC §5.3, 1.0 addition); db.CreateTime is never written, the same way
+// CreateDatabase never writes it (see databaseToThrift). A non-empty
+// db.CatalogName overrides the client's default catalog for this call, the
+// same way CreateDatabase's db.CatalogName does; opts' InCatalog, if
+// passed, takes precedence over both (SPEC §5.0).
+func (c *Client) AlterDatabase(ctx context.Context, name string, db *Database, opts ...CatalogOption) error {
+	return c.call(ctx, "alter_database", func(ctx context.Context, cn *conn) error {
+		cat, err := c.resolveCatFor(ctx, cn, db.CatalogName, opts)
+		if err != nil {
+			return err
+		}
+		return cn.alterDatabase(ctx, qualifyDBName(cat, name), databaseToThrift(db, cat))
+	})
+}
+
 // DropDatabase removes the database named name. deleteData and cascade are
 // forwarded to the server; cascade must be true to drop a non-empty
 // database, or the server returns ErrInvalidOperation. With ifExists true,
