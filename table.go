@@ -6,13 +6,6 @@ import (
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
 )
 
-// defaultChunkSize is the maximum number of table names GetTables requests
-// per get_table_objects_by_name_req call (SPEC §5.4). It is a package
-// variable rather than a constant so tests can shrink it (see
-// export_test.go's SetChunkSizeForTest) without needing thousands of
-// fixture tables to exercise chunking.
-var defaultChunkSize = 1000
-
 // GetAllTables lists the names of every table in the database named dbName,
 // in the effective catalog (WithCatalog, overridden per call by InCatalog;
 // default "hive").
@@ -53,8 +46,8 @@ func (c *Client) GetTable(ctx context.Context, dbName, tableName string, opts ..
 
 // GetTables returns the tables named in tableNames that exist in database
 // dbName, in request order, silently skipping any name the server does not
-// know. Requests are chunked to at most defaultChunkSize names each (SPEC
-// §5.4).
+// know. Requests are chunked to at most the client's chunk size (see
+// withChunkSize; default 1000) names each (SPEC §5.4).
 func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []string, opts ...CatalogOption) ([]*Table, error) {
 	var out []*Table
 	err := c.read(ctx, "get_table_objects_by_name_req", func(ctx context.Context, cn *conn) error {
@@ -63,8 +56,8 @@ func (c *Client) GetTables(ctx context.Context, dbName string, tableNames []stri
 			return err
 		}
 		var tables []*Table
-		for i := 0; i < len(tableNames); i += defaultChunkSize {
-			end := i + defaultChunkSize
+		for i := 0; i < len(tableNames); i += c.cfg.chunkSize {
+			end := i + c.cfg.chunkSize
 			if end > len(tableNames) {
 				end = len(tableNames)
 			}

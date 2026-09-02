@@ -22,20 +22,10 @@ var partitionVersions = []struct {
 	{"hive40", hmstest.Hive40},
 }
 
-// TestAddPartitions_Chunked deliberately does not call t.Parallel(): it
-// mutates the shared, unexported defaultChunkSize package var via
-// SetChunkSizeForTest, exactly as table_test.go's
-// TestGetTables_ChunkedRequestOrder already does. Running either of them
-// concurrently with any t.Parallel() test races on that var (confirmed
-// with go test -race); Go only runs non-parallel top-level tests one at a
-// time, strictly before the parallel batch executes, so leaving this one
-// serial is what keeps it race-free without touching export_test.go.
 func TestAddPartitions_Chunked(t *testing.T) {
-	restore := hms.SetChunkSizeForTest(2)
-	defer restore()
-
+	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)
-	c := mustNew(t, srv.URI())
+	c := mustNew(t, srv.URI(), hms.WithChunkSize(2))
 	ctx := context.Background()
 
 	require.NoError(t, c.CreateTable(ctx, &hms.Table{
@@ -66,15 +56,8 @@ func TestAddPartitions_Chunked(t *testing.T) {
 	assert.Len(t, got, 5)
 }
 
-// TestAddPartitions_IfNotExists does not call t.Parallel() at the top
-// level: its subtests call AddPartitions, which reads the shared
-// defaultChunkSize package var (see TestAddPartitions_Chunked's comment
-// above for why that var makes top-level parallelism unsafe here). Its
-// subtests still run in parallel with each other; Go only releases them to
-// actually execute once this function's own body (dispatching both t.Run
-// calls) returns, which happens during the top-level serial dispatch phase,
-// strictly before any top-level t.Parallel() test's body runs.
 func TestAddPartitions_IfNotExists(t *testing.T) {
+	t.Parallel()
 	t.Run("duplicate without ifNotExists fails", func(t *testing.T) {
 		t.Parallel()
 		srv := hmstest.Start(t, hmstest.Hive40)
@@ -112,10 +95,8 @@ func TestAddPartitions_IfNotExists(t *testing.T) {
 	})
 }
 
-// TestGetPartitions does not call t.Parallel() at the top level: it calls
-// AddPartitions to seed fixtures, which reads defaultChunkSize (see
-// TestAddPartitions_Chunked's comment above).
 func TestGetPartitions(t *testing.T) {
+	t.Parallel()
 	for _, tt := range partitionVersions {
 		v, name := tt.v, tt.name
 		t.Run(name, func(t *testing.T) {
@@ -221,10 +202,8 @@ func TestGetPartitions_ClampMaxParts(t *testing.T) {
 	assert.EqualValues(t, math.MaxInt16, args.MaxParts)
 }
 
-// TestGetPartitionNames does not call t.Parallel(): it calls AddPartitions
-// to seed fixtures, which reads defaultChunkSize (see
-// TestAddPartitions_Chunked's comment above).
 func TestGetPartitionNames(t *testing.T) {
+	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)
 	c := mustNew(t, srv.URI())
 	ctx := context.Background()
@@ -247,10 +226,8 @@ func TestGetPartitionNames(t *testing.T) {
 	assert.Equal(t, []string{"dt=2024-01-01/region=eu", "dt=2024-01-02/region=us"}, names)
 }
 
-// TestAlterPartitions does not call t.Parallel() at the top level: it calls
-// AddPartitions to seed fixtures, which reads defaultChunkSize (see
-// TestAddPartitions_Chunked's comment above).
 func TestAlterPartitions(t *testing.T) {
+	t.Parallel()
 	for _, tt := range partitionVersions {
 		v, name := tt.v, tt.name
 		t.Run(name, func(t *testing.T) {
@@ -280,19 +257,15 @@ func TestAlterPartitions(t *testing.T) {
 				assert.Contains(t, calls, "alter_partitions_req")
 				assert.NotContains(t, calls, "alter_partitions")
 			} else {
+				assert.NotContains(t, calls, "alter_partitions_req")
 				assert.Contains(t, calls, "alter_partitions")
 			}
 		})
 	}
 }
 
-// TestDropPartition does not call t.Parallel() at the top level: its
-// "existing partition is removed" subtest calls AddPartitions, which reads
-// defaultChunkSize (see TestAddPartitions_Chunked's comment above); since
-// this test's own body would otherwise be deferred into the same global
-// parallel batch as table_test.go's TestGetTables_ChunkedRequestOrder, that
-// applies to the whole function, not just the one subtest.
 func TestDropPartition(t *testing.T) {
+	t.Parallel()
 	t.Run("ifExists false on missing partition is not found", func(t *testing.T) {
 		t.Parallel()
 		srv := hmstest.Start(t, hmstest.Hive40)

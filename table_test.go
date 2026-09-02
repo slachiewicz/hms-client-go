@@ -102,11 +102,8 @@ func TestGetAllTables(t *testing.T) {
 
 func TestGetTables_ChunkedRequestOrder(t *testing.T) {
 	t.Parallel()
-	restore := hms.SetChunkSizeForTest(2)
-	defer restore()
-
 	srv := hmstest.Start(t, hmstest.Hive40)
-	c := mustNew(t, srv.URI())
+	c := mustNew(t, srv.URI(), hms.WithChunkSize(2))
 	ctx := context.Background()
 
 	// Only t0, t2, and t4 exist; t1 and t3 are requested but unknown to

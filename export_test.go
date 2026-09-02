@@ -52,12 +52,8 @@ func ClientPick(c *Client) (int, bool)    { return c.cluster.Pick() }
 // (default 30s), so ha_test.go can bound its waits to well under a second.
 func WithProbeIntervalForTest(d time.Duration) Option { return withProbeInterval(d) }
 
-// SetChunkSizeForTest overrides defaultChunkSize, GetTables' per-request
-// chunk size, so a test can exercise chunking without needing thousands of
-// fixture tables. Call the returned restore func (typically via defer) to
-// put the original value back.
-func SetChunkSizeForTest(n int) (restore func()) {
-	old := defaultChunkSize
-	defaultChunkSize = n
-	return func() { defaultChunkSize = old }
-}
+// WithChunkSize exposes withChunkSize, GetTables' and AddPartitions'
+// per-request chunk size, so a test can exercise chunking without needing
+// thousands of fixture rows and without racing t.Parallel() tests over a
+// shared package variable.
+var WithChunkSize = withChunkSize

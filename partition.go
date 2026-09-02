@@ -82,18 +82,20 @@ func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string
 }
 
 // AddPartitions adds partitions to the table named tableName in database
-// dbName. Requests are chunked to at most defaultChunkSize partitions each
-// (SPEC §2.3 Rule 5). With ifNotExists true, a partition whose values
-// already exist is silently skipped; otherwise it is reported as
-// ErrAlreadyExists.
+// dbName. Requests are chunked to at most the client's chunk size (see
+// withChunkSize; default 1000) partitions each (SPEC §2.3 Rule 5); chunks
+// are sent sequentially, so a failure on a later chunk leaves the earlier
+// chunks already committed on the server. With ifNotExists true, a
+// partition whose values already exist is silently skipped; otherwise it
+// is reported as ErrAlreadyExists.
 func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, ifNotExists bool, opts ...CatalogOption) error {
 	return c.call(ctx, "add_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		for i := 0; i < len(partitions); i += defaultChunkSize {
-			end := i + defaultChunkSize
+		for i := 0; i < len(partitions); i += c.cfg.chunkSize {
+			end := i + c.cfg.chunkSize
 			if end > len(partitions) {
 				end = len(partitions)
 			}

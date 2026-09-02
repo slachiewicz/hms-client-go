@@ -12,6 +12,7 @@ const (
 	defaultMaxRetries    = 3
 	defaultPoolSize      = 4
 	defaultProbeInterval = 30 * time.Second
+	defaultChunkSize     = 1000
 	// minProbeInterval is the floor clamp enforces on probeInterval: a
 	// zero or negative value would panic inside time.NewTicker
 	// (recoveryProbe) instead of merely misbehaving, unlike poolSize or
@@ -27,6 +28,7 @@ type config struct {
 	randomOrder   bool
 	poolSize      int
 	probeInterval time.Duration
+	chunkSize     int
 
 	httpClient  *http.Client
 	httpHeaders map[string]string
@@ -45,6 +47,7 @@ func newConfig() *config {
 		maxRetries:    defaultMaxRetries,
 		poolSize:      defaultPoolSize,
 		probeInterval: defaultProbeInterval,
+		chunkSize:     defaultChunkSize,
 	}
 }
 
@@ -64,6 +67,9 @@ func (cfg *config) clamp() {
 	}
 	if cfg.probeInterval < minProbeInterval {
 		cfg.probeInterval = minProbeInterval
+	}
+	if cfg.chunkSize < 1 {
+		cfg.chunkSize = 1
 	}
 }
 
@@ -109,6 +115,15 @@ func WithPoolSize(n int) Option {
 // so ha_test.go can bound its waits.
 func withProbeInterval(d time.Duration) Option {
 	return func(c *config) { c.probeInterval = d }
+}
+
+// withChunkSize sets the per-request chunk size used by GetTables and
+// AddPartitions (SPEC §5.4, §2.3 Rule 5). The default is 1000. A value
+// below 1 is clamped to 1. test hook; not part of the public API:
+// export_test.go exposes it as WithChunkSize so tests can exercise
+// chunking without needing thousands of fixture rows.
+func withChunkSize(n int) Option {
+	return func(c *config) { c.chunkSize = n }
 }
 
 // WithHTTPClient sets the *http.Client used for the "http://" and "https://"
