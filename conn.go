@@ -291,6 +291,31 @@ func validateAuth(cfg *config, eps []transport.Endpoint) error {
 	return nil
 }
 
+// validateTransport reports a caller mistake in the HTTP transport's TLS
+// configuration: WithTLS and WithHTTPClient both set for an "https://"
+// endpoint. NewHTTP uses a caller-supplied client as-is -- its own
+// Transport's TLS configuration governs -- so WithTLS would be silently
+// ignored there, which is exactly the kind of quiet downgrade (a custom
+// RootCAs or client certificate that never reaches the server) this
+// package must not perform. New calls it before dialing so it surfaces as
+// ErrInvalidOperation.
+//
+// It applies only to an "https://" endpoint: over "http://" there is no
+// TLS for WithTLS to configure, and over "thrift://" WithHTTPClient is
+// inert, so neither combination hides anything.
+func validateTransport(cfg *config, eps []transport.Endpoint) error {
+	if cfg.tlsConfig == nil || cfg.httpClient == nil {
+		return nil
+	}
+	for _, ep := range eps {
+		if ep.Scheme == transport.SchemeHTTPS {
+			return errors.New("hms: WithTLS cannot be combined with WithHTTPClient; " +
+				"set TLSClientConfig on the supplied client's Transport instead")
+		}
+	}
+	return nil
+}
+
 // useLegacy reports whether method previously observed UNKNOWN_METHOD on
 // this conn and should be retried against its legacy form (SPEC §2.3 Rules
 // 3 and 4).

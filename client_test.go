@@ -2,6 +2,8 @@ package hms_test
 
 import (
 	"context"
+	"crypto/tls"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -469,6 +471,49 @@ func TestNew_MisconfiguredAuth(t *testing.T) {
 			require.Error(t, err)
 			assert.ErrorIs(t, err, hms.ErrInvalidOperation)
 			assert.NotErrorIs(t, err, hms.ErrUnavailable)
+		})
+	}
+}
+
+// TestNew_TLSWithHTTPClient covers the other silent downgrade New must
+// refuse: NewHTTP uses a caller-supplied *http.Client as-is, so WithTLS
+// would never reach the wire for an "https://" endpoint. The combination
+// is only a mistake there -- over "http://" there is no TLS to configure,
+// and over "thrift://" the supplied client is inert -- so those two still
+// construct a Client.
+func TestNew_TLSWithHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		uris    string
+		wantErr bool
+	}{
+		{name: "https rejects the combination", uris: "https://127.0.0.1:1/metastore", wantErr: true},
+		{name: "http has no TLS to ignore", uris: "http://127.0.0.1:1/metastore"},
+		{name: "thrift ignores the http client, not the TLS config", uris: "thrift://127.0.0.1:1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, err := hms.New(context.Background(), tc.uris,
+				hms.WithHTTPClient(&http.Client{}),
+				hms.WithTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+				assert.NotErrorIs(t, err, hms.ErrUnavailable)
+				assert.Contains(t, err.Error(), "WithTLS cannot be combined with WithHTTPClient")
+				return
+			}
+			// Nothing is listening on either address, so New may still
+			// fail; what it must not do is reject the configuration.
+			if err != nil {
+				assert.NotErrorIs(t, err, hms.ErrInvalidOperation)
+				return
+			}
+			_ = c.Close()
 		})
 	}
 }

@@ -184,7 +184,10 @@ func WithChunkSize(n int) Option {
 }
 
 // WithHTTPClient sets the *http.Client used for the "http://" and "https://"
-// transports. If unset, a default client is constructed.
+// transports. If unset, a default client is constructed. The supplied
+// client is used as-is: its Transport governs TLS, proxies, and connection
+// pooling, and WithTimeout does not override its Timeout. For an "https://"
+// endpoint it cannot be combined with WithTLS (see there).
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *config) { c.httpClient = hc }
 }
@@ -289,11 +292,17 @@ func WithKrb5Config(path string) Option {
 }
 
 // WithTLS wraps the binary TCP socket in TLS, for a server configured with
-// metastore.use.SSL=true, and overrides the *http.Client's
-// Transport.TLSClientConfig for "https://" endpoints when no WithHTTPClient
-// is supplied (SPEC §3.1, §3.2). cfg's Certificates, RootCAs, ServerName,
-// and InsecureSkipVerify apply exactly as crypto/tls interprets them; the
+// metastore.use.SSL=true, and configures the Transport.TLSClientConfig of
+// the *http.Client this package builds for "https://" endpoints (SPEC
+// §3.1, §3.2). cfg's Certificates, RootCAs, ServerName, and
+// InsecureSkipVerify apply exactly as crypto/tls interprets them; the
 // caller is responsible for building a cfg suited to the server.
+//
+// It cannot be combined with WithHTTPClient for an "https://" endpoint:
+// a supplied client is used as-is, so its own Transport's TLS
+// configuration governs and this one would be silently ignored. New
+// rejects that combination with ErrInvalidOperation; configure TLS on the
+// supplied client instead.
 func WithTLS(cfg *tls.Config) Option {
 	return func(c *config) { c.tlsConfig = cfg }
 }

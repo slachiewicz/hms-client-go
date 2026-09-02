@@ -97,6 +97,11 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	if err := validateAuth(cfg, eps); err != nil {
 		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
+	// So is a WithTLS the HTTP transport would silently ignore. See
+	// validateTransport.
+	if err := validateTransport(cfg, eps); err != nil {
+		return nil, wrapAs("New", ErrInvalidOperation, err)
+	}
 
 	// The caller's Kerberos credentials are loaded once here, not once per
 	// dial: the gokrb5 client behind them runs a session-renewal goroutine

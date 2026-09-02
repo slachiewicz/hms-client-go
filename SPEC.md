@@ -104,7 +104,7 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
   * Auth mode `JWT`: `Authorization: Bearer <token>`.
   * Every other auth mode: `x-actor-username: <user>`. The user defaults to the OS user when not configured.
   * Arbitrary additional headers supplied by the caller (for Knox or other reverse proxies).
-* **TLS**: `WithTLS(cfg *tls.Config)` (§5.1) overrides the `*http.Client`'s `Transport.TLSClientConfig` for `https://` endpoints, the same option used for `thrift://` (§3.1).
+* **TLS**: `WithTLS(cfg *tls.Config)` (§5.1) configures the TLS client used for `https://` endpoints, the same option used for `thrift://` (§3.1). It applies to the client this package constructs; a client supplied with `WithHTTPClient` is used as-is, so its own `Transport.TLSClientConfig` governs instead. Combining the two for an `https://` endpoint is rejected by `New` as `ErrInvalidOperation` rather than silently ignoring `WithTLS`.
 
 ---
 
@@ -168,7 +168,7 @@ func WithPlainAuth(user, password string) Option // SASL PLAIN over binary TCP
 func WithKerberos(principal string, keytabOrCCache ...string) Option // SASL GSSAPI over binary TCP, pure Go (gokrb5); see §3.1
 func WithKerberosServicePrincipal(spn string) Option // overrides the metastore's principal; default "hive/<host>"
 func WithKrb5Config(path string) Option         // overrides KRB5_CONFIG / /etc/krb5.conf
-func WithTLS(cfg *tls.Config) Option            // thrift:// (metastore.use.SSL=true) and https:// (overrides the http.Client's TLS config); see §3.1, §3.2
+func WithTLS(cfg *tls.Config) Option            // thrift:// (metastore.use.SSL=true) and https:// (rejected with WithHTTPClient); see §3.1, §3.2
 func WithLogger(l *slog.Logger) Option          // connection lifecycle, failover, and probe events at Debug/Info; see §5.10
 func WithRPCObserver(f func(RPCInfo)) Option    // per-RPC hook; see §5.10
 ```
