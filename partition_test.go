@@ -10,7 +10,7 @@ import (
 
 	hms "github.com/slachiewicz/hms-client-go"
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 var partitionVersions = []struct {
@@ -248,20 +248,56 @@ func TestGetPartitions_FallbackCached(t *testing.T) {
 	}
 }
 
-func TestGetPartitions_ClampMaxParts(t *testing.T) {
+func TestPartitionListing_MaxPartsValidation(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)
 	c := mustNew(t, srv.URI())
 	ctx := context.Background()
 
-	require.NoError(t, c.CreateTable(ctx, &hms.Table{DatabaseName: "db", TableName: "t"}))
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName:  "db",
+		TableName:     "t",
+		PartitionKeys: []*hms.FieldSchema{{Name: "dt", Type: "string"}},
+	}))
 
-	_, err := c.GetPartitions(ctx, "db", "t", math.MaxInt16+5)
-	require.NoError(t, err)
+	// Exceeding math.MaxInt16 must return ErrInvalidOperation on all four methods,
+	// rather than silently truncating listings at 32767.
+	tooBig := math.MaxInt16 + 1
 
-	args, ok := srv.LastArgs("get_partitions_req").(*hive_metastore.PartitionsRequest)
-	require.True(t, ok)
-	assert.EqualValues(t, math.MaxInt16, args.MaxParts)
+	_, err := c.GetPartitions(ctx, "db", "t", tooBig)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "exceeds Hive metastore limit of 32767")
+	assert.Contains(t, err.Error(), "GetPartitionsSeq")
+
+	_, err = c.GetPartitionNames(ctx, "db", "t", tooBig)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "exceeds Hive metastore limit of 32767")
+
+	_, err = c.GetPartitionsByFilter(ctx, "db", "t", "dt = '2024-01-01'", tooBig)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "exceeds Hive metastore limit of 32767")
+
+	_, err = c.GetPartitionNamesByValues(ctx, "db", "t", []string{"2024-01-01"}, tooBig)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hms.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "exceeds Hive metastore limit of 32767")
+
+	// Boundary values: math.MaxInt16, 0, and negative (-1, -10) must succeed.
+	_, err = c.GetPartitions(ctx, "db", "t", math.MaxInt16)
+	assert.NoError(t, err)
+	_, err = c.GetPartitionNames(ctx, "db", "t", math.MaxInt16)
+	assert.NoError(t, err)
+
+	_, err = c.GetPartitions(ctx, "db", "t", 0)
+	assert.NoError(t, err)
+
+	_, err = c.GetPartitions(ctx, "db", "t", -1)
+	assert.NoError(t, err)
+	_, err = c.GetPartitions(ctx, "db", "t", -10)
+	assert.NoError(t, err)
 }
 
 func TestGetPartitionNames(t *testing.T) {
@@ -613,7 +649,7 @@ func TestGetPartitionsByFilter(t *testing.T) {
 }
 
 // TestGetPartitionsByFilter_UnsupportedGrammar covers the fake server's
-// documented limitation (internal/hmstest/handler.go parsePartitionFilter):
+// documented limitation (hmstest/handler.go parsePartitionFilter):
 // only "key = 'value'" terms joined by "and" are supported, so an OR
 // expression is rejected with a MetaException, classified as ErrMeta.
 func TestGetPartitionsByFilter_UnsupportedGrammar(t *testing.T) {

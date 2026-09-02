@@ -7,7 +7,7 @@ import (
 
 	hms "github.com/slachiewicz/hms-client-go"
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // benchPartitionFixture seeds a Hive40 fake server directly (bypassing
@@ -16,7 +16,7 @@ import (
 // partitions, each carrying the same columnCount-column schema -- the
 // common case column-list interning (G11) targets: every partition of a
 // table almost always shares its table's own schema. The fake server
-// still talks real Thrift-over-TCP (internal/hmstest.Start dials a real
+// still talks real Thrift-over-TCP (hmstest.Start dials a real
 // net.Listener), so every partition's Storage.Cols is decoded fresh off
 // the wire on each RPC regardless of how the fixture itself shares Go
 // objects in the store -- the fixture's own sharing does not itself

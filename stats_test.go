@@ -9,7 +9,7 @@ import (
 
 	hms "github.com/slachiewicz/hms-client-go"
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // TestGetTableColumnStatistics covers SPEC §5.8's GetTableColumnStatistics

@@ -299,8 +299,9 @@ type Partition struct {
     Parameters   map[string]string
 }
 
-// maxParts < 0 means "all partitions". Values above math.MaxInt16 are clamped
-// to the Thrift i16 limit on the wire.
+// maxParts < 0 means "all partitions". maxParts must not exceed math.MaxInt16
+// (32767); values above that return ErrInvalidOperation to prevent silent
+// listing truncation on the Thrift i16 wire field.
 func (c *Client) GetPartitions(ctx context.Context, dbName, tableName string, maxParts int, opts ...CatalogOption) ([]*Partition, error)
 func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string, maxParts int, opts ...CatalogOption) ([]string, error)
 func (c *Client) AddPartitions(ctx context.Context, dbName, tableName string, partitions []*Partition, ifNotExists bool, opts ...CatalogOption) error
@@ -553,6 +554,7 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 * `v1.0.0` promises standard Go-module semver for package `hms`: no breaking change to an exported identifier without a major version bump.
 * `internal/` (`internal/transport`, `internal/ha`) is unstable and carries no compatibility promise at any version; it exists to be reorganized freely.
 * `gen/` (the generated Thrift bindings) is not part of the API surface at any version — AGENTS.md invariant #4 already forbids a generated type from appearing in an exported `hms` identifier, so `gen/`'s own shape changing (e.g. on an IDL bump) is never a breaking change to package `hms`. It nevertheless stays importable and outside `internal/`, so test oracles and tooling may depend on `gen/hive_metastore` at a pinned module version; its generated types, fields and method names can change on any IDL regeneration without a major version bump.
+* `hmstest` (`github.com/slachiewicz/hms-client-go/hmstest`) provides an in-process fake Hive Metastore Thrift server for consumer and library tests. It emulates Hive 2.3, 3.1, and 4.0 wire protocols, including `set_ugi`, catalog emulation, and error injection via `WithoutRPC` / `WithFailNext`. While package `hms` promises standard semver on its clean abstractions, `hmstest`'s direct seed helpers (`SeedTable`, `SeedPartitions`, etc.) accept generated Thrift types from `gen/hive_metastore`, which can change on IDL regeneration.
 
 ---
 

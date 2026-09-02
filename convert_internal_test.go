@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // serdeTypePtr returns a pointer to v, mirroring ptr (convert.go) for the

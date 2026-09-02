@@ -1,13 +1,21 @@
 # Changelog
 
 All notable changes to this project are documented in this file. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project has not yet tagged
-a release, so everything below is unreleased.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-09-02
+
 ### Added
 
+- `hmstest` promoted to a public in-process fake Hive Metastore Thrift server
+  (`github.com/slachiewicz/hms-client-go/hmstest`), providing `hmstest.Start(t, v)` and
+  `hmstest.NewServer(v)` for consumer unit and integration test doubles. Emulates Hive 2.3, 3.1,
+  and 4.0 wire protocols including `set_ugi` identity, catalogs, and error/panic injection
+  (`WithoutRPC`, `WithFailNext`).
 - `GetPartitionsSeq` and `GetTablesSeq`, `iter.Seq2` streaming forms of `GetPartitions`/
   `GetTables` that actually bound memory: each calls its names-only RPC once
   (`get_partition_names`/`get_all_tables`) and then fetches by name in chunks of
@@ -25,6 +33,16 @@ a release, so everything below is unreleased.
 
 ### Changed
 
+- `GetPartitions`, `GetPartitionNames`, `GetPartitionsByFilter`, and `GetPartitionNamesByValues`
+  now return `ErrInvalidOperation` when `maxParts` exceeds `math.MaxInt16` (32767), rather than
+  silently clamping to `math.MaxInt16` at the Thrift `i16` wire boundary. A caller requesting
+  more than 32767 partitions must pass -1 for all partitions, or stream via `GetPartitionsSeq`.
+- Connection-setup RPCs (`set_ugi`) on newly dialed binary connections are now bounded by
+  `WithConnectTimeout` rather than the per-call socket timeout (`WithTimeout`). In v0.1.0,
+  connection-setup RPCs fell back to `WithTimeout` when the caller's context had no deadline.
+  Any consumer asserting on dial-failure latency against an unresponsive listener should check
+  which timeout they configured: `New` now waits out the connect timeout (default 10s) rather
+  than the per-call socket timeout (default 30s, or shorter if customized).
 - `GetPartitions`, `GetPartitionsByNames`, `GetPartitionsByFilter`, and `GetPartitionsSeq` now
   intern identical `Storage.Columns` lists (by `Name`/`Type`/`Comment`) within one call, so
   partitions sharing a column list share one `[]*FieldSchema` instead of each getting its own
@@ -105,8 +123,7 @@ a release, so everything below is unreleased.
   `New` now performs an RPC on every newly dialed binary connection rather than just the dial
   itself, so a bare listener that accepts a connection but never speaks Thrift no longer models
   a live server in a test -- `WithoutUGI` restores the pre-0.1.0 dial-only behavior for such a
-  test double. This `set_ugi` call is bounded by `WithConnectTimeout`, not the per-call
-  `WithTimeout`, since it is part of connection establishment (SPEC §3.1).
+  test double (SPEC §3.1).
 
 ### Known issues
 

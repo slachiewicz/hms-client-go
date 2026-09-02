@@ -9,9 +9,6 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 > **Status:** `v0.1.0` is the first tagged release. The API follows the stability policy in [SPEC.md §8](SPEC.md): `v0.x` may still change before `v1.0.0`; every release is verified nightly against real Hive 2.3.9, 3.1.3, 4.0.1 and 4.2.1 metastores.
-> on `main`, pending a `v0.1.0` tag. The API is usable today and is verified nightly against
-> real metastores, but it may still change before `v1.0.0`. See [SPEC.md §8](SPEC.md) for the
-> stability policy.
 
 ## What it does
 
@@ -26,6 +23,8 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 * **Notifications, column statistics, and ACID.** Metastore event polling, read-only column
   statistics, and minimal lock/transaction RPCs; observability via `WithLogger` and
   `WithRPCObserver`.
+* **Public in-process test double.** `hmstest` (`github.com/slachiewicz/hms-client-go/hmstest`)
+  emulates Hive 2.3, 3.1, and 4.0 metastores for downstream unit tests without Docker or external daemons.
 
 ## Verified against
 

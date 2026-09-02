@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	hms "github.com/slachiewicz/hms-client-go"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // acidVersions is the version table every ACID test runs against,
@@ -144,7 +144,7 @@ func TestACID_UnknownTransactionAndLock_ErrNotFound(t *testing.T) {
 // TxnAbortedException -> hms.ErrInvalidOperation mapping: committing a
 // transaction already aborted fails distinctly from committing one that
 // was never opened (ErrNotFound, covered above). A second abort is
-// idempotent, per AbortTxn's own doc comment in internal/hmstest/acid.go.
+// idempotent, per AbortTxn's own doc comment in hmstest/acid.go.
 func TestACID_AbortThenCommit_ErrInvalidOperation(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

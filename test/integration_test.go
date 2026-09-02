@@ -3,7 +3,7 @@
 // Package integration_test exercises the hms package against a real,
 // running Hive Metastore server (SPEC.md §2 compatibility matrix, §5 API,
 // §6 formats), as opposed to the in-process fake used by the rest of the
-// test suite (internal/hmstest). It is driven by the environment contract
+// test suite (hmstest). It is driven by the environment contract
 // below and is not run by "go test ./..." or "make check"; only "make
 // test-docker" (build tag "integration") runs it, against a container
 // started by .github/workflows/integration.yml.

@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	hms "github.com/slachiewicz/hms-client-go"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 func TestNew_ConnectsAndReadsVersion(t *testing.T) {

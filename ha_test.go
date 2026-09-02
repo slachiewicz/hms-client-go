@@ -11,7 +11,7 @@ import (
 
 	hms "github.com/slachiewicz/hms-client-go"
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // TestHA_FailoverToSecondEndpoint covers SPEC §4.2 points 2 and 3: an

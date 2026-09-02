@@ -1,5 +1,16 @@
-// Package hmstest is an in-process fake Hive Metastore Thrift server used
-// by this module's own tests. It is not part of the public API.
+// Package hmstest provides an in-process fake Hive Metastore Thrift server
+// for consumer and library tests without requiring a running HMS daemon.
+//
+// Construct and run an emulated server using Start (with testing.TB) or
+// NewServer:
+//
+//	srv := hmstest.Start(t, hmstest.Hive40)
+//	client, err := hms.New(srv.URI())
+//
+// Supported emulated versions are Hive23 (Hive 2.3), Hive31 (Hive 3.1), and
+// Hive40 (Hive 4.0). Options like WithoutRPC allow simulating missing or
+// deprecated RPCs (yielding TApplicationException with UNKNOWN_METHOD), and
+// WithFailNext simulates dropped connections mid-request for resilience testing.
 package hmstest
 
 import (

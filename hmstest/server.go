@@ -112,14 +112,11 @@ type Server struct {
 	panics   []string
 }
 
-// Start launches a fake Hive Metastore server emulating version v and
-// registers t.Cleanup to stop it. It fails the test immediately (via
-// require) if an Option or the version table names an RPC absent from the
-// generated processor map, since that indicates a typo rather than an
-// intentional removal.
-func Start(t testing.TB, v Version, opts ...Option) *Server {
-	t.Helper()
-
+// NewServer launches a fake Hive Metastore server emulating version v.
+// Call Stop when done to close the listener and wait for connections to exit.
+// When running inside a test, prefer Start which automatically registers
+// cleanup with testing.TB.
+func NewServer(v Version, opts ...Option) (*Server, error) {
 	cfg := config{}
 	for _, o := range opts {
 		o(&cfg)
@@ -149,21 +146,38 @@ func Start(t testing.TB, v Version, opts ...Option) *Server {
 
 	proc := hive_metastore.NewThriftHiveMetastoreProcessor(&handler{v: v, store: store, rec: rec})
 	for _, name := range removedRPCs(v) {
-		_, ok := proc.ProcessorMap()[name]
-		require.True(t, ok, "hmstest: RPC %q not found in processor map (version table)", name)
+		if _, ok := proc.ProcessorMap()[name]; !ok {
+			return nil, fmt.Errorf("hmstest: RPC %q not found in processor map (version table)", name)
+		}
 		delete(proc.ProcessorMap(), name)
 	}
 	for _, name := range cfg.without {
-		_, ok := proc.ProcessorMap()[name]
-		require.True(t, ok, "hmstest: RPC %q not found in processor map (WithoutRPC)", name)
+		if _, ok := proc.ProcessorMap()[name]; !ok {
+			return nil, fmt.Errorf("hmstest: RPC %q not found in processor map (WithoutRPC)", name)
+		}
 		delete(proc.ProcessorMap(), name)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
-	s := &Server{ln: ln, rec: rec, store: store, failNext: clampInt32(cfg.failNext), tb: t}
+	s := &Server{ln: ln, rec: rec, store: store, failNext: clampInt32(cfg.failNext)}
 	go s.serve(proc)
+	return s, nil
+}
+
+// Start launches a fake Hive Metastore server emulating version v and
+// registers t.Cleanup to stop it. It fails the test immediately (via
+// require) if an Option or the version table names an RPC absent from the
+// generated processor map, since that indicates a typo rather than an
+// intentional removal.
+func Start(t testing.TB, v Version, opts ...Option) *Server {
+	t.Helper()
+	s, err := NewServer(v, opts...)
+	require.NoError(t, err)
+	s.tb = t
 	t.Cleanup(s.Stop)
 	return s
 }

@@ -2,24 +2,30 @@ package hms
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
 	"math"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
 )
 
-// clampParts converts n to the Thrift i16 maxParts wire type: any negative
-// value becomes -1 ("all partitions"), and a value above math.MaxInt16 is
-// clamped to math.MaxInt16 rather than silently wrapping (gosec G115).
-func clampParts(n int) int16 {
-	switch {
-	case n < 0:
-		return -1
-	case n > math.MaxInt16:
-		return math.MaxInt16
-	default:
-		return int16(n)
+// checkMaxParts converts maxParts to the Thrift i16 wire type. Any negative
+// value becomes -1 ("all partitions"). A value exceeding math.MaxInt16
+// returns ErrInvalidOperation rather than clamping or silently wrapping
+// (gosec G115), preventing silent truncation of partition listings.
+func checkMaxParts(op string, maxParts int) (int16, error) {
+	if maxParts > math.MaxInt16 {
+		msg := fmt.Sprintf("hms: maxParts %d exceeds Hive metastore limit of %d (math.MaxInt16); use -1 for all partitions", maxParts, math.MaxInt16)
+		if op == "get_partitions_req" {
+			msg += " or GetPartitionsSeq to stream"
+		}
+		return 0, wrapAs(op, ErrInvalidOperation, errors.New(msg))
 	}
+	if maxParts < 0 {
+		return -1, nil
+	}
+	return int16(maxParts), nil
 }
 
 // newPartitionsRequest builds a PartitionsRequest from hive_metastore.
@@ -40,16 +46,23 @@ func newPartitionsRequest(dbName, tableName string, cat *string, maxParts int16)
 
 // GetPartitions returns up to maxParts partitions of the table named
 // tableName in database dbName; a negative maxParts means "all partitions".
+// maxParts must not exceed math.MaxInt16 (32767); values above that return
+// ErrInvalidOperation to prevent silent listing truncation on the Thrift
+// i16 wire field. To list more than 32767 partitions, pass -1 or stream via
+// GetPartitionsSeq.
 // Against a server lacking get_partitions_req (Hive 2.3 and 3.x), it
 // degrades to the legacy get_partitions RPC (SPEC §2.3 Rule 4).
 func (c *Client) GetPartitions(ctx context.Context, dbName, tableName string, maxParts int, opts ...CatalogOption) ([]*Partition, error) {
+	mp, err := checkMaxParts("get_partitions_req", maxParts)
+	if err != nil {
+		return nil, err
+	}
 	var out []*Partition
-	err := c.read(ctx, "get_partitions_req", func(ctx context.Context, cn *conn) error {
+	err = c.read(ctx, "get_partitions_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		mp := clampParts(maxParts)
 		return cn.tryReq(ctx, "get_partitions_req",
 			func(ctx context.Context) error {
 				resp, err := cn.getPartitionsReq(ctx, newPartitionsRequest(dbName, tableName, cat, mp))
@@ -75,15 +88,21 @@ func (c *Client) GetPartitions(ctx context.Context, dbName, tableName string, ma
 // GetPartitionNames returns the names of up to maxParts partitions of the
 // table named tableName in database dbName, formatted as
 // "key1=value1/key2=value2" from the table's partition keys; a negative
-// maxParts means "all partitions".
+// maxParts means "all partitions". maxParts must not exceed math.MaxInt16
+// (32767); values above that return ErrInvalidOperation to prevent silent
+// listing truncation on the Thrift i16 wire field. Pass -1 for all partitions.
 func (c *Client) GetPartitionNames(ctx context.Context, dbName, tableName string, maxParts int, opts ...CatalogOption) ([]string, error) {
+	mp, err := checkMaxParts("get_partition_names", maxParts)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
-	err := c.read(ctx, "get_partition_names", func(ctx context.Context, cn *conn) error {
+	err = c.read(ctx, "get_partition_names", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		names, err := cn.getPartitionNames(ctx, qualifyDBName(cat, dbName), tableName, clampParts(maxParts))
+		names, err := cn.getPartitionNames(ctx, qualifyDBName(cat, dbName), tableName, mp)
 		if err != nil {
 			return err
 		}
@@ -397,18 +416,25 @@ func (c *Client) GetPartitionsByNames(ctx context.Context, dbName, tableName str
 // GetPartitionsByFilter returns up to maxParts partitions of the table
 // named tableName in database dbName matching filter, Hive's partition
 // filter expression grammar (e.g. "year = 2024 AND month > 6"); a
-// negative maxParts means "all partitions". filter is passed through to
-// the server verbatim -- this package neither parses nor validates it.
+// negative maxParts means "all partitions". maxParts must not exceed
+// math.MaxInt16 (32767); values above that return ErrInvalidOperation to
+// prevent silent listing truncation on the Thrift i16 wire field. Pass -1
+// for all partitions. filter is passed through to the server verbatim --
+// this package neither parses nor validates it.
 // GetPartitionsByFilter has no request-variant RPC (SPEC §2.3): it always
 // calls the legacy get_partitions_by_filter, on every supported version.
 func (c *Client) GetPartitionsByFilter(ctx context.Context, dbName, tableName, filter string, maxParts int, opts ...CatalogOption) ([]*Partition, error) {
+	mp, err := checkMaxParts("get_partitions_by_filter", maxParts)
+	if err != nil {
+		return nil, err
+	}
 	var out []*Partition
-	err := c.read(ctx, "get_partitions_by_filter", func(ctx context.Context, cn *conn) error {
+	err = c.read(ctx, "get_partitions_by_filter", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		parts, err := cn.getPartitionsByFilter(ctx, qualifyDBName(cat, dbName), tableName, filter, clampParts(maxParts))
+		parts, err := cn.getPartitionsByFilter(ctx, qualifyDBName(cat, dbName), tableName, filter, mp)
 		if err != nil {
 			return err
 		}
@@ -439,17 +465,23 @@ func newGetPartitionNamesPsRequest(dbName, tableName string, cat *string, partia
 // GetPartitionNamesByValues returns the names of up to maxParts partitions
 // of the table named tableName in database dbName whose leading
 // partition-key values equal partialValues (a prefix; trailing keys are
-// wildcarded); a negative maxParts means "all partitions". Against a
-// server lacking get_partition_names_ps_req (Hive 2.3 and 3.x), it
-// degrades to the legacy get_partition_names_ps RPC (SPEC §2.3).
+// wildcarded); a negative maxParts means "all partitions". maxParts must not
+// exceed math.MaxInt16 (32767); values above that return ErrInvalidOperation
+// to prevent silent listing truncation on the Thrift i16 wire field. Pass -1
+// for all partitions. Against a server lacking get_partition_names_ps_req
+// (Hive 2.3 and 3.x), it degrades to the legacy get_partition_names_ps RPC
+// (SPEC §2.3).
 func (c *Client) GetPartitionNamesByValues(ctx context.Context, dbName, tableName string, partialValues []string, maxParts int, opts ...CatalogOption) ([]string, error) {
+	mp, err := checkMaxParts("get_partition_names_ps_req", maxParts)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
-	err := c.read(ctx, "get_partition_names_ps_req", func(ctx context.Context, cn *conn) error {
+	err = c.read(ctx, "get_partition_names_ps_req", func(ctx context.Context, cn *conn) error {
 		cat, err := c.resolveCat(ctx, cn, opts)
 		if err != nil {
 			return err
 		}
-		mp := clampParts(maxParts)
 		return cn.tryReq(ctx, "get_partition_names_ps_req",
 			func(ctx context.Context) error {
 				resp, err := cn.getPartitionNamesPsReq(ctx, newGetPartitionNamesPsRequest(dbName, tableName, cat, partialValues, mp))

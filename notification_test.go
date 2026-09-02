@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	hms "github.com/slachiewicz/hms-client-go"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // notificationVersions is the version table every notification test runs
@@ -28,7 +28,7 @@ var notificationVersions = []struct {
 // contract that event IDs are a monotonically increasing sequence, and that
 // CurrentNotificationID reports the most recently recorded one: three
 // create_database/create_table/drop_table-shaped mutations against the fake
-// server (internal/hmstest/handler.go's recordEvent) must produce three
+// server (hmstest/handler.go's recordEvent) must produce three
 // strictly increasing IDs whose last equals CurrentNotificationID.
 func TestNotifications_IDsIncreaseAndMatchCurrentID(t *testing.T) {
 	t.Parallel()
@@ -190,7 +190,7 @@ func TestNotifications_EmptyLogReturnsNil(t *testing.T) {
 // TestNotifications_ConvertsMessageAndCatalogDefault covers
 // notificationFromThrift's conversion via a black-box observation: Message
 // carries the fixture's compact JSON body, MessageFormat is "json-0.2", and
-// CatalogName defaults to "hive" (SPEC §5.7; internal/hmstest/handler.go's
+// CatalogName defaults to "hive" (SPEC §5.7; hmstest/handler.go's
 // recordEvent never sets CatName, matching a Hive 2.3 server, whose
 // NotificationEvent has no such field at all -- 3.x onward does).
 func TestNotifications_ConvertsMessageAndCatalogDefault(t *testing.T) {

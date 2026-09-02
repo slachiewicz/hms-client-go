@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	hms "github.com/slachiewicz/hms-client-go"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // sliceIdentity returns fs's backing array's address as a comparable
@@ -37,7 +37,7 @@ func countCalls(srv *hmstest.Server, method string) int {
 // across every emulated version: GetPartitionsSeq must yield exactly the
 // partitions setupPartitionedTable creates, in the same order
 // GetPartitionNames itself returns them (creation order, per the fake
-// server's store -- see partitionsMatchingNames in internal/hmstest).
+// server's store -- see partitionsMatchingNames in hmstest).
 func TestGetPartitionsSeq_AllPartitionsInNameOrder(t *testing.T) {
 	t.Parallel()
 	for _, tt := range partitionVersions {

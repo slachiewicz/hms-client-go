@@ -9,7 +9,7 @@ import (
 
 	hms "github.com/slachiewicz/hms-client-go"
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 func TestDatabases_CreateGetRoundTrip(t *testing.T) {
@@ -120,7 +120,7 @@ func TestCreateDatabase_CachesWarehouseRoot(t *testing.T) {
 // Privileges, Type, ConnectorName, RemoteDbname, ManagedLocationUri --
 // exactly what a database Spark or Trino registered with those set would
 // suffer on any AlterDatabase call. The fixture's AlterDatabase replaces
-// the stored database wholesale (internal/hmstest/handler.go's
+// the stored database wholesale (hmstest/handler.go's
 // AlterDatabase), so a surviving field can only come from the snapshot.
 func TestAlterDatabase_PreservesUnmodelledFields(t *testing.T) {
 	t.Parallel()
@@ -189,7 +189,7 @@ func TestGetDatabase_Hive40QualifiesNonDefaultCatalog(t *testing.T) {
 	ctx := context.Background()
 
 	// get_database identifies its catalog purely from a "@<cat>#<name>"
-	// prefix on the wire name (see internal/hmstest/handler.go splitCatDB),
+	// prefix on the wire name (see hmstest/handler.go splitCatDB),
 	// so seed the fake server's store directly under that key rather than
 	// going through CreateDatabase (a Task 8 table-adjacent concern; this
 	// test is only about get_database's own qualifier convention).
@@ -266,7 +266,7 @@ func TestDropDatabase(t *testing.T) {
 
 		require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "db"}))
 		// Table operations land in Task 8; seed the fake server's store
-		// directly ("<cat>.<db>.<table>", see internal/hmstest/handler.go
+		// directly ("<cat>.<db>.<table>", see hmstest/handler.go
 		// dbKey/tblKey) to make the database non-empty.
 		srv.Store().Tables["hive.db.t"] = &hive_metastore.Table{DbName: "db", TableName: "t"}
 
@@ -295,7 +295,7 @@ func TestDropDatabase(t *testing.T) {
 	// Hive 3.1's metastore raises a bare
 	// MetaException(java.lang.NullPointerException) from drop_database on
 	// a missing database instead of NoSuchObjectException (see
-	// internal/hmstest/handler.go's DropDatabase and (*Client).DropDatabase's
+	// hmstest/handler.go's DropDatabase and (*Client).DropDatabase's
 	// doc comment); these two cases prove the client still maps that to
 	// ErrNotFound by following up with get_database.
 	t.Run("hive31 missing database maps drop_database's NPE to not found", func(t *testing.T) {

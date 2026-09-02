@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 	"github.com/slachiewicz/hms-client-go/internal/transport"
 )
 
@@ -278,4 +278,19 @@ func TestServer_GetConfigValue(t *testing.T) {
 	v, err = client.GetConfigValue(context.Background(), "does.not.exist", "fallback")
 	require.NoError(t, err)
 	assert.Equal(t, "fallback", v)
+}
+
+func TestNewServer_Lifecycle(t *testing.T) {
+	t.Parallel()
+	srv, err := hmstest.NewServer(hmstest.Hive40)
+	require.NoError(t, err)
+	defer srv.Stop()
+
+	assert.NotEmpty(t, srv.Addr())
+	assert.Contains(t, srv.URI(), "thrift://")
+
+	// Invalid RPC name in WithoutRPC should fail with an informative error.
+	_, err = hmstest.NewServer(hmstest.Hive40, hmstest.WithoutRPC("non_existent_rpc"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithoutRPC")
 }

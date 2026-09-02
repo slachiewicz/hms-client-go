@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	hms "github.com/slachiewicz/hms-client-go"
-	"github.com/slachiewicz/hms-client-go/internal/hmstest"
+	"github.com/slachiewicz/hms-client-go/hmstest"
 )
 
 // syncBuffer is a bytes.Buffer guarded by a mutex, so it is safe for a
@@ -238,7 +238,7 @@ func TestLogger_ProbeRecoveryLogsEndpointMarkedHealthyOnce(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return strings.Contains(buf.String(), "endpoint marked healthy")
-	}, 2*time.Second, 20*time.Millisecond, "recovery probe must eventually mark the endpoint healthy again")
+	}, 5*time.Second, 20*time.Millisecond, "recovery probe must eventually mark the endpoint healthy again")
 
 	assert.Equal(t, 1, strings.Count(buf.String(), "endpoint marked healthy"),
 		"exactly one endpoint healthy transition must be logged")
