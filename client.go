@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
@@ -14,8 +15,9 @@ import (
 )
 
 // errClosed is the cause reported by acquire once the client has been
-// closed; call surfaces it wrapped in ErrUnavailable.
-var errClosed = errors.New("hms: client closed")
+// closed. It wraps ErrUnavailable directly so the normal wrapError/classify
+// path (errors.go) reports it correctly without any special-casing here.
+var errClosed = fmt.Errorf("hms: client closed: %w", ErrUnavailable)
 
 // Client is a connection-pooled Hive Metastore client. Construct one with
 // New.
@@ -23,14 +25,25 @@ type Client struct {
 	cfg      config
 	endpoint transport.Endpoint
 
+	// mu guards closed together with every send into, or drain of, idle:
+	// Close must never observe idle as fully drained while a concurrent
+	// release is still deciding whether to send into it (and vice versa),
+	// or the conn that "won" that race would never be closed. See release
+	// and Close.
+	mu sync.Mutex
 	// idle holds pooled, currently unused conns. Its buffer size is
-	// cfg.poolSize.
+	// cfg.poolSize. Only touched while mu is held.
 	idle chan *conn
+	// closed is true once Close has run. Only touched while mu is held.
+	closed bool
+	// closeCh is closed exactly once, by Close, so a goroutine blocked in
+	// acquire's final select wakes immediately instead of waiting for a
+	// release or its context that may never come.
+	closeCh chan struct{}
+
 	// live counts conns currently dialed (idle or on loan), so acquire
 	// knows when it may dial a new one instead of blocking.
 	live atomic.Int32
-
-	closed atomic.Bool
 }
 
 // New connects to the Hive Metastore endpoint(s) named by uris (a single
@@ -44,10 +57,16 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	for _, o := range opts {
 		o(cfg)
 	}
+	cfg.clamp()
 
 	eps, err := transport.ParseEndpoints(uris)
 	if err != nil {
-		return nil, err
+		// transport.ParseEndpoints' errors (bad scheme, malformed URI,
+		// mixed schemes, empty list) are all caller mistakes, not
+		// metastore or transport failures, and classify has nothing in
+		// their shape to recognize; force ErrInvalidOperation rather than
+		// letting classify's default of ErrMeta hide that distinction.
+		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
 	ep := eps[0]
 
@@ -55,6 +74,7 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 		cfg:      *cfg,
 		endpoint: ep,
 		idle:     make(chan *conn, cfg.poolSize),
+		closeCh:  make(chan struct{}),
 	}
 
 	cn, err := newConn(ctx, ep, cfg)
@@ -68,11 +88,18 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 
 // Close releases every pooled connection and marks the client closed. Any
 // call still in flight completes normally; its connection is closed rather
-// than returned to the pool once the call finishes. Close is idempotent.
+// than returned to the pool once the call finishes (see release). A
+// goroutine blocked in acquire wakes immediately via closeCh. Close is
+// idempotent.
 func (c *Client) Close() error {
-	if !c.closed.CompareAndSwap(false, true) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
 		return nil
 	}
+	c.closed = true
+	close(c.closeCh)
+
 	var errs []error
 	for {
 		select {
@@ -88,10 +115,13 @@ func (c *Client) Close() error {
 }
 
 // acquire takes an idle conn from the pool, dials a new one if the pool is
-// under capacity, or blocks until one is released or ctx is done. It
-// returns errClosed once the client has been closed.
+// under capacity, or blocks until one is released, the client is closed, or
+// ctx is done. It returns errClosed once the client has been closed.
 func (c *Client) acquire(ctx context.Context) (*conn, error) {
-	if c.closed.Load() {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
 		return nil, errClosed
 	}
 
@@ -119,25 +149,36 @@ func (c *Client) acquire(ctx context.Context) (*conn, error) {
 	select {
 	case cn := <-c.idle:
 		return cn, nil
+	case <-c.closeCh:
+		return nil, errClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
 // release returns cn to the idle pool, or closes it when the client has
-// been closed or the pool is already full.
+// been closed or the pool is already full. The closed check and the idle
+// send happen under the same lock Close holds while draining idle, so a
+// release racing a concurrent Close either lands in idle before Close's
+// drain sees it, or observes closed and closes cn itself; either way cn is
+// never abandoned in an idle pool nobody will ever drain again.
 func (c *Client) release(cn *conn) {
-	if c.closed.Load() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
 		_ = cn.close()
 		c.live.Add(-1)
 		return
 	}
 	select {
 	case c.idle <- cn:
+		c.mu.Unlock()
+		return
 	default:
-		_ = cn.close()
-		c.live.Add(-1)
 	}
+	c.mu.Unlock()
+	_ = cn.close()
+	c.live.Add(-1)
 }
 
 // discard closes cn without returning it to the pool, for use after an
@@ -155,9 +196,6 @@ func (c *Client) discard(cn *conn) {
 func (c *Client) call(ctx context.Context, op string, fn func(ctx context.Context, cn *conn) error) error {
 	cn, err := c.acquire(ctx)
 	if err != nil {
-		if errors.Is(err, errClosed) {
-			return &hmsError{op: op, sentinel: ErrUnavailable, cause: errClosed}
-		}
 		return wrapError(op, err)
 	}
 
@@ -313,18 +351,28 @@ func (c *Client) DropCatalog(ctx context.Context, name string, ifExists bool) er
 	})
 }
 
-// GetAllDatabases lists the names of every database in the default "hive"
-// catalog. The generated get_all_databases RPC has no catalog parameter, so
-// a non-default CatalogOption only affects whether ErrNotSupported is
-// returned (when the server predates catalogs); it does not filter the
-// result.
+// GetAllDatabases lists the names of every database in the effective
+// catalog (WithCatalog, overridden per call by InCatalog; default "hive").
+// The generated get_all_databases RPC has no catalog parameter, so for the
+// default catalog this calls it directly; for a non-default catalog it
+// calls get_databases with a "@<cat>#*" pattern instead (the Hive
+// convention, MetaStoreUtils.prependCatalogToDbName, mirrored by
+// qualifyDBName). Against a server that predates catalogs (Hive 2.3), a
+// non-default CatalogOption returns ErrNotSupported without issuing either
+// RPC.
 func (c *Client) GetAllDatabases(ctx context.Context, opts ...CatalogOption) ([]string, error) {
 	var names []string
 	err := c.call(ctx, "GetAllDatabases", func(ctx context.Context, cn *conn) error {
-		if _, err := c.resolveCat(ctx, cn, opts); err != nil {
+		cat, err := c.resolveCat(ctx, cn, opts)
+		if err != nil {
 			return err
 		}
-		list, err := cn.getAllDatabases(ctx)
+		var list []string
+		if cat != nil && *cat != defaultCatalog {
+			list, err = cn.getDatabases(ctx, qualifyDBName(cat, "*"))
+		} else {
+			list, err = cn.getAllDatabases(ctx)
+		}
 		if err != nil {
 			return err
 		}

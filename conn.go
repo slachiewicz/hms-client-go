@@ -49,6 +49,7 @@ type conn struct {
 	dropCatalog   func(ctx context.Context, req *hive_metastore.DropCatalogRequest) error
 
 	getAllDatabases func(ctx context.Context) ([]string, error)
+	getDatabases    func(ctx context.Context, pattern string) ([]string, error)
 	getDatabase     func(ctx context.Context, name string) (*hive_metastore.Database, error)
 	createDatabase  func(ctx context.Context, db *hive_metastore.Database) error
 	dropDatabase    func(ctx context.Context, name string, deleteData, cascade bool) error
@@ -112,6 +113,7 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (*conn, er
 		dropCatalog:   g.DropCatalog,
 
 		getAllDatabases: g.GetAllDatabases,
+		getDatabases:    g.GetDatabases,
 		getDatabase:     g.GetDatabase,
 		createDatabase:  g.CreateDatabase,
 		dropDatabase:    g.DropDatabase,

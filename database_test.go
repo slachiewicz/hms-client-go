@@ -84,9 +84,8 @@ func TestGetDatabase_Hive40QualifiesNonDefaultCatalog(t *testing.T) {
 	// get_database identifies its catalog purely from a "@<cat>#<name>"
 	// prefix on the wire name (see internal/hmstest/handler.go splitCatDB),
 	// so seed the fake server's store directly under that key rather than
-	// going through CreateDatabase (a Task 8 table-adjacent concern is
-	// avoided entirely: CreateDatabase in this fake handler also keys off
-	// the wire name, not the CatalogName field).
+	// going through CreateDatabase (a Task 8 table-adjacent concern; this
+	// test is only about get_database's own qualifier convention).
 	srv.Store().Databases["spark.db"] = &hive_metastore.Database{Name: "db"}
 
 	_, err := c.GetDatabase(ctx, "db", hms.InCatalog("spark"))
@@ -95,6 +94,51 @@ func TestGetDatabase_Hive40QualifiesNonDefaultCatalog(t *testing.T) {
 	args, ok := srv.LastArgs("get_database").(string)
 	require.True(t, ok)
 	assert.Equal(t, "@spark#db", args)
+}
+
+// TestGetAllDatabases_NonDefaultCatalog covers the fix for
+// GetAllDatabases silently ignoring a non-default CatalogOption: since
+// get_all_databases has no catalog parameter, a non-default catalog must
+// instead go through get_databases with a "@<cat>#*" pattern (see
+// (*Client).GetAllDatabases), or every catalog's databases would appear to
+// live in "hive".
+func TestGetAllDatabases_NonDefaultCatalog(t *testing.T) {
+	t.Parallel()
+
+	t.Run("hive40 lists the requested catalog only", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive40)
+		c := mustNew(t, srv.URI())
+		ctx := context.Background()
+
+		require.NoError(t, c.CreateCatalog(ctx, &hms.Catalog{Name: "spark"}))
+		require.NoError(t, c.CreateDatabase(ctx, &hms.Database{Name: "a", CatalogName: "spark"}))
+
+		names, err := c.GetAllDatabases(ctx, hms.InCatalog("spark"))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a"}, names)
+
+		args, ok := srv.LastArgs("get_databases").(string)
+		require.True(t, ok)
+		assert.Equal(t, "@spark#*", args)
+
+		// The default catalog's own databases are unaffected and not
+		// mixed into "spark"'s result.
+		hiveNames, err := c.GetAllDatabases(ctx)
+		require.NoError(t, err)
+		assert.NotContains(t, hiveNames, "a")
+	})
+
+	t.Run("hive23 non-default catalog is not supported", func(t *testing.T) {
+		t.Parallel()
+		srv := hmstest.Start(t, hmstest.Hive23)
+		c := mustNew(t, srv.URI())
+
+		_, err := c.GetAllDatabases(context.Background(), hms.InCatalog("spark"))
+		require.ErrorIs(t, err, hms.ErrNotSupported)
+		assert.NotContains(t, srv.Calls(), "get_databases")
+		assert.NotContains(t, srv.Calls(), "get_all_databases")
+	})
 }
 
 func TestDropDatabase(t *testing.T) {

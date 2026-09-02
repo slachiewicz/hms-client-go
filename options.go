@@ -40,6 +40,21 @@ func newConfig() *config {
 	}
 }
 
+// clamp enforces every config field's usable minimum after every Option
+// has run, so a caller-supplied value that would otherwise misbehave (a
+// zero or negative WithPoolSize hangs New/acquire forever; a zero or
+// negative WithMaxRetries would let Task 11's retry loop skip the RPC
+// entirely) instead degrades to the smallest value that still works. See
+// WithPoolSize and WithMaxRetries.
+func (cfg *config) clamp() {
+	if cfg.poolSize < 1 {
+		cfg.poolSize = 1
+	}
+	if cfg.maxRetries < 1 {
+		cfg.maxRetries = 1
+	}
+}
+
 // Option configures a Client constructed by New.
 type Option func(*config)
 
@@ -56,7 +71,8 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithMaxRetries sets the maximum number of attempts per RPC across
-// endpoints. The default is 3.
+// endpoints. The default is 3. A value below 1 is clamped to 1, so an RPC
+// is always attempted at least once.
 func WithMaxRetries(n int) Option {
 	return func(c *config) { c.maxRetries = n }
 }
@@ -68,7 +84,8 @@ func WithRandomEndpointOrder() Option {
 }
 
 // WithPoolSize sets the maximum number of pooled connections per endpoint.
-// The default is 4.
+// The default is 4. A value below 1 is clamped to 1, since a pool with no
+// room for a connection would block every call forever.
 func WithPoolSize(n int) Option {
 	return func(c *config) { c.poolSize = n }
 }

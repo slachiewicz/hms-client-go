@@ -50,6 +50,18 @@ func wrapError(op string, err error) error {
 	return &hmsError{op: op, sentinel: classify(err), cause: err}
 }
 
+// wrapAs wraps err as op with sentinel forced by the caller instead of
+// classify, for the rare case where the call site already knows the right
+// sentinel and err's shape (e.g. a URI-parsing error from New) gives
+// classify nothing to recognize it by. Keeping this in errors.go, alongside
+// wrapError, means hmsError is never constructed anywhere else.
+func wrapAs(op string, sentinel, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &hmsError{op: op, sentinel: sentinel, cause: err}
+}
+
 // classify maps Thrift exceptions and transport errors to sentinel error types.
 func classify(err error) error {
 	var (
