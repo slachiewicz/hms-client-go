@@ -225,18 +225,21 @@ func withProbeInterval(d time.Duration) Option {
 }
 
 // WithChunkSize sets the per-request chunk size used by the name-lookup RPCs
-// GetTables and GetPartitionsByNames (SPEC §5.1, §5.4, §5.5, §2.3 Rule 5).
-// It does not govern AddPartitions' batch size; see WithPartitionBatchSize
-// for that. The default is 1000. A value below 1 is clamped to 1.
+// GetTables and GetPartitionsByNames, and therefore by the streaming
+// GetTablesSeq and GetPartitionsSeq, which fetch by name in chunks of this
+// size (SPEC §5.1, §5.4, §5.5, §2.3 Rule 5). It does not govern the batch
+// size of the mutating partition calls; see WithPartitionBatchSize for that.
+// The default is 1000. A value below 1 is clamped to 1.
 func WithChunkSize(n int) Option {
 	return func(c *config) { c.chunkSize = n }
 }
 
-// WithPartitionBatchSize sets the batch size AddPartitions splits its
-// partitions argument into (SPEC §5.1, §5.5, §2.3 Rule 5), independent of
-// WithChunkSize: a caller tuning read-side lookups with WithChunkSize no
-// longer unknowingly shrinks AddPartitions' batches too. The default is
-// 1000. A value below 1 is clamped to 1.
+// WithPartitionBatchSize sets the batch size AddPartitions, AlterPartitions,
+// DropPartitionsByNames, and DropPartitions split their partitions argument
+// into (SPEC §5.1, §5.5, §2.3 Rule 5), independent of WithChunkSize: a caller
+// tuning read-side lookups with WithChunkSize does not unknowingly shrink the
+// mutating calls' batches too. The default is 1000. A value below 1 is
+// clamped to 1.
 func WithPartitionBatchSize(n int) Option {
 	return func(c *config) { c.partitionBatchSize = n }
 }

@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
+    ignore:
+      # Generated code and the runtime must be the same minor version, and the
+      # Thrift compiler pin in scripts/gen-thrift.sh moves with it: bump by hand
+      # via `make gen`, never through an automated PR.
+      - dependency-name: github.com/apache/thrift
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
