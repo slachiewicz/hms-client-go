@@ -46,6 +46,19 @@ jobs:
             uris: "http://127.0.0.1:9083/metastore"
             http: true
             user: ci
+          - name: hive-4.2.1-tls
+            image: apache/hive:4.2.1
+            expect_version: "4.2"
+            uris: "thrift://127.0.0.1:9083"
+            tls: true
+            user: ci
+          - name: hive-4.2.1-https
+            image: apache/hive:4.2.1
+            expect_version: "4.2"
+            uris: "https://127.0.0.1:9083/metastore"
+            http: true
+            tls: true
+            user: ci
     steps:
       - uses: actions/checkout@v7
 
@@ -103,13 +116,41 @@ jobs:
             echo "no hcatalog jars in $dir; the metastore will run without a notification listener"
           fi
 
+      - name: Generate a throwaway CA and server keystore (TLS legs)
+        if: matrix.tls
+        id: tls
+        run: |
+          # A self-signed CA plus a server certificate for the address the
+          # tests dial, bundled into a PKCS12 keystore the JVM reads
+          # directly (metastore.keystore.type=PKCS12), so no keytool or
+          # published image is needed. The CA lives only in this job: the
+          # tests trust it through HMS_TLS_CA, and TestTLS asserts a client
+          # without it is refused. The image runs as user "hive", hence the
+          # world-readable modes.
+          dir="$RUNNER_TEMP/tls"; mkdir -p "$dir"; cd "$dir"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout ca.key -out ca.crt -subj "/CN=hms-client-go integration CA"
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout server.key -out server.csr -subj "/CN=localhost"
+          printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n' > san.cnf
+          openssl x509 -req -days 2 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+            -extfile san.cnf -out server.crt
+          openssl pkcs12 -export -name hms -in server.crt -inkey server.key -certfile ca.crt \
+            -passout pass:changeit -out keystore.p12
+          chmod 644 ca.crt keystore.p12; chmod 755 "$dir"
+          echo "mount=-v $dir:/tls:ro" >> "$GITHUB_OUTPUT"
+          echo "opts=-Dmetastore.use.SSL=true -Dmetastore.keystore.path=/tls/keystore.p12 -Dmetastore.keystore.password=changeit -Dmetastore.keystore.type=PKCS12" >> "$GITHUB_OUTPUT"
+          echo "ca=$dir/ca.crt" >> "$GITHUB_OUTPUT"
+
       - name: Start metastore container (binary TCP)
         if: "!matrix.http"
         run: |
-          docker run -d --name hms -p 9083:9083 \
+          # steps.tls.outputs.* are empty on the plain legs, so the same
+          # command serves both.
+          docker run -d --name hms -p 9083:9083 ${{ steps.tls.outputs.mount }} \
             --env SERVICE_NAME=metastore \
             --env HIVE_AUX_JARS_PATH="${{ steps.hcat.outputs.aux_jars }}" \
-            --env SERVICE_OPTS="${{ steps.hcat.outputs.listener_opts }}" \
+            --env SERVICE_OPTS="${{ steps.tls.outputs.opts }} ${{ steps.hcat.outputs.listener_opts }}" \
             "${{ matrix.image }}"
 
       - name: Start metastore container (HTTP mode)
@@ -120,10 +161,10 @@ jobs:
           # transport mode is switched without replacing the image's own
           # config directory (a mounted HIVE_CUSTOM_CONF_DIR displaces the
           # Derby settings and breaks schema init).
-          docker run -d --name hms -p 9083:9083 \
+          docker run -d --name hms -p 9083:9083 ${{ steps.tls.outputs.mount }} \
             --env SERVICE_NAME=metastore \
             --env HIVE_AUX_JARS_PATH="${{ steps.hcat.outputs.aux_jars }}" \
-            --env SERVICE_OPTS="-Dmetastore.server.thrift.transport.mode=http -Dmetastore.server.thrift.http.path=metastore ${{ steps.hcat.outputs.listener_opts }}" \
+            --env SERVICE_OPTS="-Dmetastore.server.thrift.transport.mode=http -Dmetastore.server.thrift.http.path=metastore ${{ steps.tls.outputs.opts }} ${{ steps.hcat.outputs.listener_opts }}" \
             "${{ matrix.image }}"
 
       - name: Wait for the metastore to start
@@ -154,6 +195,11 @@ jobs:
           HMS_URIS: ${{ matrix.uris }}
           HMS_EXPECT_VERSION: ${{ matrix.expect_version }}
           HMS_USER: ${{ matrix.user }}
+          # Empty on the plain legs: the whole suite then dials without TLS
+          # and TestTLS skips. On the TLS legs every dial trusts the job's CA
+          # and TestTLS runs against the same endpoint.
+          HMS_TLS_CA: ${{ steps.tls.outputs.ca }}
+          HMS_TLS_URIS: ${{ matrix.tls && matrix.uris || '' }}
         run: make test-docker
 
       - name: Dump container logs on failure

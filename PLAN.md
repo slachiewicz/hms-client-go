@@ -177,7 +177,7 @@ Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same r
 ### Slice 9: Binary and HTTP TLS
 - [x] `options.go`: `WithTLS` per SPEC §5.1. `internal/transport/binary.go`: wrap the dialed socket in `tls.Client` before the SASL/binary protocol layers, for `thrift://` against a `metastore.use.SSL=true` server. `internal/transport/http.go`: apply the configured `*tls.Config` to the `*http.Client`'s `Transport.TLSClientConfig` for `https://`. See SPEC §3.1, §3.2.
 - [x] Unit tests: binary TLS handshake against an in-process TLS listener wrapping `hmstest`; HTTP TLS client config applied and overridable by a caller-supplied `WithHTTPClient`.
-- [ ] **Deferred**: Integration matrix: no new job; a TLS-enabled 4.2.1 leg needs a certificate-bearing Docker image and is not required for 1.0 sign-off. `test/integration_test.go`'s `TestTLS` is the placeholder — it skips unless `HMS_TLS_URIS` is set.
+- [x] Integration matrix: two 4.2.1 legs, `hive-4.2.1-tls` (`thrift://`) and `hive-4.2.1-https` (`https://`), on the stock `apache/hive:4.2.1` image. No certificate-bearing image was needed: the job generates a throwaway CA and a PKCS12 keystore with `openssl`, bind-mounts it, and enables `metastore.use.SSL` plus the `metastore.keystore.*` vars through `SERVICE_OPTS` exactly as the HTTP leg switches transport mode. The whole suite dials through `WithTLS` when `HMS_TLS_CA` is set (`dial` in `test/integration_test.go`), and `TestTLS` additionally asserts a client without the CA is refused with `ErrUnavailable`.
 
 ### Slice 10: Notifications
 - [x] `client.go` (or a new `notification.go`): `CurrentNotificationID`, `GetNextNotifications`, `NotificationEvent` per SPEC §5.7. `conn.go`: bind `get_current_notificationEventId`, `get_next_notification`. `convert.go`: `NotificationEvent` conversion.
@@ -229,7 +229,6 @@ Driven by the `polytable` adoption review; every item is recorded under `0.2.0` 
 - [x] Real-server matrix green at `ff17b22` (Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1 binary, 4.2.1 HTTP).
 
 ### Open follow-ups (not blocking 1.0)
-- Slice 9: TLS integration leg (certificate-bearing image; `TestTLS` skips without `HMS_TLS_URIS`).
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 - Slice 14: Kerberized integration leg (KDC sidecar; `TestKerberos` skips without `HMS_KRB5_URIS`); JDK `SaslServer` interoperability is unverified until then.
 - §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).

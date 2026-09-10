@@ -21,6 +21,11 @@
 //   - HMS_USER (optional): forwarded as hms.WithUser, for a server that
 //     authenticates the caller (e.g. the HTTP-mode job, which runs as
 //     "ci").
+//   - HMS_TLS_CA (optional): path to a PEM CA certificate. When set, every
+//     dial in this package adds hms.WithTLS with that CA as its only trust
+//     root, so the whole suite runs over TLS against a server configured
+//     with metastore.use.SSL=true (the TLS-mode jobs). HMS_TLS_URIS names
+//     the same endpoint for TestTLS, the explicit TLS assertion.
 //   - HMS_KRB5_URIS, HMS_KRB5_PRINCIPAL, HMS_KRB5_KEYTAB (optional): a
 //     Kerberized endpoint and the identity to reach it with, for
 //     TestKerberos. No matrix job sets them yet; see envKrb5URIs.
@@ -30,6 +35,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -59,11 +65,32 @@ const envExpectVersion = "HMS_EXPECT_VERSION"
 const envUser = "HMS_USER"
 
 // envTLSURIs names the endpoint(s) of a metastore configured with
-// metastore.use.SSL=true (SPEC §3.1), for TestTLS. None of the matrix
-// images enable it yet (PLAN.md Slice 9 tracks a TLS-enabled leg as a
-// follow-up), so this is always empty today and TestTLS always skips; it
-// exists so that job has a test ready to enable once it lands.
-const envTLSURIs = "HMS_TLS_URIS"
+// metastore.use.SSL=true (SPEC §3.1), for TestTLS, and envTLSCA the PEM CA
+// certificate that signed its server certificate. The TLS-mode matrix jobs
+// (hive-4.2.1-tls, hive-4.2.1-https) set both, generating a throwaway CA
+// and PKCS12 keystore in the job; every other job leaves them empty, so
+// TestTLS skips there and dial adds no TLS option.
+const (
+	envTLSURIs = "HMS_TLS_URIS"
+	envTLSCA   = "HMS_TLS_CA"
+)
+
+// tlsOptions returns the hms.WithTLS option built from HMS_TLS_CA, or
+// nothing when it is unset. The CA is the config's only trust root: the
+// job's certificate is self-signed and must not be trusted through the
+// runner's system store by accident.
+func tlsOptions(t *testing.T) []hms.Option {
+	t.Helper()
+	caPath := os.Getenv(envTLSCA)
+	if caPath == "" {
+		return nil
+	}
+	pem, err := os.ReadFile(caPath) //nolint:gosec // G703: the path is this harness's own environment contract, set by the workflow.
+	require.NoError(t, err, "reading %s", envTLSCA)
+	pool := x509.NewCertPool()
+	require.True(t, pool.AppendCertsFromPEM(pem), "%s (%s) holds no PEM certificate", envTLSCA, caPath)
+	return []hms.Option{hms.WithTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})}
+}
 
 // envKrb5URIs names the endpoint(s) of a Kerberized metastore (SPEC §3.1,
 // KERBEROS), for TestKerberos, and envKrb5Principal the client principal
@@ -105,16 +132,17 @@ func requireHMSEnv(t *testing.T) (uris, expectVersion string) {
 	return uris, expectVersion
 }
 
-// dial connects a Client to HMS_URIS, applying HMS_USER (if set) before any
-// caller-supplied opts, and registers t.Cleanup to close it.
+// dial connects a Client to HMS_URIS, applying HMS_USER and HMS_TLS_CA (if
+// set) before any caller-supplied opts, and registers t.Cleanup to close it.
 func dial(t *testing.T, opts ...hms.Option) *hms.Client {
 	t.Helper()
 	uris, _ := requireHMSEnv(t)
 
-	all := make([]hms.Option, 0, len(opts)+1)
+	all := make([]hms.Option, 0, len(opts)+2)
 	if u := os.Getenv(envUser); u != "" {
 		all = append(all, hms.WithUser(u))
 	}
+	all = append(all, tlsOptions(t)...)
 	all = append(all, opts...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
@@ -782,24 +810,40 @@ func TestACID(t *testing.T) {
 }
 
 // TestTLS connects to a metastore configured with metastore.use.SSL=true
-// via hms.WithTLS (SPEC §3.1) and confirms a basic RPC round-trips over
-// the encrypted socket. It skips unless HMS_TLS_URIS is set; see
-// envTLSURIs's doc comment.
+// via hms.WithTLS (SPEC §3.1), trusting only the CA in HMS_TLS_CA, and
+// confirms a basic RPC round-trips over the encrypted socket. It also
+// checks the negative: without the CA the handshake fails verification and
+// classifies as ErrUnavailable, so the leg proves the server really is
+// speaking TLS rather than the client silently falling back. It skips
+// unless HMS_TLS_URIS is set; see envTLSURIs's doc comment.
 func TestTLS(t *testing.T) {
 	t.Parallel()
 	uris := os.Getenv(envTLSURIs)
 	if uris == "" {
 		t.Skipf("%s is not set; skipping TLS integration test (see PLAN.md Slice 9)", envTLSURIs)
 	}
+	opts := tlsOptions(t)
+	require.NotEmpty(t, opts, "%s must be set alongside %s", envTLSCA, envTLSURIs)
+	if u := os.Getenv(envUser); u != "" {
+		opts = append(opts, hms.WithUser(u))
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
-	c, err := hms.New(ctx, uris, hms.WithTLS(&tls.Config{}))
+	c, err := hms.New(ctx, uris, opts...)
 	require.NoError(t, err, "connecting to %s over TLS", uris)
 	t.Cleanup(func() { _ = c.Close() })
 
 	_, err = c.ServerVersion(context.Background())
 	require.NoError(t, err)
+
+	// A client that trusts only the system roots must be refused: the
+	// job's CA is self-signed and installed nowhere else.
+	untrusted, err := hms.New(ctx, uris, hms.WithTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+	if err == nil {
+		_ = untrusted.Close()
+	}
+	require.ErrorIs(t, err, hms.ErrUnavailable, "a handshake against an untrusted certificate must fail as ErrUnavailable")
 }
 
 // TestKerberos connects to a Kerberized metastore with hms.WithKerberos,

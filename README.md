@@ -39,13 +39,14 @@ Every push to `main` and a nightly schedule run the [integration matrix](.github
 | Hive 3.1.3 | binary | `apache/hive:3.1.3` |
 | Hive 4.0.1 | binary | `apache/hive:4.0.1` |
 | Hive 4.2.1 | binary and HTTP | `apache/hive:4.2.1` |
+| Hive 4.2.1 | binary over TLS and HTTPS | `apache/hive:4.2.1` with `metastore.use.SSL=true` and a keystore generated in the job |
 
 The unit suite runs against an in-process fake metastore that emulates each version's RPC set, so version fallbacks are tested on every commit without Docker.
 
-The Kerberos and TLS code paths are unit-tested (a fake GSSAPI acceptor and an in-process TLS
-listener) but have no integration matrix job yet: a Kerberized leg needs a KDC sidecar and a
-TLS leg needs a certificate-bearing image, both tracked as follow-ups (see PLAN.md Slices 9
-and 14).
+The TLS legs run the whole suite through `WithTLS` against a self-signed CA created in the job, and
+additionally assert that a client without that CA is refused. Kerberos is unit-tested against a fake
+GSSAPI acceptor but has no integration job yet: a Kerberized leg needs a KDC sidecar, tracked as a
+follow-up in PLAN.md Slice 14.
 
 ## Install
 
