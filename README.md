@@ -40,13 +40,14 @@ Every push to `main` and a nightly schedule run the [integration matrix](.github
 | Hive 4.0.1 | binary | `apache/hive:4.0.1` |
 | Hive 4.2.1 | binary and HTTP | `apache/hive:4.2.1` |
 | Hive 4.2.1 | binary over TLS and HTTPS | `apache/hive:4.2.1` with `metastore.use.SSL=true` and a keystore generated in the job |
+| Hive 4.2.1 | binary with Kerberos (SASL GSSAPI) | `apache/hive:4.2.1` with `metastore.sasl.enabled=true` against an MIT KDC sidecar built from [`test/docker/kdc`](test/docker/kdc) |
 
 The unit suite runs against an in-process fake metastore that emulates each version's RPC set, so version fallbacks are tested on every commit without Docker.
 
 The TLS legs run the whole suite through `WithTLS` against a self-signed CA created in the job, and
-additionally assert that a client without that CA is refused. Kerberos is unit-tested against a fake
-GSSAPI acceptor but has no integration job yet: a Kerberized leg needs a KDC sidecar, tracked as a
-follow-up in PLAN.md Slice 14.
+additionally assert that a client without that CA is refused. The Kerberos leg runs the whole suite
+through `WithKerberos` with a keytab the KDC exports, and asserts that a plain client and a principal
+missing from the keytab are both refused.
 
 ## Install
 
