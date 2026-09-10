@@ -838,10 +838,14 @@ func TestTLS(t *testing.T) {
 	require.NoError(t, err)
 
 	// A client that trusts only the system roots must be refused: the
-	// job's CA is self-signed and installed nowhere else.
+	// job's CA is self-signed and installed nowhere else. Over thrift://
+	// New's eager dial already fails; over https:// New performs no
+	// request (SPEC §3.2), so the handshake, and its failure, happen on
+	// the first RPC instead.
 	untrusted, err := hms.New(ctx, uris, hms.WithTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
 	if err == nil {
-		_ = untrusted.Close()
+		t.Cleanup(func() { _ = untrusted.Close() })
+		_, err = untrusted.ServerVersion(ctx)
 	}
 	require.ErrorIs(t, err, hms.ErrUnavailable, "a handshake against an untrusted certificate must fail as ErrUnavailable")
 }
