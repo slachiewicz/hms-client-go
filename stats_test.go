@@ -102,3 +102,66 @@ func TestGetTableColumnStatistics(t *testing.T) {
 		})
 	}
 }
+
+// TestGetTableColumnStatisticsForEngine covers SPEC §5.8's per-engine
+// variant: on Hive40 the engine named selects which stored set comes back
+// and reaches the wire verbatim; on Hive23/Hive31, whose IDL never declared
+// the field, the server answers with its single set whatever engine the
+// request names; and an empty engine is refused before any RPC.
+func TestGetTableColumnStatisticsForEngine(t *testing.T) {
+	t.Parallel()
+	for _, tt := range partitionVersions {
+		v, name := tt.v, tt.name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+
+			require.NoError(t, c.CreateTable(ctx, &hms.Table{
+				DatabaseName: "db",
+				TableName:    "t",
+				Storage:      &hms.StorageDescriptor{Columns: []*hms.FieldSchema{{Name: "a", Type: "bigint"}}},
+			}))
+			srv.SeedColumnStats("db", "t", &hive_metastore.ColumnStatisticsObj{
+				ColName: "a", ColType: "bigint",
+				StatsData: &hive_metastore.ColumnStatisticsData{LongStats: &hive_metastore.LongColumnStatsData{NumNulls: 1, NumDVs: 10}},
+			})
+			srv.SeedColumnStatsForEngine("db", "t", "spark", &hive_metastore.ColumnStatisticsObj{
+				ColName: "a", ColType: "bigint",
+				StatsData: &hive_metastore.ColumnStatisticsData{LongStats: &hive_metastore.LongColumnStatsData{NumNulls: 2, NumDVs: 20}},
+			})
+
+			got, err := c.GetTableColumnStatisticsForEngine(ctx, "db", "t", "spark", []string{"a"})
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.NotNil(t, got[0].Long)
+			args, ok := srv.LastArgs("get_table_statistics_req").(*hive_metastore.TableStatsRequest)
+			require.True(t, ok)
+			assert.Equal(t, "spark", args.Engine, "the engine must reach the wire on every version")
+			if v == hmstest.Hive40 {
+				assert.Equal(t, int64(20), got[0].Long.NumDistinct, "Hive 4 serves the named engine's set")
+			} else {
+				assert.Equal(t, int64(10), got[0].Long.NumDistinct, "a pre-4.x server ignores the engine field")
+			}
+
+			// The plain method still asks for "hive" and gets that set.
+			def, err := c.GetTableColumnStatistics(ctx, "db", "t", []string{"a"})
+			require.NoError(t, err)
+			require.Len(t, def, 1)
+			assert.Equal(t, int64(10), def[0].Long.NumDistinct)
+
+			// An empty engine is a caller mistake, refused before the RPC.
+			callsBefore := len(srv.Calls())
+			_, err = c.GetTableColumnStatisticsForEngine(ctx, "db", "t", "", []string{"a"})
+			require.ErrorIs(t, err, hms.ErrInvalidOperation)
+			assert.Len(t, srv.Calls(), callsBefore, "an empty engine must not issue get_table_statistics_req")
+
+			// Empty columns still short-circuits to (nil, nil).
+			none, err := c.GetTableColumnStatisticsForEngine(ctx, "db", "t", "spark", nil)
+			require.NoError(t, err)
+			assert.Nil(t, none)
+			assert.Len(t, srv.Calls(), callsBefore)
+		})
+	}
+}

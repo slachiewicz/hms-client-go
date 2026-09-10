@@ -239,12 +239,19 @@ func TestNewNotificationEventRequest_SetsMaxEventsAndEventTypeList(t *testing.T)
 // and -1); neither field has an equivalent on the exported API.
 func TestNewTableStatsRequest_KeepsIDLDefaultsOverWire(t *testing.T) {
 	t.Parallel()
-	req := newTableStatsRequest("db", "tbl", nil, []string{"c1"})
+	req := newTableStatsRequest("db", "tbl", nil, []string{"c1"}, "")
 
 	got := hive_metastore.NewTableStatsRequest()
 	roundTrip(t, req, got)
 
 	assert.Equal(t, "hive", got.Engine)
+	assert.Equal(t, int64(-1), got.ID)
+
+	// A non-empty engine overrides the default and nothing else.
+	req = newTableStatsRequest("db", "tbl", nil, []string{"c1"}, "spark")
+	got = hive_metastore.NewTableStatsRequest()
+	roundTrip(t, req, got)
+	assert.Equal(t, "spark", got.Engine)
 	assert.Equal(t, int64(-1), got.ID)
 }
 

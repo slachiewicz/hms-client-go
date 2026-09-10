@@ -2,6 +2,7 @@ package hms
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
@@ -100,18 +101,21 @@ type Decimal struct {
 
 // newTableStatsRequest builds a TableStatsRequest from
 // hive_metastore.NewTableStatsRequest() rather than a bare struct literal,
-// so the non-pointer "optional with default" fields Engine and ID (no
-// equivalent on this package's exported API, and absent from the wire
-// entirely pre-4.x; see GetTableColumnStatistics's doc comment) keep
-// NewTableStatsRequest's defaults ("hive" and -1) instead of falling back
-// to the Go zero values (see newGetTableRequest's identical treatment in
-// table.go).
-func newTableStatsRequest(dbName, tblName string, cat *string, columns []string) *hive_metastore.TableStatsRequest {
+// so the non-pointer "optional with default" fields Engine and ID (absent
+// from the wire entirely pre-4.x; see GetTableColumnStatistics's doc
+// comment) keep NewTableStatsRequest's defaults ("hive" and -1) instead of
+// falling back to the Go zero values (see newGetTableRequest's identical
+// treatment in table.go). An empty engine keeps that "hive" default; a
+// non-empty one overrides it (GetTableColumnStatisticsForEngine).
+func newTableStatsRequest(dbName, tblName string, cat *string, columns []string, engine string) *hive_metastore.TableStatsRequest {
 	req := hive_metastore.NewTableStatsRequest()
 	req.DbName = dbName
 	req.TblName = tblName
 	req.ColNames = columns
 	req.CatName = cat
+	if engine != "" {
+		req.Engine = engine
+	}
 	return req
 }
 
@@ -139,11 +143,39 @@ func newTableStatsRequest(dbName, tblName string, cat *string, columns []string)
 //
 // Hive 4's metastore stores column statistics per computing engine
 // (TableStatsRequest.Engine); this call always requests the "hive" engine's
-// statistics (Engine's IDL default, via newTableStatsRequest, and never
-// overridden here), so statistics Spark, Impala, or another engine
-// computed and stored under its own engine name are not returned. An
-// engine option is out of scope for 1.0.
+// statistics (Engine's IDL default, via newTableStatsRequest), so statistics
+// Spark, Impala, or another engine computed and stored under its own engine
+// name are not returned. Use GetTableColumnStatisticsForEngine for those.
 func (c *Client) GetTableColumnStatistics(ctx context.Context, db, tbl string, columns []string, opts ...CatalogOption) ([]ColumnStatistics, error) {
+	return c.getTableColumnStatistics(ctx, db, tbl, columns, "", opts)
+}
+
+// GetTableColumnStatisticsForEngine is GetTableColumnStatistics for the
+// statistics a specific computing engine stored (SPEC §5.8): Hive 4's
+// metastore keeps one set of column statistics per engine name -- "hive",
+// "spark", "impala", ... -- and this call requests engine's set instead of
+// the "hive" default. An empty engine is a caller mistake and returns
+// hms.ErrInvalidOperation without issuing the RPC: sending "" would make
+// the server look up a literal empty engine name rather than fall back to
+// the default.
+//
+// The engine field is a Hive 4.x-only addition to TableStatsRequest. A
+// 2.3 or 3.x server's Thrift decoder skips it as unknown and answers with
+// its only (engine-less) set of statistics, so against such a server this
+// call returns the same result as GetTableColumnStatistics whatever
+// engine names; the client does not probe the server release to detect
+// that (the catalog probe only separates 2.3 from 3+), so a caller that
+// needs to know should check ServerVersion first.
+func (c *Client) GetTableColumnStatisticsForEngine(ctx context.Context, db, tbl, engine string, columns []string, opts ...CatalogOption) ([]ColumnStatistics, error) {
+	if engine == "" {
+		return nil, wrapAs("get_table_statistics_req", ErrInvalidOperation, errors.New("hms: engine must not be empty; use GetTableColumnStatistics for the default \"hive\" engine"))
+	}
+	return c.getTableColumnStatistics(ctx, db, tbl, columns, engine, opts)
+}
+
+// getTableColumnStatistics is the shared body of GetTableColumnStatistics
+// and GetTableColumnStatisticsForEngine; engine "" means the IDL default.
+func (c *Client) getTableColumnStatistics(ctx context.Context, db, tbl string, columns []string, engine string, opts []CatalogOption) ([]ColumnStatistics, error) {
 	if len(columns) == 0 {
 		return nil, nil
 	}
@@ -153,7 +185,7 @@ func (c *Client) GetTableColumnStatistics(ctx context.Context, db, tbl string, c
 		if err != nil {
 			return err
 		}
-		resp, err := cn.getTableStatisticsReq(ctx, newTableStatsRequest(db, tbl, cat, columns))
+		resp, err := cn.getTableStatisticsReq(ctx, newTableStatsRequest(db, tbl, cat, columns, engine))
 		if err != nil {
 			return err
 		}

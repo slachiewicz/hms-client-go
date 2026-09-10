@@ -196,7 +196,7 @@ Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same r
 - [x] `hmstest/acid.go`: a minimal txn/lock table (open txn ids, lock ids and their state) backing the seven handlers above.
 - [x] Unit tests: open/commit/abort round-trip, a lock request that returns `LockStateWaiting` then `LockStateAcquired` on `CheckLock`, heartbeat on a txn-only and lock-only request.
 - [x] Integration matrix: `TestACID` covers an open/lock/checklock/unlock cycle and a heartbeat on every 2.3+ leg. Green on all five jobs in the 2026-09-02 run at `ff17b22` (the `v0.2.0` tag), so the images' Derby metastores do carry the ACID TXN tables.
-- [ ] Minors deferred (per review): the fixture's lock-conflict handling ignores `LockComponent.Level`; `Heartbeat(0, 0)`'s behaviour is undocumented; `LockComponent` field comment style.
+- [x] Review minors: the fixture's lock-conflict check honours `LockComponent.Level` hierarchically (`lockOverlaps` in `hmstest/acid.go`, covered by `TestACID_LockConflict_Levels`); `Heartbeat(0, 0)` is rejected client-side with `ErrInvalidOperation` (SPEC §5.9); `LockComponent` fields carry doc comments.
 
 ### Slice 13: `SkewedInfo` exposure (gated)
 - [x] `SkewedInfo.ColumnNames`/`ColumnValues` (the wire's `skewedColNames`/`skewedColValues`, unaffected by the THRIFT-2063 gate) shipped early as part of Slice 3's struct additions: `types.go`, `convert.go`, round-trip fidelity. See SPEC §5.4.
@@ -230,10 +230,9 @@ Driven by the `polytable` adoption review; every item is recorded under `0.2.0` 
 
 ### Open follow-ups (not blocking 1.0)
 - Slice 9: TLS integration leg (certificate-bearing image; `TestTLS` skips without `HMS_TLS_URIS`).
-- Slice 12: fixture minors listed above.
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 - Slice 14: Kerberized integration leg (KDC sidecar; `TestKerberos` skips without `HMS_KRB5_URIS`); JDK `SaslServer` interoperability is unverified until then.
-- §5.8: a per-engine option for `GetTableColumnStatistics` (always `"hive"` today).
+- §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.

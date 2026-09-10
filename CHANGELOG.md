@@ -5,7 +5,28 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `GetTableColumnStatisticsForEngine`, requesting the column statistics a named computing engine
+  (`"spark"`, `"impala"`, ...) stored, where `GetTableColumnStatistics` always asks for the `"hive"`
+  set. An empty engine returns `ErrInvalidOperation`. Pre-4.x servers have no engine field and
+  answer with their single set whatever engine is named (SPEC §5.8).
+- `hmstest.Server.SeedColumnStatsForEngine`, seeding a named engine's statistics; served by name
+  on `Hive40` and ignored in favour of the `"hive"` set on `Hive23`/`Hive31`, like a real server.
+
+### Changed
+
+- `Heartbeat(ctx, 0, 0)` now returns `ErrInvalidOperation` without issuing the RPC: with both
+  ids omitted the request names nothing to keep alive. Previously it sent an empty
+  `HeartbeatRequest` (SPEC §5.9).
+- `hmstest.Store.ColumnStats` is now keyed by table and then by engine name
+  (`map[string]map[string][]*ColumnStatisticsObj`); a test that read or wrote the field directly
+  rather than through `SeedColumnStats` must add the engine level.
+- `hmstest`'s lock manager now honours `LockComponent.Level`: an acquired `EXCLUSIVE` lock blocks
+  a new lock anywhere inside its scope (database over table, table over partition) and vice
+  versa, instead of only an exact database-and-table match. A downstream test that held a
+  database-level exclusive lock and expected a table lock in that database to be `ACQUIRED` will
+  now see `WAITING`, which is what a real metastore returns.
 
 ## [0.2.0] - 2026-09-02
 

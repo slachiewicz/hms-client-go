@@ -274,14 +274,30 @@ func (s *Server) SeedPartitions(catName, dbName, tblName string, parts []*hive_m
 
 // SeedColumnStats installs stats directly into the store under the table
 // named by db and tbl in the default "hive" catalog, keyed the same way as
-// SeedTable/SeedPartitions -- this fake server implements no write path
-// for column statistics at all (GetTableColumnStatistics is read-only in
-// 1.0; SPEC §5.8), so every test that wants GetTableStatisticsReq to have
-// something to return must seed it this way.
+// SeedTable/SeedPartitions, as the "hive" engine's set -- this fake server
+// implements no write path for column statistics at all
+// (GetTableColumnStatistics is read-only in 1.0; SPEC §5.8), so every test
+// that wants GetTableStatisticsReq to have something to return must seed
+// it this way. See SeedColumnStatsForEngine for another engine's set.
 func (s *Server) SeedColumnStats(db, tbl string, stats ...*hive_metastore.ColumnStatisticsObj) {
+	s.SeedColumnStatsForEngine(db, tbl, "hive", stats...)
+}
+
+// SeedColumnStatsForEngine is SeedColumnStats for the set of statistics
+// the named computing engine stored, as served to
+// GetTableColumnStatisticsForEngine on a Hive40 server (SPEC §5.8). On
+// Hive23 and Hive31 only the "hive" set is ever served, whatever engine a
+// request names, mirroring a real pre-4.x server that has no engine field
+// to read; a set seeded under another engine on those versions is simply
+// never returned.
+func (s *Server) SeedColumnStatsForEngine(db, tbl, engine string, stats ...*hive_metastore.ColumnStatisticsObj) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	s.store.ColumnStats[tblKey("hive", db, tbl)] = stats
+	key := tblKey("hive", db, tbl)
+	if s.store.ColumnStats[key] == nil {
+		s.store.ColumnStats[key] = map[string][]*hive_metastore.ColumnStatisticsObj{}
+	}
+	s.store.ColumnStats[key][engine] = stats
 }
 
 // SeedDatabase installs db directly into the store under its own

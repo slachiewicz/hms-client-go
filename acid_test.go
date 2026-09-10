@@ -209,6 +209,8 @@ func TestACID_NegativeIDsRejected(t *testing.T) {
 		{"abort", func() error { return c.AbortTransaction(ctx, -1) }},
 		{"heartbeat txn", func() error { return c.Heartbeat(ctx, -1, 0) }},
 		{"heartbeat lock", func() error { return c.Heartbeat(ctx, 0, -1) }},
+		// Both 0 names nothing to keep alive (SPEC §5.9).
+		{"heartbeat nothing", func() error { return c.Heartbeat(ctx, 0, 0) }},
 		{"lock", func() error {
 			_, err := c.Lock(ctx, hms.LockRequest{TxnID: -1})
 			return err
@@ -256,4 +258,71 @@ func TestLockLevel_LockType_LockState_String(t *testing.T) {
 	assert.Equal(t, "ABORT", hms.LockStateAbort.String())
 	assert.Equal(t, "NOT_ACQUIRED", hms.LockStateNotAcquired.String())
 	assert.Equal(t, "LockState(9)", hms.LockState(9).String())
+}
+
+// TestACID_LockConflict_Levels covers the fixture's hierarchical conflict
+// rule: an EXCLUSIVE lock at a broader level blocks a narrower lock inside
+// its scope (database over table, table over partition), a narrower one
+// blocks a broader one that would contain it, and siblings outside the
+// scope are unaffected.
+func TestACID_LockConflict_Levels(t *testing.T) {
+	t.Parallel()
+	lock := func(t *testing.T, c *hms.Client, comp hms.LockComponent) hms.LockState {
+		t.Helper()
+		resp, err := c.Lock(context.Background(), hms.LockRequest{Components: []hms.LockComponent{comp}, User: "u", Host: "h"})
+		require.NoError(t, err)
+		return resp.State
+	}
+	tests := []struct {
+		name  string
+		held  hms.LockComponent
+		next  hms.LockComponent
+		state hms.LockState
+	}{
+		{
+			name:  "db exclusive blocks table in that db",
+			held:  hms.LockComponent{Type: hms.LockTypeExclusive, Level: hms.LockLevelDB, Database: "db"},
+			next:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: "db", Table: "t"},
+			state: hms.LockStateWaiting,
+		},
+		{
+			name:  "db exclusive leaves another db alone",
+			held:  hms.LockComponent{Type: hms.LockTypeExclusive, Level: hms.LockLevelDB, Database: "db"},
+			next:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: "other", Table: "t"},
+			state: hms.LockStateAcquired,
+		},
+		{
+			name:  "table exclusive blocks a partition of it",
+			held:  hms.LockComponent{Type: hms.LockTypeExclusive, Level: hms.LockLevelTable, Database: "db", Table: "t"},
+			next:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelPartition, Database: "db", Table: "t", Partition: "dt=2024-01-01"},
+			state: hms.LockStateWaiting,
+		},
+		{
+			name:  "partition exclusive blocks the whole table",
+			held:  hms.LockComponent{Type: hms.LockTypeExclusive, Level: hms.LockLevelPartition, Database: "db", Table: "t", Partition: "dt=2024-01-01"},
+			next:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: "db", Table: "t"},
+			state: hms.LockStateWaiting,
+		},
+		{
+			name:  "partition exclusive leaves a sibling partition alone",
+			held:  hms.LockComponent{Type: hms.LockTypeExclusive, Level: hms.LockLevelPartition, Database: "db", Table: "t", Partition: "dt=2024-01-01"},
+			next:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelPartition, Database: "db", Table: "t", Partition: "dt=2024-01-02"},
+			state: hms.LockStateAcquired,
+		},
+		{
+			name:  "shared table lock does not block a shared partition lock",
+			held:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelTable, Database: "db", Table: "t"},
+			next:  hms.LockComponent{Type: hms.LockTypeSharedRead, Level: hms.LockLevelPartition, Database: "db", Table: "t", Partition: "dt=2024-01-01"},
+			state: hms.LockStateAcquired,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, hmstest.Hive40)
+			c := mustNew(t, srv.URI())
+			require.Equal(t, hms.LockStateAcquired, lock(t, c, tc.held))
+			assert.Equal(t, tc.state, lock(t, c, tc.next))
+		})
+	}
 }

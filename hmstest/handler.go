@@ -68,12 +68,14 @@ type Store struct {
 	Tables map[string]*hive_metastore.Table
 	// Partitions holds partitions keyed by "cat.db.tbl".
 	Partitions map[string][]*hive_metastore.Partition
-	// ColumnStats holds column statistics keyed by "cat.db.tbl", the same
-	// key shape as Tables/Partitions, served (filtered to the request's
-	// ColNames) by GetTableStatisticsReq. Seeded via Server.SeedColumnStats
-	// -- this fake server implements no write path for statistics, mirroring
-	// this package's own read-only GetTableColumnStatistics (SPEC §5.8).
-	ColumnStats map[string][]*hive_metastore.ColumnStatisticsObj
+	// ColumnStats holds column statistics keyed by "cat.db.tbl" (the same
+	// key shape as Tables/Partitions) and then by engine name ("hive",
+	// "spark", ...), served (filtered to the request's ColNames) by
+	// GetTableStatisticsReq. Seeded via Server.SeedColumnStats (the "hive"
+	// engine) or Server.SeedColumnStatsForEngine -- this fake server
+	// implements no write path for statistics, mirroring this package's own
+	// read-only GetTableColumnStatistics (SPEC §5.8).
+	ColumnStats map[string]map[string][]*hive_metastore.ColumnStatisticsObj
 	// Config holds metastore configuration values served by GetConfigValue.
 	Config map[string]string
 	// Events holds the notification event log, oldest first, appended to
@@ -99,7 +101,7 @@ func NewStore() *Store {
 		Databases:   map[string]*hive_metastore.Database{},
 		Tables:      map[string]*hive_metastore.Table{},
 		Partitions:  map[string][]*hive_metastore.Partition{},
-		ColumnStats: map[string][]*hive_metastore.ColumnStatisticsObj{},
+		ColumnStats: map[string]map[string][]*hive_metastore.ColumnStatisticsObj{},
 		Config:      map[string]string{},
 		Acid:        newAcidState(),
 	}
@@ -1272,18 +1274,24 @@ func (h *handler) GetNextNotification(_ context.Context, req *hive_metastore.Not
 // req.DbName, filtered to the columns named in req.ColNames: a column with
 // no seeded entry -- including one req.ColNames names but SeedColumnStats
 // never seeded -- is simply absent from the result, matching a real
-// server's per-column stat availability rather than an error. It rejects a
-// non-default Engine or ID exactly as GetTableReq/GetPartitionsReq do
-// (SPEC §2.3, §5.8), since TableStatsRequest carries the same 4.x-only
-// Engine/ID fields those requests do.
+// server's per-column stat availability rather than an error.
+//
+// Engine selects which seeded set is served, but only on Hive40: a real
+// 2.3 or 3.x server's IDL never declared the field, so its decoder skips
+// it and the server answers with its single engine-less set, which this
+// fake models as the "hive" set regardless of what the request carries
+// (SPEC §5.8). ID is rejected when non-default exactly as
+// GetTableReq/GetPartitionsReq do (SPEC §2.3), since TableStatsRequest
+// carries the same 4.x-only field.
 func (h *handler) GetTableStatisticsReq(_ context.Context, req *hive_metastore.TableStatsRequest) (*hive_metastore.TableStatsResult_, error) {
 	h.rec.record("get_table_statistics_req", req)
 	catName, err := cat(h.v, req.CatName)
 	if err != nil {
 		return nil, err
 	}
-	if req.Engine != "hive" {
-		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field Engine"}
+	engine := "hive"
+	if h.v == Hive40 {
+		engine = req.Engine
 	}
 	if req.ID != -1 {
 		return nil, &hive_metastore.MetaException{Message: "unexpected non-default field ID"}
@@ -1299,7 +1307,7 @@ func (h *handler) GetTableStatisticsReq(_ context.Context, req *hive_metastore.T
 		want[n] = true
 	}
 	var out []*hive_metastore.ColumnStatisticsObj
-	for _, o := range h.store.ColumnStats[key] {
+	for _, o := range h.store.ColumnStats[key][engine] {
 		if want[o.ColName] {
 			out = append(out, o)
 		}

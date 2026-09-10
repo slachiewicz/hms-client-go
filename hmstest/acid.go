@@ -196,17 +196,15 @@ func (h *handler) Lock(_ context.Context, req *hive_metastore.LockRequest) (*hiv
 }
 
 // hasExclusiveConflict reports whether an already-acquired EXCLUSIVE lock
-// covers the same database and table as comp. a.mu must already be held by
-// the caller.
+// overlaps comp (see lockOverlaps). a.mu must already be held by the
+// caller.
 func (a *acidState) hasExclusiveConflict(comp *hive_metastore.LockComponent) bool {
 	for _, entry := range a.locks {
 		if entry.state != hive_metastore.LockState_ACQUIRED {
 			continue
 		}
 		for _, existing := range entry.components {
-			if existing.Type == hive_metastore.LockType_EXCLUSIVE &&
-				existing.Dbname == comp.Dbname &&
-				lockTablename(existing) == lockTablename(comp) {
+			if existing.Type == hive_metastore.LockType_EXCLUSIVE && lockOverlaps(existing, comp) {
 				return true
 			}
 		}
@@ -214,13 +212,50 @@ func (a *acidState) hasExclusiveConflict(comp *hive_metastore.LockComponent) boo
 	return false
 }
 
-// lockTablename returns c.Tablename's value, or "" for a database-level
-// component that carries none.
-func lockTablename(c *hive_metastore.LockComponent) string {
-	if c.Tablename == nil {
+// lockOverlaps reports whether two lock components cover a common resource,
+// honouring each one's Level: a DB-level component covers every table and
+// partition in its database, a TABLE-level one every partition of its
+// table, and a PARTITION-level one just that partition. Two components
+// overlap when the shallower one's scope contains the deeper one's --
+// they agree on every name the shallower level compares. This mirrors the
+// hierarchical check a real metastore's lock manager applies, so a
+// database-level EXCLUSIVE lock blocks a table lock in that database, and
+// a table-level one blocks a partition lock on that table.
+func lockOverlaps(a, b *hive_metastore.LockComponent) bool {
+	if a.Dbname != b.Dbname {
+		return false
+	}
+	depth := min(lockDepth(a), lockDepth(b))
+	if depth >= 2 && lockName(a.Tablename) != lockName(b.Tablename) {
+		return false
+	}
+	if depth >= 3 && lockName(a.Partitionname) != lockName(b.Partitionname) {
+		return false
+	}
+	return true
+}
+
+// lockDepth is how many names c's Level compares: 1 for DB, 2 for TABLE,
+// 3 for PARTITION. A Level outside the enum is treated as PARTITION, the
+// narrowest scope, so it conflicts only with locks whose names all match.
+func lockDepth(c *hive_metastore.LockComponent) int {
+	switch c.Level {
+	case hive_metastore.LockLevel_DB:
+		return 1
+	case hive_metastore.LockLevel_TABLE:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// lockName returns the value of an optional name field, or "" when the
+// component carries none.
+func lockName(p *string) string {
+	if p == nil {
 		return ""
 	}
-	return *c.Tablename
+	return *p
 }
 
 // CheckLock reports req.Lockid's current state, NoSuchLockException if

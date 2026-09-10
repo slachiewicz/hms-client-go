@@ -107,11 +107,20 @@ func (s LockState) String() string {
 // are left empty for a database-level lock (LockLevelDB), and Partition is
 // left empty for a table-level lock (LockLevelTable).
 type LockComponent struct {
-	Type      LockType
-	Level     LockLevel
-	Database  string
-	Table     string // optional
-	Partition string // optional
+	// Type is the lock mode requested (shared read, shared write,
+	// exclusive write, or exclusive).
+	Type LockType
+	// Level is the granularity the lock applies at: the whole database,
+	// one table, or one partition.
+	Level LockLevel
+	// Database is the database the locked resource belongs to. Always set.
+	Database string
+	// Table is the table name for a table- or partition-level lock; empty
+	// for a database-level lock.
+	Table string
+	// Partition is the partition name (e.g. "dt=2024-01-01") for a
+	// partition-level lock; empty otherwise.
+	Partition string
 }
 
 // LockRequest asks the metastore's lock manager to lock every component of
@@ -252,16 +261,20 @@ func newHeartbeatRequest(txnID, lockID int64) *hive_metastore.HeartbeatRequest {
 // timeout, wrapping heartbeat (SPEC §5.9). Either id may be 0 to omit it
 // from the request (see newHeartbeatRequest): a caller heartbeating a bare
 // lock outside any transaction passes txnID 0, and one heartbeating a
-// transaction with no separate lock passes lockID 0; since 0 already means
-// "none", a negative id is a caller mistake and returns
-// hms.ErrInvalidOperation without issuing the RPC. heartbeat exists on
-// every supported version (Hive 2.3+).
+// transaction with no separate lock passes lockID 0. Both 0 at once names
+// nothing to keep alive and is rejected with hms.ErrInvalidOperation
+// without issuing the RPC, as is a negative id (0 already means "none", so
+// a negative value is a caller mistake). heartbeat exists on every
+// supported version (Hive 2.3+).
 func (c *Client) Heartbeat(ctx context.Context, txnID, lockID int64) error {
 	if err := checkID("heartbeat", "txnID", txnID); err != nil {
 		return err
 	}
 	if err := checkID("heartbeat", "lockID", lockID); err != nil {
 		return err
+	}
+	if txnID == 0 && lockID == 0 {
+		return wrapAs("heartbeat", ErrInvalidOperation, errors.New("hms: txnID and lockID are both 0; nothing to heartbeat"))
 	}
 	return c.call(ctx, "heartbeat", func(ctx context.Context, cn *conn) error {
 		return cn.heartbeat(ctx, newHeartbeatRequest(txnID, lockID))
