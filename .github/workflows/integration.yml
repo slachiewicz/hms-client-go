@@ -127,6 +127,10 @@ jobs:
           # tests trust it through HMS_TLS_CA, and TestTLS asserts a client
           # without it is refused. The image runs as user "hive", hence the
           # world-readable modes.
+          # The key-manager algorithm must be explicit: the HTTP transport's
+          # Jetty SslContextFactory is handed the config value verbatim, and
+          # its empty default fails with "KeyManagerFactory not available"
+          # (the binary transport substitutes the JDK default itself).
           dir="$RUNNER_TEMP/tls"; mkdir -p "$dir"; cd "$dir"
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
             -keyout ca.key -out ca.crt -subj "/CN=hms-client-go integration CA"
@@ -139,7 +143,7 @@ jobs:
             -passout pass:changeit -out keystore.p12
           chmod 644 ca.crt keystore.p12; chmod 755 "$dir"
           echo "mount=-v $dir:/tls:ro" >> "$GITHUB_OUTPUT"
-          echo "opts=-Dmetastore.use.SSL=true -Dmetastore.keystore.path=/tls/keystore.p12 -Dmetastore.keystore.password=changeit -Dmetastore.keystore.type=PKCS12" >> "$GITHUB_OUTPUT"
+          echo "opts=-Dmetastore.use.SSL=true -Dmetastore.keystore.path=/tls/keystore.p12 -Dmetastore.keystore.password=changeit -Dmetastore.keystore.type=PKCS12 -Dmetastore.keymanagerfactory.algorithm=SunX509" >> "$GITHUB_OUTPUT"
           echo "ca=$dir/ca.crt" >> "$GITHUB_OUTPUT"
 
       - name: Start metastore container (binary TCP)

@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Fixed
+
+- `WithTLS` over `thrift://` no longer fails with "either ServerName or InsecureSkipVerify must
+  be specified" when the `tls.Config` carries no `ServerName`: the dialed endpoint's host is used,
+  as `tls.Dial` and `http.Transport` do, on a clone of the caller's config. Found by the new TLS
+  integration legs; a config with only `RootCAs` now works against an HA list too (SPEC §3.1).
+
 ### Added
 
 - `GetTableColumnStatisticsForEngine`, requesting the column statistics a named computing engine

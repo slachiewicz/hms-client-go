@@ -467,3 +467,32 @@ func TestDialBinary_TLSHandshakeRespectsConnectTimeoutFallback(t *testing.T) {
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), time.Second)
 }
+
+// TestDialBinary_TLSDefaultsServerNameToDialedHost proves a tls.Config
+// with no ServerName verifies the server against the host DialBinary was
+// given, as tls.Dial would, instead of failing with crypto/tls's "either
+// ServerName or InsecureSkipVerify must be specified": a caller passing
+// only RootCAs, the common case (and the only workable one for an HA list
+// of differently named endpoints), must get a verified connection. The
+// caller's config is cloned, not mutated.
+func TestDialBinary_TLSDefaultsServerNameToDialedHost(t *testing.T) {
+	t.Parallel()
+	cert, pool := generateTestCert(t, "127.0.0.1")
+	addr := startFB303TLSServer(t, 0, cert)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cfg := &tls.Config{RootCAs: pool}
+	conn, err := transport.DialBinary(ctx, addr, transport.BinaryConfig{
+		Timeout:        5 * time.Second,
+		ConnectTimeout: 5 * time.Second,
+		TLS:            cfg,
+	})
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	assert.Empty(t, cfg.ServerName, "the caller's tls.Config must not be mutated")
+
+	status, err := fb303.NewFacebookServiceClient(conn.Client).GetStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, fb303.FbStatus_ALIVE, status)
+}

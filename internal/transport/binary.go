@@ -134,13 +134,27 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 
 	conn := raw
 	if cfg.TLS != nil {
+		tlsCfg := cfg.TLS
+		if tlsCfg.ServerName == "" && !tlsCfg.InsecureSkipVerify {
+			// Default ServerName to the dialed host, as tls.Dial and
+			// http.Transport do: tls.Client alone refuses to verify without
+			// one, and a single caller-supplied name cannot fit every
+			// endpoint of an HA list anyway. Clone so the caller's config,
+			// shared by every endpoint, is never mutated.
+			host, _, err := net.SplitHostPort(hostPort)
+			if err != nil {
+				host = hostPort
+			}
+			tlsCfg = tlsCfg.Clone()
+			tlsCfg.ServerName = host
+		}
 		hctx := ctx
 		if cfg.ConnectTimeout > 0 {
 			var hcancel context.CancelFunc
 			hctx, hcancel = context.WithTimeout(ctx, cfg.ConnectTimeout)
 			defer hcancel()
 		}
-		tlsConn := tls.Client(raw, cfg.TLS)
+		tlsConn := tls.Client(raw, tlsCfg)
 		if err := tlsConn.HandshakeContext(hctx); err != nil {
 			_ = raw.Close()
 			return nil, err

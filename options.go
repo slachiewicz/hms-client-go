@@ -37,9 +37,10 @@ type config struct {
 	poolSize       int
 	probeInterval  time.Duration
 	chunkSize      int
-	// partitionBatchSize governs AddPartitions' batching only (SPEC §5.5,
-	// §2.3 Rule 5), separate from chunkSize (GetTables, GetPartitionsByNames):
-	// see WithPartitionBatchSize.
+	// partitionBatchSize governs the mutating partition calls' batching
+	// (AddPartitions, AlterPartitions, DropPartitionsByNames; SPEC §5.5, §2.3
+	// Rule 5), separate from chunkSize (GetTables, GetPartitionsByNames and
+	// their Seq forms): see WithPartitionBatchSize.
 	partitionBatchSize int
 
 	httpClient  *http.Client
@@ -374,8 +375,11 @@ func WithKrb5Config(path string) Option {
 // metastore.use.SSL=true, and configures the Transport.TLSClientConfig of
 // the *http.Client this package builds for "https://" endpoints (SPEC
 // §3.1, §3.2). cfg's Certificates, RootCAs, ServerName, and
-// InsecureSkipVerify apply exactly as crypto/tls interprets them; the
-// caller is responsible for building a cfg suited to the server.
+// InsecureSkipVerify apply exactly as crypto/tls interprets them, with one
+// convenience: an empty ServerName defaults to the host of the endpoint
+// being dialed (as tls.Dial and http.Transport do), so a cfg holding only
+// RootCAs works, including against an HA list of differently named
+// endpoints. cfg is never mutated; the per-endpoint name goes on a clone.
 //
 // It cannot be combined with WithHTTPClient for an "https://" endpoint:
 // a supplied client is used as-is, so its own Transport's TLS
