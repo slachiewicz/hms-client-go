@@ -1,7 +1,7 @@
 # `hms-client-go` Specification
 
 > **Formal Functional, Protocol, and Interface Specification for `github.com/slachiewicz/hms-client-go`**  
-> Version: 1.0.0-draft (everything below is implemented and released as of `v0.2.0`; see [CHANGELOG.md](CHANGELOG.md))  
+> Version: 1.0.0-draft (describes `v0.2.0` as released, see [CHANGELOG.md](CHANGELOG.md); §1.1 lists what is deliberately absent)  
 > Target Go Floor: **Go 1.26.0**  
 > License: **Apache-2.0**
 
