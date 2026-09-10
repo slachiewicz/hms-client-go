@@ -59,6 +59,18 @@ jobs:
             http: true
             tls: true
             user: ci
+          - name: hive-4.2.1-kerberos
+            image: apache/hive:4.2.1
+            expect_version: "4.2"
+            # Dialed by name so the client derives the service principal
+            # hive/hms.example.com itself; the KDC step maps the name to
+            # 127.0.0.1 in /etc/hosts.
+            uris: "thrift://hms.example.com:9083"
+            kerberos: true
+            # Under SASL the identity is the Kerberos principal, not
+            # set_ugi, so TestIdentity must expect the principal's short
+            # name (Hadoop's default auth_to_local rule).
+            user: client
     steps:
       - uses: actions/checkout@v7
 
@@ -146,15 +158,55 @@ jobs:
           echo "opts=-Dmetastore.use.SSL=true -Dmetastore.keystore.path=/tls/keystore.p12 -Dmetastore.keystore.password=changeit -Dmetastore.keystore.type=PKCS12 -Dmetastore.keymanagerfactory.algorithm=SunX509" >> "$GITHUB_OUTPUT"
           echo "ca=$dir/ca.crt" >> "$GITHUB_OUTPUT"
 
+      - name: Start the KDC sidecar (Kerberos leg)
+        if: matrix.kerberos
+        id: kdc
+        run: |
+          # An MIT KDC built from test/docker/kdc (apt-only, under a
+          # minute) on a user-defined network so the metastore reaches it
+          # as "kdc"; its keytabs land in a host directory both the
+          # metastore container and the test runner mount. Port 88 is
+          # published over TCP only, matching udp_preference_limit = 1 in
+          # the runner's krb5.conf.
+          #
+          # The metastore needs three things beyond the -D flags: the
+          # container krb5.conf at /etc/krb5.conf, its keytab, and a
+          # core-site.xml that enables Hadoop security -- without it
+          # UserGroupInformation's keytab login is a silent no-op and the
+          # GSSAPI acceptor has no credentials. HIVE_CUSTOM_CONF_DIR is
+          # safe here because the directory holds only core-site.xml: the
+          # entrypoint symlinks files individually, so the image's own
+          # hive-site.xml and Derby settings stay in place.
+          conf="$GITHUB_WORKSPACE/test/docker/kdc"
+          keytabs="$RUNNER_TEMP/keytabs"; mkdir -p "$keytabs"
+          docker network create hmsnet
+          docker build -t hms-kdc "$conf"
+          docker run -d --name kdc --network hmsnet -p 88:88 -v "$keytabs:/keytabs" hms-kdc
+          for i in $(seq 1 60); do
+            [ -f "$keytabs/.ready" ] && break
+            sleep 1
+          done
+          if [ ! -f "$keytabs/.ready" ]; then
+            echo "KDC did not export its keytabs" >&2; docker logs kdc; exit 1
+          fi
+          ls -l "$keytabs"
+          echo "127.0.0.1 hms.example.com" | sudo tee -a /etc/hosts
+          {
+            echo "run_args=--network hmsnet --hostname hms.example.com -v $keytabs:/keytabs:ro -v $conf/krb5-container.conf:/etc/krb5.conf:ro -v $conf/hive-conf:/custom-conf:ro --env HIVE_CUSTOM_CONF_DIR=/custom-conf"
+            echo "opts=-Dmetastore.sasl.enabled=true -Dmetastore.kerberos.principal=hive/hms.example.com@EXAMPLE.COM -Dmetastore.kerberos.keytab.file=/keytabs/hive.keytab -Djava.security.krb5.conf=/etc/krb5.conf"
+            echo "keytab=$keytabs/client.keytab"
+            echo "krb5_conf=$conf/krb5-host.conf"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Start metastore container (binary TCP)
         if: "!matrix.http"
         run: |
-          # steps.tls.outputs.* are empty on the plain legs, so the same
-          # command serves both.
-          docker run -d --name hms -p 9083:9083 ${{ steps.tls.outputs.mount }} \
+          # steps.tls.outputs.* and steps.kdc.outputs.* are empty on the
+          # plain legs, so the same command serves every binary leg.
+          docker run -d --name hms -p 9083:9083 ${{ steps.tls.outputs.mount }} ${{ steps.kdc.outputs.run_args }} \
             --env SERVICE_NAME=metastore \
             --env HIVE_AUX_JARS_PATH="${{ steps.hcat.outputs.aux_jars }}" \
-            --env SERVICE_OPTS="${{ steps.tls.outputs.opts }} ${{ steps.hcat.outputs.listener_opts }}" \
+            --env SERVICE_OPTS="${{ steps.tls.outputs.opts }} ${{ steps.kdc.outputs.opts }} ${{ steps.hcat.outputs.listener_opts }}" \
             "${{ matrix.image }}"
 
       - name: Start metastore container (HTTP mode)
@@ -204,8 +256,17 @@ jobs:
           # and TestTLS runs against the same endpoint.
           HMS_TLS_CA: ${{ steps.tls.outputs.ca }}
           HMS_TLS_URIS: ${{ matrix.tls && matrix.uris || '' }}
+          # Empty on the other legs. On the Kerberos leg every dial
+          # authenticates as client@EXAMPLE.COM from the KDC's keytab, with
+          # KRB5_CONFIG pointing the client at the published KDC port.
+          KRB5_CONFIG: ${{ steps.kdc.outputs.krb5_conf }}
+          HMS_KRB5_URIS: ${{ matrix.kerberos && matrix.uris || '' }}
+          HMS_KRB5_PRINCIPAL: ${{ matrix.kerberos && 'client@EXAMPLE.COM' || '' }}
+          HMS_KRB5_KEYTAB: ${{ steps.kdc.outputs.keytab }}
         run: make test-docker
 
       - name: Dump container logs on failure
         if: failure()
-        run: docker logs hms || true
+        run: |
+          docker logs hms || true
+          if [ -n "${{ steps.kdc.outputs.keytab }}" ]; then echo "===== kdc"; docker logs kdc || true; fi

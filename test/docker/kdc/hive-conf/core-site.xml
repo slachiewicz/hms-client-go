@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!--
+  Mounted as HIVE_CUSTOM_CONF_DIR for the Kerberized metastore. The image's
+  entrypoint symlinks each file in that directory into /opt/hive/conf, so a
+  directory holding only core-site.xml adds Hadoop's security switch without
+  displacing the image's own hive-site.xml and its Derby settings.
+
+  metastore.sasl.enabled alone flips the metastore's AuthFactory to Kerberos,
+  but the keytab login runs through Hadoop's UserGroupInformation, which is a
+  no-op unless its own configuration says security is enabled.
+-->
+<configuration>
+  <property>
+    <name>hadoop.security.authentication</name>
+    <value>kerberos</value>
+  </property>
+</configuration>

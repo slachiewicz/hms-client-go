@@ -27,8 +27,11 @@
 //     with metastore.use.SSL=true (the TLS-mode jobs). HMS_TLS_URIS names
 //     the same endpoint for TestTLS, the explicit TLS assertion.
 //   - HMS_KRB5_URIS, HMS_KRB5_PRINCIPAL, HMS_KRB5_KEYTAB (optional): a
-//     Kerberized endpoint and the identity to reach it with, for
-//     TestKerberos. No matrix job sets them yet; see envKrb5URIs.
+//     Kerberized endpoint and the identity to reach it with. When the
+//     principal is set every dial in this package adds hms.WithKerberos,
+//     so the whole suite runs over SASL GSSAPI (the Kerberos job, which
+//     also sets KRB5_CONFIG); HMS_KRB5_URIS names the same endpoint for
+//     TestKerberos, the explicit assertion. See envKrb5URIs.
 package integration_test
 
 import (
@@ -94,16 +97,31 @@ func tlsOptions(t *testing.T) []hms.Option {
 
 // envKrb5URIs names the endpoint(s) of a Kerberized metastore (SPEC §3.1,
 // KERBEROS), for TestKerberos, and envKrb5Principal the client principal
-// to authenticate as. No matrix image runs a KDC yet (PLAN.md Slice 14
-// tracks a Kerberized leg as a follow-up), so these are always empty today
-// and TestKerberos always skips; the test exists so that job has one ready
-// to enable once the KDC sidecar lands. The credentials come from the
-// ambient KRB5CCNAME credential cache unless envKrb5Keytab names a keytab.
+// to authenticate as. The hive-4.2.1-kerberos matrix job sets them, with a
+// KDC sidecar built from test/docker/kdc and KRB5_CONFIG pointing at it;
+// every other job leaves them empty, so TestKerberos skips there and dial
+// adds no Kerberos option. The credentials come from the ambient
+// KRB5CCNAME credential cache unless envKrb5Keytab names a keytab.
 const (
 	envKrb5URIs      = "HMS_KRB5_URIS"
 	envKrb5Principal = "HMS_KRB5_PRINCIPAL"
 	envKrb5Keytab    = "HMS_KRB5_KEYTAB"
 )
+
+// krb5Options returns the hms.WithKerberos option built from
+// HMS_KRB5_PRINCIPAL and HMS_KRB5_KEYTAB, or nothing when the principal is
+// unset. The client derives the service principal from the dialed host
+// (SPEC §3.1), which is why the Kerberos job dials the metastore by name.
+func krb5Options() []hms.Option {
+	principal := os.Getenv(envKrb5Principal)
+	if principal == "" {
+		return nil
+	}
+	if kt := os.Getenv(envKrb5Keytab); kt != "" {
+		return []hms.Option{hms.WithKerberos(principal, kt)}
+	}
+	return []hms.Option{hms.WithKerberos(principal)}
+}
 
 // dialTimeout bounds how long New (and thus every test's setup) waits to
 // connect before failing, distinct from each RPC's own context below.
@@ -132,17 +150,22 @@ func requireHMSEnv(t *testing.T) (uris, expectVersion string) {
 	return uris, expectVersion
 }
 
-// dial connects a Client to HMS_URIS, applying HMS_USER and HMS_TLS_CA (if
-// set) before any caller-supplied opts, and registers t.Cleanup to close it.
+// dial connects a Client to HMS_URIS, applying HMS_USER, HMS_TLS_CA, and
+// HMS_KRB5_* (whichever are set) before any caller-supplied opts, and
+// registers t.Cleanup to close it. Under Kerberos the server's view of the
+// caller is the principal, not HMS_USER (set_ugi is not sent over SASL,
+// SPEC §3.1), so that job sets HMS_USER to the principal's short name for
+// TestIdentity's owner assertion.
 func dial(t *testing.T, opts ...hms.Option) *hms.Client {
 	t.Helper()
 	uris, _ := requireHMSEnv(t)
 
-	all := make([]hms.Option, 0, len(opts)+2)
+	all := make([]hms.Option, 0, len(opts)+3)
 	if u := os.Getenv(envUser); u != "" {
 		all = append(all, hms.WithUser(u))
 	}
 	all = append(all, tlsOptions(t)...)
+	all = append(all, krb5Options()...)
 	all = append(all, opts...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
@@ -852,19 +875,18 @@ func TestTLS(t *testing.T) {
 
 // TestKerberos connects to a Kerberized metastore with hms.WithKerberos,
 // which authenticates over SASL GSSAPI at QOP auth (SPEC §3.1), and
-// confirms a basic RPC round-trips over the resulting connection. It skips
-// unless HMS_KRB5_URIS is set; see envKrb5URIs's doc comment.
+// confirms a basic RPC round-trips over the resulting connection. It also
+// checks the negative: a principal the keytab does not hold cannot
+// authenticate, so the leg proves the server really demands Kerberos. It
+// skips unless HMS_KRB5_URIS is set; see envKrb5URIs's doc comment.
 func TestKerberos(t *testing.T) {
 	t.Parallel()
 	uris := os.Getenv(envKrb5URIs)
 	if uris == "" {
 		t.Skipf("%s is not set; skipping Kerberos integration test (see PLAN.md Slice 14)", envKrb5URIs)
 	}
-
-	opts := []hms.Option{hms.WithKerberos(os.Getenv(envKrb5Principal))}
-	if kt := os.Getenv(envKrb5Keytab); kt != "" {
-		opts = []hms.Option{hms.WithKerberos(os.Getenv(envKrb5Principal), kt)}
-	}
+	opts := krb5Options()
+	require.NotEmpty(t, opts, "%s must be set alongside %s", envKrb5Principal, envKrb5URIs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
@@ -874,4 +896,22 @@ func TestKerberos(t *testing.T) {
 
 	_, err = c.ServerVersion(context.Background())
 	require.NoError(t, err)
+
+	// A plain NOSASL client must be refused by a SASL-only server: the
+	// metastore reads the binary protocol's first bytes as a SASL frame
+	// and drops the connection, which classifies as ErrUnavailable.
+	plain, err := hms.New(ctx, uris)
+	if err == nil {
+		_ = plain.Close()
+	}
+	require.ErrorIs(t, err, hms.ErrUnavailable, "a NOSASL client against a Kerberized metastore must fail as ErrUnavailable")
+
+	// A principal absent from the keytab has no key to authenticate with.
+	if kt := os.Getenv(envKrb5Keytab); kt != "" {
+		wrong, err := hms.New(ctx, uris, hms.WithKerberos("nobody@EXAMPLE.COM", kt))
+		if err == nil {
+			_ = wrong.Close()
+		}
+		require.Error(t, err, "a principal missing from the keytab must not authenticate")
+	}
 }
