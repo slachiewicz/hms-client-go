@@ -24,19 +24,27 @@ The public API, compatibility matrix and fallback rules are defined once in [`SP
 ```
 hms-client-go/
 ├── .github/
+│   ├── dependabot.yml             # Weekly grouped gomod + actions bumps; apache/thrift excluded (bumped by hand with the compiler)
 │   └── workflows/
-│       ├── ci.yml                 # gofmt, vet, unit tests, golangci-lint, govulncheck
-│       └── integration.yml        # Docker matrix: Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1
-├── client.go                      # package hms: Client, New, Close
+│       ├── ci.yml                 # make check: gofmt, vet, unit tests, golangci-lint, govulncheck
+│       ├── integration.yml        # Docker matrix: Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1 binary, 4.2.1 HTTP
+│       └── hive-2.3.9-image.yml   # On-demand build+push of slachiewicz/hive-metastore:2.3.9
+├── client.go                      # package hms: Client, New, Close, endpointPool, the call/read retry loop (SPEC §4.2)
 ├── conn.go                        # One live connection: bound RPC func fields, UNKNOWN_METHOD fallback cache, catalog probe (SPEC §2.3)
 ├── options.go                     # Functional options (see SPEC §5.1)
-├── types.go                       # Clean Go structs (Catalog, Database, Table, Partition, ...)
+├── types.go                       # Clean Go structs (Catalog, Database, Table, Partition, StorageDescriptor, ...)
 ├── convert.go                     # Thrift <-> hms type mapping (the only file importing gen/ types into hms)
-├── table.go                       # Table operations (SPEC §5.4)
-├── partition.go                   # Partition operations (SPEC §5.5)
+├── table.go                       # Table operations, GetTablesSeq (SPEC §5.4)
+├── partition.go                   # Partition operations, GetPartitionsSeq (SPEC §5.5)
+├── partname.go                    # PartitionName: Hive's makePartName/escapePathName rules (SPEC §5.5)
+├── notification.go                # CurrentNotificationID, GetNextNotifications (SPEC §5.7)
+├── stats.go                       # GetTableColumnStatistics (SPEC §5.8)
+├── acid.go                        # Transactions and locks (SPEC §5.9)
+├── observe.go                     # WithLogger / WithRPCObserver plumbing (SPEC §5.10)
 ├── errors.go                      # Sentinel errors & exception unwrapping (SPEC §7)
 ├── version.go                     # Module version (debug.ReadBuildInfo) and the HTTP User-Agent string
 ├── formats.go                     # Iceberg / Delta / Hudi table builders (SPEC §6)
+├── hmstest/                       # Public in-process fake metastore (SPEC §8): Start/NewServer, Store, handlers, error injection
 ├── idl/                           # Committed Thrift IDL (Hive 4.2.1 + fb303) for reproducible generation
 │   ├── hive_metastore.thrift
 │   └── share/fb303/if/fb303.thrift
@@ -47,15 +55,17 @@ hms-client-go/
 │   ├── transport/
 │   │   ├── uri.go                 # Endpoint list parsing (thrift:// and http(s)://)
 │   │   ├── ctxclient.go           # thrift.TClient wrapper binding ctx deadlines/cancel to the socket
-│   │   ├── binary.go              # TCP dial + optional SASL PLAIN + buffered binary protocol
-│   │   ├── sasl.go                # SASL PLAIN client framing
-│   │   └── http.go                # THttpClient wrapper: default path, headers, auth
+│   │   ├── binary.go              # TCP dial, optional TLS, SASL PLAIN/GSSAPI, deadlineShield, buffered binary protocol
+│   │   ├── sasl.go                # Thrift TSaslTransport framing; drives PLAIN and GSSAPI through saslMech
+│   │   ├── gssapi.go              # SASL GSSAPI (RFC 4752) over gokrb5, QOP auth
+│   │   └── http.go                # THttpClient wrapper: default path, headers, auth, TLS
 │   └── ha/
 │       └── cluster.go             # Endpoint list, cooldown, sticky-active failover
 ├── test/
 │   ├── integration_test.go        # Version-parameterised suite (build tag: integration)
 │   └── docker/
 │       └── hive-2.3.9/Dockerfile  # Self-built image; apache/hive publishes no 2.x image
+├── docs/superpowers/plans/        # Historical execution plans (not maintained; this file is)
 ├── scripts/
 │   └── gen-thrift.sh
 ├── .gitignore
@@ -64,11 +74,11 @@ hms-client-go/
 ├── go.sum
 ├── Makefile
 ├── AGENTS.md / CLAUDE.md
-├── SPEC.md / PLAN.md / README.md
+├── SPEC.md / PLAN.md / README.md / CHANGELOG.md
 └── LICENSE
 ```
 
-The public package is `hms` at the module root. There is no `api/` package: a client library with one package is the idiomatic Go shape, and it keeps the import path short.
+The public package is `hms` at the module root. There is no `api/` package: a client library with one package is the idiomatic Go shape, and it keeps the import path short. `hmstest` is the one other public package; it exists so downstream projects can test against a fake metastore without depending on `internal/`.
 
 ---
 
@@ -85,6 +95,7 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 * The script applies two wire-safe patches to the downloaded IDL before generating, and the patched IDL is what gets committed:
   1. `SkewedInfo.skewedColValueLocationMaps` (`map<list<string>, string>`) is removed. Go has no valid type for a list-keyed map and the generator aborts (THRIFT-2063). See SPEC §1.1 for why removal is safe and retyping is not.
   2. `WMNullableResourcePlan.isSetQueryParallelism`, `.isSetDefaultPoolPath` and `WMNullablePool.isSetSchedulingPolicy` are renamed with a `Flag` suffix. The Go generator emits an `IsSetX()` accessor for every field, so a field literally named `isSetX` produces a field and a method with the same name and the package does not compile (THRIFT-6176). Only field IDs are serialised, so the rename does not change the wire format.
+* Both generator bugs are fixed on `apache/thrift` master (PR 3778 and PR 3779, merged 2026-09-02) but unreleased; a compiler built from master generates the pristine 4.2.1 IDL and this module builds and passes its suite against master's `lib/go`. The patches stay until `go.mod` can pin a release that ships them, because the fixed generator's output needs `thrift.MapEntry`/`thrift.UnorderedEqual`, which v0.24.0's library lacks. See SPEC §1.1 and Slice 13.
 * The generated `*-remote` CLI packages (`package main`) are deleted; they are not part of the library.
 * Both `idl/` and `gen/` are committed so `go get` works without a Thrift compiler and so the diff of a regeneration is reviewable.
 
@@ -92,7 +103,9 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 
 #### Binary TCP Socket (`thrift://`)
 * `internal/transport/ctxclient.go` wraps `thrift.TClient`. Its single method `Call(ctx, ...)` receives the request context, so it is the natural binding point: before delegating it sets `net.Conn` read/write deadlines from `ctx.Deadline()` (fallback: configured socket timeout) and registers `context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })`, releasing the stop handle on return. Wrapping `TProtocol` would need the same logic repeated across ~40 methods; wrapping `TClient` needs it once.
-* SASL PLAIN (`sasl.go`) wraps the socket when `WithPlainAuth` is set: Thrift SASL handshake (START / OK / COMPLETE status bytes, 4-byte big-endian length prefix), then length-prefixed frames for payload.
+* The `thrift.TSocket` is built over a `deadlineShield` (`binary.go`) whose deadline setters are no-ops, so `TSocket`'s own per-I/O deadline resets never fight `ContextClient` for the connection's deadline (SPEC §3.1).
+* SASL (`sasl.go`) wraps the socket when `WithPlainAuth` or `WithKerberos` is set: Thrift `TSaslTransport` handshake (START / OK / COMPLETE status bytes, 4-byte big-endian length prefix), then length-prefixed frames for payload. The mechanism behind it is a `saslMech`: PLAIN's single initial response, or GSSAPI's three-round exchange in `gssapi.go` over `gokrb5` (SPEC §3.1 `KERBEROS`).
+* `WithTLS` wraps the dialed socket in `tls.Client` before any SASL layer; the handshake is bounded like the SASL one, and the raw `net.Conn` still owns deadlines.
 
 #### Thrift-over-HTTP/HTTPS (`http://` / `https://`)
 * `internal/transport/http.go` wraps Thrift's `THttpClient`, which already implements `TTransport` and honours the context passed to `Flush(ctx)`.
@@ -107,39 +120,41 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 Defined in SPEC §5. Implementation notes:
 * `convert.go` is the only file in package `hms` allowed to import `gen/hive_metastore` types into function bodies that touch exported types. Nothing generated is exported.
 * The `catName` field is written on the wire only when the connection has confirmed catalog support (SPEC §2.3 Rule 1). For Hive 2.x connections it is left unset so the server never sees an unknown field.
-* Every RPC goes through one `call(ctx, name, fn)` helper that does context binding, retry/failover, error unwrapping, and fallback caching.
+* Every RPC goes through `Client.do` via one of two thin wrappers: `read(ctx, name, fn)` for idempotent reads (retried on another endpoint on `ErrUnavailable`) and `call(ctx, name, fn)` for everything else (never retried once started). `do` handles endpoint selection, pool acquire/release, context binding, retry/failover, and the `RPCInfo` observer; the `UNKNOWN_METHOD` fallback cache lives on the `conn`. SPEC §4.2 point 3 lists which method uses which.
 
 ---
 
 ## 4. Step-by-Step Implementation Slices
 
+Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same release; 16 is `v0.2.0`. There is no Slice 6: the 1.0-scope work was numbered from 7 and the gap was never filled; it stays so existing references to slice numbers remain valid. Boxes left open are deliberate deferrals, each with its reason.
+
 ### Slice 1: Scaffold & Thrift Generation
 - [x] `go.mod` with Go `1.26.0`, `github.com/apache/thrift v0.24.0`, `github.com/stretchr/testify`.
-- [ ] `git init`, first commit of the scaffold.
+- [x] `git init`, first commit of the scaffold.
 - [x] Run `scripts/gen-thrift.sh`; `idl/` and `gen/` generated; `go.sum` added.
-- [ ] `.github/workflows/ci.yml` running `make check`.
+- [x] `.github/workflows/ci.yml` running `make check`.
 - [x] `make check` green on the generated code (gofmt, vet, golangci-lint with `gen/` excluded from lint, govulncheck).
 
 ### Slice 2: Transports & Connection Management
-- [ ] `ctxsocket.go` + `ctxprotocol.go` with deadline propagation and `AfterFunc` cancellation.
-- [ ] `http.go` over `THttpClient` with default path and headers.
-- [ ] `sasl_plain.go`.
-- [ ] `internal/pool/` with idle health checks.
-- [ ] Unit tests against in-process TCP and HTTP servers: deadline honoured, cancel closes socket, headers present, SASL handshake bytes.
+- [x] `internal/transport/ctxclient.go` (one `thrift.TClient` wrapper, not the separate socket/protocol wrappers first planned) with deadline propagation and `AfterFunc` cancellation; `deadlineShield` in `binary.go` keeps `TSocket` from resetting the deadline underneath it.
+- [x] `internal/transport/http.go` over `THttpClient` with default path and headers.
+- [x] `internal/transport/sasl.go` (`TSaslTransport` framing, PLAIN mechanism).
+- [x] Per-endpoint connection pool as `endpointPool` in `client.go`; a separate `internal/pool/` package was not needed. Liveness comes from the recovery probe (Slice 4) and from discarding any connection whose RPC classified as `ErrUnavailable`, not from idle health checks.
+- [x] Unit tests against in-process TCP and HTTP servers: deadline honoured, cancel closes socket, headers present, SASL handshake bytes (`internal/transport/*_test.go`).
 
 ### Slice 3: High-Level Client & Hive 2/3/4 Interop
-- [ ] `types.go`, `convert.go`, `errors.go`.
-- [ ] `client.go` with Catalog, Database, Table, and Partition operations per SPEC §5.
-- [ ] `fallback.go`: `UNKNOWN_METHOD` detection, per-connection fallback cache, Rules 2–4 from SPEC §2.3.
-- [ ] `formats.go` builders per SPEC §6.
-- [ ] Unit tests with a fake Thrift server that can be told to reject any RPC with `UNKNOWN_METHOD`, proving each fallback path and that `catName` is absent on the wire for Hive 2 connections.
-- [ ] **Breaking changes** (Task 3 fix round, aligning the builders with xtable-hive-metastore's conventions, SPEC §6): `hms.DeltaInputFormat` and `hms.DeltaOutputFormat` are removed (Delta's `StorageDescriptor` now carries no input/output format at all, only the `DeltaStorageHandler`); `hms.HudiOutputFormat`'s value changes from the Hudi-specific output format to `org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat`. Allowed on the v0.x line by SPEC §8.
+- [x] `types.go`, `convert.go`, `errors.go`.
+- [x] `client.go`, `table.go`, `partition.go` with Catalog, Database, Table, and Partition operations per SPEC §5.
+- [x] `UNKNOWN_METHOD` detection, per-connection fallback cache, and SPEC §2.3 Rules 2–4 live in `conn.go` (no separate `fallback.go`).
+- [x] `formats.go` builders per SPEC §6.
+- [x] Unit tests with a fake Thrift server (`internal/hmstest`, promoted to the public `hmstest` in Slice 16) that can be told to reject any RPC with `UNKNOWN_METHOD`, proving each fallback path and that `catName` is absent on the wire for Hive 2 connections.
+- [x] **Breaking changes** (Task 3 fix round, aligning the builders with xtable-hive-metastore's conventions, SPEC §6): `hms.DeltaInputFormat` and `hms.DeltaOutputFormat` are removed (Delta's `StorageDescriptor` now carries no input/output format at all, only the `DeltaStorageHandler`); `hms.HudiOutputFormat`'s value changes from the Hudi-specific output format to `org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat`. Allowed on the v0.x line by SPEC §8; recorded under `0.1.0` in CHANGELOG.md.
 
 ### Slice 4: High Availability (HA) & Clustering
-- [ ] `internal/ha/cluster.go`, multi-URI parsing, cooldown, sticky-active selection.
-- [ ] Retry wrapper with idempotency classification.
-- [ ] Background recovery probe.
-- [ ] Unit tests simulating node outages, recovery, and the non-idempotent-after-flush case.
+- [x] `internal/ha/cluster.go`, multi-URI parsing, cooldown, sticky-active selection.
+- [x] Retry wrapper with idempotency classification (`Client.do`, §3.4 above).
+- [x] Background recovery probe.
+- [x] Unit tests simulating node outages, recovery, and the non-idempotent-after-start case (`ha_test.go`).
 
 ### Slice 5: Multi-Version Docker Integration Tests
 - [x] `test/docker/hive-2.3.9/Dockerfile`, published as `slachiewicz/hive-metastore:2.3.9` (amd64 + arm64) by the on-demand `hive-2.3.9-image` workflow; the matrix pulls it and only builds locally as a fallback. archive.apache.org serves ~250 KB/s, so building inside a CI job does not fit the 30-minute limit.
@@ -177,16 +192,16 @@ Defined in SPEC §5. Implementation notes:
 - [x] Integration matrix: a column-statistics read on an Iceberg fixture table, exercised in `TestTables_FormatBuildersAndLifecycle`.
 
 ### Slice 12: ACID locks and transactions
-- [x] A new `txn.go`: `OpenTransaction`, `CommitTransaction`, `AbortTransaction`, `Heartbeat`, `Lock`, `CheckLock`, `Unlock`, and the `Lock*`/`LockRequest`/`LockResponse` types per SPEC §5.9. `conn.go`: bind `open_txns`, `commit_txn`, `abort_txn`, `heartbeat`, `lock`, `check_lock`, `unlock`.
-- [x] `hmstest`: a minimal txn/lock table (open txn ids, lock ids and their state) backing the seven handlers above.
+- [x] `acid.go`: `OpenTransaction`, `CommitTransaction`, `AbortTransaction`, `Heartbeat`, `Lock`, `CheckLock`, `Unlock`, and the `Lock*`/`LockRequest`/`LockResponse` types per SPEC §5.9. `conn.go`: bind `open_txns`, `commit_txn`, `abort_txn`, `heartbeat`, `lock`, `check_lock`, `unlock`.
+- [x] `hmstest/acid.go`: a minimal txn/lock table (open txn ids, lock ids and their state) backing the seven handlers above.
 - [x] Unit tests: open/commit/abort round-trip, a lock request that returns `LockStateWaiting` then `LockStateAcquired` on `CheckLock`, heartbeat on a txn-only and lock-only request.
-- [x] Integration matrix: `TestACID` covers an open/lock/checklock/unlock cycle and a heartbeat, extended to every 2.3+ leg. **Unrun as of this commit**: it assumes the ACID TXN tables Hive's `schematool` creates already exist in each image's Derby metastore DB; nobody has confirmed a green run yet (deferred to the final wave per the ledger).
-- Minors deferred to a later wave (per review): the fixture's lock-conflict handling ignores `LockComponent.Level`; `Heartbeat(0, 0)`'s behaviour is undocumented; `LockComponent` field comment style.
+- [x] Integration matrix: `TestACID` covers an open/lock/checklock/unlock cycle and a heartbeat on every 2.3+ leg. Green on all five jobs in the 2026-09-02 run at `ff17b22` (the `v0.2.0` tag), so the images' Derby metastores do carry the ACID TXN tables.
+- [ ] Minors deferred (per review): the fixture's lock-conflict handling ignores `LockComponent.Level`; `Heartbeat(0, 0)`'s behaviour is undocumented; `LockComponent` field comment style.
 
 ### Slice 13: `SkewedInfo` exposure (gated)
 - [x] `SkewedInfo.ColumnNames`/`ColumnValues` (the wire's `skewedColNames`/`skewedColValues`, unaffected by the THRIFT-2063 gate) shipped early as part of Slice 3's struct additions: `types.go`, `convert.go`, round-trip fidelity. See SPEC §5.4.
-- [ ] **Still gated**: `skewedColValueLocationMaps` (the list-keyed `map<list<string>, string>`) remains unmodelled and genuinely lost on read (SPEC §1.1, §5.4) pending the upstream Thrift Go fix for THRIFT-2063 (PR 3778). Not started until a `github.com/apache/thrift` release containing it is available to pin in `go.mod`.
-- [ ] Once ungated: `scripts/gen-thrift.sh` stops removing `skewedColValueLocationMaps` from the IDL; regenerate `gen/`. `types.go`: `SkewedLocation` (or equivalent) per SPEC §5.4. `convert.go`: the list-keyed map conversion.
+- [ ] **Still gated**: `skewedColValueLocationMaps` (the list-keyed `map<list<string>, string>`) remains unmodelled and genuinely lost on read (SPEC §1.1, §5.4). The generator fix (THRIFT-2063, PR 3778) merged on `apache/thrift` master on 2026-09-02, but the latest release is still v0.24.0 and the fixed output needs library symbols that release lacks. Not started until a `github.com/apache/thrift` release containing it is available to pin in `go.mod`.
+- [ ] Once ungated: bump `go.mod` and the compiler together; `scripts/gen-thrift.sh` drops both IDL patches (the `isSet*` rename from THRIFT-6176 / PR 3779 lands in the same release); regenerate `gen/`, which will represent the field as `[]thrift.MapEntry[[]string, string]`. `types.go`: `SkewedLocation` (or equivalent) per SPEC §5.4. `convert.go`: the list-keyed map conversion.
 - [ ] `hmstest`: a fixture table with skewed columns, values, and at least one location-map entry.
 - [ ] Unit tests: round-trip of `ColumnValueLocationMaps` through `CreateTable`/`GetTable`.
 - [ ] Integration matrix: extend the 3.x/4.x legs (skew is unsupported on 2.3) with a skewed-table create/read.
@@ -202,6 +217,23 @@ Defined in SPEC §5. Implementation notes:
 - [x] `go.mod`/tag policy: confirmed module tags stay `v0.x` until the `polytable` adoption note below ships, per SPEC §8 (no change needed — the policy was already correctly stated).
 - [x] Unit tests: an observer sees one `RPCInfo` per attempt (including retried attempts) with the right `Attempt`/`Err`; a logger sees a failover transition (and its later recovery) under a simulated endpoint outage, and no transition line on repeated successes or repeated failures against an already-cooling endpoint.
 - [ ] Integration matrix: no new job; observability is exercised incidentally by the other legs via `WithLogger` attached to the test harness's own logger.
+
+### Slice 16: `v0.2.0` -- streaming listings, batched drops, public test double
+Driven by the `polytable` adoption review; every item is recorded under `0.2.0` in CHANGELOG.md.
+- [x] `GetPartitionsSeq` / `GetTablesSeq` (`iter.Seq2`): names RPC once, then by-name fetches in `WithChunkSize` chunks, each its own pooled-connection acquire/release so no connection is held while the caller's loop body runs; each chunk independently retried as an idempotent read. Column-list interning across chunks (SPEC §5.4, §5.5, §4.2 point 3).
+- [x] `DropPartitionsByNames` / `DropPartitions` over `drop_partitions_req` (no fallback: the RPC is in the 2.3.9 and 3.1.3 IDL), batched at `WithPartitionBatchSize`; `AlterPartitions` batched at the same knob. `ifExists` maps a `NoSuchObjectException` to success.
+- [x] `PartitionName` (`partname.go`), matching Hive's `Warehouse.makePartName` / `FileUtils.escapePathName` exactly.
+- [x] `maxParts > math.MaxInt16` returns `ErrInvalidOperation` on the four `maxParts` methods instead of silently truncating at the Thrift `i16` boundary.
+- [x] `internal/hmstest` promoted to the public `hmstest` package (`Start`, `NewServer`, `WithoutRPC`, `WithFailNext`, `Seed*`); SPEC §8 states its stability promise.
+- [x] Connection-setup RPCs (`set_ugi`) bounded by `WithConnectTimeout`; migration note in CHANGELOG.md.
+- [x] Real-server matrix green at `ff17b22` (Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1 binary, 4.2.1 HTTP).
+
+### Open follow-ups (not blocking 1.0)
+- Slice 9: TLS integration leg (certificate-bearing image; `TestTLS` skips without `HMS_TLS_URIS`).
+- Slice 12: fixture minors listed above.
+- Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
+- Slice 14: Kerberized integration leg (KDC sidecar; `TestKerberos` skips without `HMS_KRB5_URIS`); JDK `SaslServer` interoperability is unverified until then.
+- §5.8: a per-engine option for `GetTableColumnStatistics` (always `"hive"` today).
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.

@@ -8,7 +8,7 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](go.mod)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> **Status:** `v0.1.0` is the first tagged release. The API follows the stability policy in [SPEC.md §8](SPEC.md): `v0.x` may still change before `v1.0.0`; every release is verified nightly against real Hive 2.3.9, 3.1.3, 4.0.1 and 4.2.1 metastores.
+> **Status:** `v0.2.0` is the current release; see [CHANGELOG.md](CHANGELOG.md). The API follows the stability policy in [SPEC.md §8](SPEC.md): `v0.x` may still change before `v1.0.0`; every release is verified nightly against real Hive 2.3.9, 3.1.3, 4.0.1 and 4.2.1 metastores.
 
 ## What it does
 
@@ -20,6 +20,9 @@ A pure-Go client for **Apache Hive Metastore** that speaks to **Hive 2.3, 3.x an
 * **Iceberg, Delta Lake and Hudi** table builders with the exact storage-handler, SerDe and parameter conventions those engines expect.
 * **Identity and auth.** `set_ugi` caller identity over binary NOSASL, SASL PLAIN for
   LDAP/CUSTOM, pure-Go Kerberos (`gokrb5`, zero Cgo), and TLS for both transports.
+* **Streaming listings.** `GetPartitionsSeq` and `GetTablesSeq` are `iter.Seq2` forms that fetch
+  by name in chunks and hold no connection while your loop body runs, so a table with millions of
+  partitions never has to fit in memory at once.
 * **Notifications, column statistics, and ACID.** Metastore event polling, read-only column
   statistics, and minimal lock/transaction RPCs; observability via `WithLogger` and
   `WithRPCObserver`.
@@ -80,9 +83,26 @@ ice := hms.NewIcebergTable("default", "orders", "s3://bucket/orders",
 if err := c.CreateTable(ctx, ice); err != nil {
 	log.Fatal(err)
 }
+
+// Stream every partition of a large table, one chunk at a time.
+for p, err := range c.GetPartitionsSeq(ctx, "default", "events") {
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(p.Values, p.Storage.Location)
+}
 ```
 
 Errors map to six sentinels (`ErrNotFound`, `ErrAlreadyExists`, `ErrInvalidOperation`, `ErrMeta`, `ErrUnavailable`, `ErrNotSupported`); the original Thrift exception stays reachable through `errors.As`.
+
+### Testing downstream code
+
+`hmstest` starts a fake metastore in-process, emulating the RPC set of Hive 2.3, 3.1 or 4.0, so a package that uses this client can be unit-tested without Docker:
+
+```go
+srv := hmstest.Start(t, hmstest.Hive31)
+c, err := hms.New(ctx, srv.URI())
+```
 
 ## Building and testing
 
@@ -92,11 +112,12 @@ make test-docker  # integration suite; needs HMS_URIS and HMS_EXPECT_VERSION, se
 make gen          # regenerate gen/ from idl/ (Thrift 0.24.0 compiler required)
 ```
 
-The Thrift Go generator cannot compile the Hive IDL as published; `scripts/gen-thrift.sh` applies two wire-safe patches and explains why ([THRIFT-2063](https://issues.apache.org/jira/browse/THRIFT-2063), [THRIFT-6176](https://issues.apache.org/jira/browse/THRIFT-6176)).
+The released Thrift Go generator (0.24.0) cannot compile the Hive IDL as published; `scripts/gen-thrift.sh` applies two wire-safe patches and explains why ([THRIFT-2063](https://issues.apache.org/jira/browse/THRIFT-2063), [THRIFT-6176](https://issues.apache.org/jira/browse/THRIFT-6176)). Both are fixed on Thrift's master branch; the patches are dropped once a release carrying the fixes is pinned in `go.mod`.
 
 ## Documentation
 
 * [SPEC.md](SPEC.md): the canonical API, compatibility matrix, fallback rules, server quirks and stability policy.
+* [CHANGELOG.md](CHANGELOG.md): what changed in each release, including breaking changes on the `v0.x` line.
 * [PLAN.md](PLAN.md): layout, design notes and the implementation roadmap to 1.0.
 * [AGENTS.md](AGENTS.md): invariants and the verification gate for contributors and coding agents.
 

@@ -44,7 +44,13 @@ echo "==> Patching IDL for the Go generator..."
 # WMNullablePool.isSetSchedulingPolicy collide with the IsSetX() accessors the
 # Go generator emits for the sibling fields, so the package does not compile.
 # Renaming a field is wire-safe: only the field ID is serialised.
-# Tracked upstream as THRIFT-6176.
+#
+# Both are fixed on apache/thrift master (THRIFT-2063 by PR 3778, THRIFT-6176
+# by PR 3779, merged 2026-09-02) but not in any release as of 0.24.0. The fixed
+# generator emits code that needs thrift.MapEntry/thrift.UnorderedEqual from
+# the matching library, so the patches cannot go before go.mod moves to the
+# first release carrying them; then delete this whole awk block, the guard
+# below it, and the SkewedInfo gate in SPEC.md §1.1 / PLAN.md Slice 13 together.
 awk '
   /^[[:space:]]*[0-9]+:.*[[:space:]]isSet[A-Za-z]+;/ {
     sub(/;[[:space:]]*$/, "Flag;")

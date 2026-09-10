@@ -1,7 +1,7 @@
 # `hms-client-go` Specification
 
 > **Formal Functional, Protocol, and Interface Specification for `github.com/slachiewicz/hms-client-go`**  
-> Version: 1.0.0-draft  
+> Version: 1.0.0-draft (everything below is implemented and released as of `v0.2.0`; see [CHANGELOG.md](CHANGELOG.md))  
 > Target Go Floor: **Go 1.26.0**  
 > License: **Apache-2.0**
 
@@ -23,7 +23,7 @@ restate signatures or version claims.
 ### 1.1. Out of scope for 1.0
 * **Hive 2.2 and earlier**. Hive 2.2 lacks `get_table_req`, and the Hive 4 IDL this client is generated from no longer declares the legacy `get_table` / `get_table_objects_by_name` RPCs, so no fallback can be generated. Hive 2.2 is end of life; Spark 4 still defaults its metastore client to 2.3.10, which makes 2.3 the practical floor.
 * **Compact protocol** (`metastore.thrift.compact.protocol.enabled=true`) and **framed transport** (`metastore.thrift.framed.transport.enabled=true`). Both are off by default on every supported server version.
-* **`SkewedInfo.skewedColValueLocationMaps`**, gated on a Thrift Go release that can represent it (THRIFT-2063; fix pending upstream in PR 3778). Until that lands, the field is removed from the IDL before generation exactly as it is removed today; see Appendix A for the wire detail and §5.4 for the Go shape the client will expose once the gate clears.
+* **`SkewedInfo.skewedColValueLocationMaps`**, gated on a *released* Thrift Go library that can represent it. The generator fix (THRIFT-2063, [apache/thrift PR 3778](https://github.com/apache/thrift/pull/3778)) merged upstream on 2026-09-02, alongside the `isSet*` identifier fix (THRIFT-6176, [PR 3779](https://github.com/apache/thrift/pull/3779)), but neither is in a tagged release yet: the latest is v0.24.0, and the code a fixed compiler generates references `thrift.MapEntry`/`thrift.UnorderedEqual`, which v0.24.0's library lacks. Until the first release carrying both ships and `go.mod` moves to it, the field is removed from the IDL before generation exactly as it is removed today; see Appendix A for the wire detail and §5.4 for the Go shape the client will expose once the gate clears.
 
 Kerberos / GSSAPI is **in scope for 1.0** via a pure-Go implementation (`gokrb5`); native C Kerberos remains forbidden by the zero-Cgo invariant. See §3.1 and §5.1 (`WithKerberos`).
 
@@ -126,7 +126,7 @@ This mirrors the Java `HiveMetaStoreClient`: sticky active endpoint, not round-r
    * The request is retried on the next healthy endpoint, subject to point 3.
 3. **Retry budget**: at most 3 attempts per RPC across endpoints by default (`WithMaxRetries`). Two distinct decisions apply:
    * A connection that could not be **acquired** at all (dial failure, or no pooled connection available) is always retried on another endpoint — this holds for every RPC, idempotent or not, since nothing has reached the server yet.
-   * Once the RPC has **started** on an acquired connection, only an idempotent (read-only, `get_*`) RPC is retried elsewhere, and only on `ErrUnavailable` while the caller's context is still live: `GetCatalogs`, `GetCatalog`, `GetAllDatabases`, `GetDatabase`, `GetAllTables`, `GetTable`, `GetTables`, `GetPartitions`, `GetPartitionNames`, `GetConfigValue`, `ServerVersion`. Every other RPC (`Create*`, `Alter*`, `Drop*`, `AddPartitions`, and the ACID/lock RPCs in §5.9) returns the failure immediately once started, since the request may already have reached the server.
+   * Once the RPC has **started** on an acquired connection, only an idempotent (read-only, `get_*`) RPC is retried elsewhere, and only on `ErrUnavailable` while the caller's context is still live: `GetCatalogs`, `GetCatalog`, `GetAllDatabases`, `GetDatabase`, `GetAllTables`, `GetTable`, `GetTables`, `GetPartitions`, `GetPartitionNames`, `GetPartitionsByNames`, `GetPartitionsByFilter`, `GetPartitionNamesByValues`, `GetTableColumnStatistics`, `CurrentNotificationID`, `GetNextNotifications`, `GetConfigValue`, `ServerVersion`. Every other RPC (`Create*`, `Alter*`, `Drop*`, `AddPartitions`, and every ACID/lock RPC in §5.9 including `CheckLock` and `Heartbeat`, which advance server-side state) returns the failure immediately once started, since the request may already have reached the server. In the implementation this is the `read` versus `call` choice in `client.go`; a new RPC must pick the one this list implies.
    * A cancelled or expired caller context never cools an endpoint (`MarkFailed` is not called) and is never itself a reason to retry: the failure is the caller's, not the endpoint's.
    * `GetPartitionsSeq` and `GetTablesSeq` (§5.4, §5.5) each issue several RPCs -- a names call, then one or more by-name chunks -- but every one of them is its own separate, independently retried idempotent read: the names call and each chunk fetch is retried across endpoints on `ErrUnavailable` exactly like `GetPartitionNames`/`GetPartitionsByNames`/`GetAllTables`/`GetTables` themselves. This is safe because a chunk is yielded to the caller only after its own fetch has fully completed -- a retry re-runs just that one chunk's fetch, which has not yielded anything from that chunk yet, so nothing already handed to the caller is ever re-yielded. No connection is held across chunks, or while the caller's range-loop body runs between yields: see §5.4, §5.5.
 4. **Recovery**: a background probe (`fb303.getStatus`) re-enables cooled-down endpoints. Interval 30s. The probe runs for every client, including one constructed with a single endpoint, and on a successful probe hands the freshly dialed, already-healthy connection to that endpoint's pool rather than discarding it. The probe goroutine is cancelled by `Close` and awaited before `Close` returns.
@@ -160,8 +160,8 @@ func WithConnectTimeout(d time.Duration) Option // thrift:// only: dial / TLS ha
 func WithMaxRetries(n int) Option
 func WithRandomEndpointOrder() Option
 func WithPoolSize(n int) Option
-func WithChunkSize(n int) Option                // per-request chunk size for GetTables/GetPartitionsByNames; default 1000; see §5.4, §5.5
-func WithPartitionBatchSize(n int) Option       // per-request batch size for AddPartitions only, independent of WithChunkSize; default 1000; see §5.5
+func WithChunkSize(n int) Option                // per-request chunk size for GetTables/GetTablesSeq and GetPartitionsByNames/GetPartitionsSeq; default 1000; see §5.4, §5.5
+func WithPartitionBatchSize(n int) Option       // per-request batch size for AddPartitions, AlterPartitions, DropPartitionsByNames/DropPartitions, independent of WithChunkSize; default 1000; see §5.5
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
@@ -271,6 +271,61 @@ func (c *Client) DropTable(ctx context.Context, dbName, tableName string, delete
 
 `GetTables` and `GetTablesSeq` intern `Storage.Columns` within one call, the same way §5.5 describes for `GetPartitions` and its siblings: tables the call returns whose columns are equal (`Name`/`Type`/`Comment`) share a single `[]*FieldSchema`, and `GetTablesSeq` shares one such cache across every chunk it issues. `PartitionKeys` is not interned. See `Table.Storage`'s doc comment for the aliasing contract.
 
+#### Supporting types
+
+`Table.Storage` and `Partition.Storage` (§5.5) share these value types. Field order and names match `types.go`; the doc comments there are normative for per-field semantics (for example `NumBuckets`, where Hive's own DDL writes -1 for "not bucketed" while a zero-value struct writes 0, which the server also treats as unbucketed).
+
+```go
+type StorageDescriptor struct {
+    Columns                []*FieldSchema
+    Location               string
+    InputFormat            string
+    OutputFormat           string
+    Compressed             bool
+    NumBuckets             int32
+    SerDe                  *SerDeInfo
+    BucketColumns          []string
+    SortColumns            []*Order
+    Parameters             map[string]string
+    StoredAsSubDirectories bool
+    Skewed                 *SkewedInfo // 1.0 addition
+}
+
+type FieldSchema struct {
+    Name    string
+    Type    string // Hive type string, e.g. "string", "bigint"
+    Comment string
+}
+
+type SerDeInfo struct {
+    Name             string
+    SerializationLib string
+    Parameters       map[string]string
+}
+
+type Order struct {
+    Column string
+    Order  int32 // 1 ascending, 0 descending
+}
+
+type PrincipalType int
+const (
+    PrincipalUser  PrincipalType = 1
+    PrincipalRole  PrincipalType = 2
+    PrincipalGroup PrincipalType = 3
+)
+
+type TableType string
+const (
+    TableTypeManaged          TableType = "MANAGED_TABLE"
+    TableTypeExternal         TableType = "EXTERNAL_TABLE"
+    TableTypeVirtualView      TableType = "VIRTUAL_VIEW"
+    TableTypeMaterializedView TableType = "MATERIALIZED_VIEW"
+)
+```
+
+`PrincipalType`, `LockLevel`, `LockType`, and `LockState` (§5.9) each have a `String` method returning the Thrift enum's own name (`"USER"`, `"SHARED_READ"`, `"NOT_ACQUIRED"`, ...), or `<Type>(<n>)` for a value outside the declared set.
+
 `StorageDescriptor` gains a `Skewed *SkewedInfo` field (1.0 addition):
 
 ```go
@@ -323,7 +378,7 @@ func PartitionName(keys []string, values []string) (string, error)
 
 `AddPartitions` batches `partitions` the same way `GetTables` chunks `tableNames` (§5.4): at most 1000 per request by default, sent sequentially, so a failure on a later batch leaves the earlier batches already committed on the server. Its batch size is `WithPartitionBatchSize`, not `WithChunkSize`: the two are independent, so a caller tuning `WithChunkSize` for `GetTables`/`GetPartitionsByNames` does not also change `AddPartitions`' batching. `AlterPartitions` (1.0 addition) is batched the same way, at the same `WithPartitionBatchSize`; on a server lacking `alter_partitions_req` each batch independently degrades to the legacy `alter_partitions` RPC (SPEC §2.3 Rule 3), with the fallback decision itself cached per connection (Rule 5), so only the first batch on a given connection pays the `UNKNOWN_METHOD` probe.
 
-`GetPartitionsByNames` wraps `get_partitions_by_names` and is chunked like `AddPartitions`. `GetPartitionsByFilter` wraps `get_partitions_by_filter`; `filter` is Hive's partition-filter expression grammar (e.g. `"year = 2024 AND month > 6"`) and is passed through to the server verbatim — the client does not parse or validate it. `GetPartitionNamesByValues` wraps `get_partition_names_ps`, matching partitions whose leading partition-key values equal `partialValues` (a prefix; trailing keys are wildcarded).
+`GetPartitionsByNames` tries `get_partitions_by_names_req` first and degrades to `get_partitions_by_names` on `UNKNOWN_METHOD` (§2.3 Rule 6); it is chunked at `WithChunkSize`, like `GetTables`. `GetPartitionsByFilter` wraps `get_partitions_by_filter`, which exists on every supported version; `filter` is Hive's partition-filter expression grammar (e.g. `"year = 2024 AND month > 6"`) and is passed through to the server verbatim — the client does not parse or validate it. `GetPartitionNamesByValues` tries `get_partition_names_ps_req` first and degrades to `get_partition_names_ps` (§2.3 Rule 7), matching partitions whose leading partition-key values equal `partialValues` (a prefix; trailing keys are wildcarded).
 
 `DropPartitionsByNames` (1.0 addition) wraps `drop_partitions_req` (`DropPartitionsRequest{DbName, TblName, Parts: &RequestPartsSpec{Names: names}, DeleteData: &deleteData, IfExists: ifExists, NeedResult_: false, CatName}`, built through `NewDropPartitionsRequest()` so the IDL constructor's own defaults land on the fields this package does not explicitly set), removing the partitions of `tableName` in `dbName` whose partition name (as returned by `GetPartitionNames`/`GetPartitionsByNames`, e.g. `"dt=2024-01-01"`, or built client-side by `PartitionName`) is in `names`. `deleteData` is forwarded to the server; `NeedResult_` is always sent `false`, since this call never needs the dropped partitions echoed back. With `ifExists == true`, a name matching no existing partition is not an error; with `ifExists == false`, the first such name aborts the request it was sent in, leaving any partition already dropped by an earlier batch dropped. `names` is batched exactly like `AddPartitions`/`AlterPartitions` above (`WithPartitionBatchSize`). `drop_partitions_req` is declared in the Hive 2.3.9 and 3.1.3 IDL as well as 4.2.1's (§2.1), so unlike `alter_partitions_req`/`get_partitions_req` and their siblings it carries no legacy-RPC fallback (§2.3 Rule 2).
 
@@ -524,6 +579,21 @@ These conventions follow the Java builders in `xtable-hive-metastore`, the libra
    * SerDe: `org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe`, with the SerDe parameter `path: <location>`.
    * Parameters: `spark.sql.sources.provider: "hudi"`. `hudi.metadata-listing-enabled` is left to the caller to set.
 
+Exported surface (`formats.go`):
+
+```go
+func NewIcebergTable(dbName, tableName, location, metadataLocation string, cols []*FieldSchema) *Table
+func NewDeltaTable(dbName, tableName, location string, cols []*FieldSchema) *Table
+func NewHudiTable(dbName, tableName, location string, cols []*FieldSchema, partitionKeys []*FieldSchema) *Table
+
+// SetIcebergMetadataLocation moves the current metadata_location to
+// previous_metadata_location (when one is set) and stores newLocation as the
+// new metadata_location, initialising t.Parameters if nil. Pair with AlterTable.
+func SetIcebergMetadataLocation(t *Table, newLocation string)
+```
+
+Every class name and parameter key above is also an exported string constant, so a caller can recognise or hand-build a table without repeating the literal: `IcebergStorageHandler`, `IcebergSerDe`, `IcebergInputFormat`, `IcebergOutputFormat`, `DeltaStorageHandler`, `DeltaSerDe`, `HudiInputFormat`, `HudiOutputFormat`, `HudiSerDe`, and the parameter keys `ParamMetadataLocation`, `ParamPreviousMetadataLocation`, `ParamTableType`, `ParamStorageHandler`, `ParamIcebergCatalog`, `ParamSparkProvider`, `ParamExternal`, `ParamSerializationFormat`, `ParamPath`. The builders return an `EXTERNAL_TABLE` (`TableTypeExternal`) with `Parameters[ParamExternal] = "TRUE"`, so dropping the registration never deletes the lakehouse data.
+
 ---
 
 ## 7. Error Handling & Sentinel Errors
@@ -569,4 +639,4 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | 3.1 | `drop_database` on a missing database raises a bare `MetaException(java.lang.NullPointerException)` instead of `NoSuchObjectException` (every other supported version raises the latter, which `classify` maps to `ErrNotFound`). | `DropDatabase` follows up with `get_database` on the same connection when `drop_database`'s error doesn't already classify as `ErrNotFound`; if that confirms the database is missing, the original error is replaced so the `ErrNotFound` contract holds on 3.1 too. Paid only on the error path. |
 | 2.3, 3.x | `getVersion` (fb303) does not report the server's real release: every Hive 3.x release and Hive 2.3.x both answer the metastore schema line `"3.0"`. | `ServerVersion` (§5.6) tells the two apart by probing catalog support (§2.3 Rule 1) on the same connection: catalog support present → reported as `HiveVersion{Major: 3, Minor: 0}`; absent → `HiveVersion{Major: 2, Minor: 3}`. `Raw` always carries the server's literal `"3.0"` answer, so the true 3.x patch release is not recoverable from this RPC. |
 | All | Several generated request/response structs declare a field with Thrift "optional with default" requiredness that this package's exported API has no equivalent for (`GetTableRequest.Engine` default `"hive"`, `GetTableRequest.ID`/`PartitionsRequest.ID`/`AlterPartitionsRequest.WriteId`/`Partition.WriteId` default `-1`, `Table.OwnerType` default `PrincipalType.USER`). A bare Go struct literal would leave these at the Go zero value instead, which the server reads as a real (and wrong) engine name, numeric id, write id, or owner type rather than "unset". | Every such request/response is built via the generated `NewXxx()` constructor (e.g. `hive_metastore.NewGetTableRequest()`, `NewTable()`, `NewPartition()`, `NewPartitionsRequest()`, `NewAlterPartitionsRequest()`) so the Thrift-declared defaults land on the wire, and only the fields this package exposes are then overwritten. |
-| Pending upstream fix | `SkewedInfo.skewedColValueLocationMaps` is `map<list<string>, string>`, a list-keyed map Go cannot express; the Thrift Go generator rejects it (THRIFT-2063, fix pending in PR 3778). | `scripts/gen-thrift.sh` removes the field from the IDL before generation. Reads are unaffected: the generated code skips the unknown field with Thrift's generic `Skip`, which handles list-typed keys. The client never writes it. See §1.1 and §5.4. |
+| Awaiting a Thrift release | `SkewedInfo.skewedColValueLocationMaps` is `map<list<string>, string>`, a list-keyed map Go cannot express; the Thrift Go generator in every *released* version (latest v0.24.0) rejects it (THRIFT-2063; fixed on `apache/thrift` master by PR 3778, merged 2026-09-02, together with THRIFT-6176 by PR 3779). | `scripts/gen-thrift.sh` removes the field from the IDL before generation, and renames the three `isSet*` fields THRIFT-6176 covers. Reads are unaffected: the generated code skips the unknown field with Thrift's generic `Skip`, which handles list-typed keys. The client never writes it. Both patches are dropped together once `go.mod` moves to the first release carrying the fixes. See §1.1 and §5.4. |
