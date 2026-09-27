@@ -354,10 +354,9 @@ func (s *Server) serve(proc thrift.TProcessor) {
 			return
 		}
 		s.conns.Store(conn, struct{}{})
-		s.wg.Add(1)
+		// Registered under mu, so Stop's Wait cannot miss this conn.
+		s.wg.Go(func() { s.handleConn(conn, proc) })
 		s.mu.Unlock()
-
-		go s.handleConn(conn, proc)
 	}
 }
 
@@ -370,7 +369,6 @@ func (s *Server) serve(proc thrift.TProcessor) {
 // via Errorf, then the connection is closed as usual by the deferred
 // close below.
 func (s *Server) handleConn(conn net.Conn, proc thrift.TProcessor) {
-	defer s.wg.Done()
 	defer s.conns.Delete(conn)
 	defer func() { _ = conn.Close() }()
 	defer func() {

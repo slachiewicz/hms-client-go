@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -224,40 +225,42 @@ func TestHA_NonIdempotentDialFailureFailsOver(t *testing.T) {
 // cluster's view of the endpoint.
 func TestHA_CancelledCallerWaitingInAcquireDoesNotMarkEndpointFailed(t *testing.T) {
 	t.Parallel()
+	// The fake server stays outside the bubble: its goroutines block on
+	// network I/O, which synctest never treats as durably blocked.
 	srv := hmstest.Start(t, hmstest.Hive40)
+	synctest.Test(t, func(t *testing.T) {
+		c, err := hms.New(context.Background(), srv.URI(), hms.WithPoolSize(1))
+		require.NoError(t, err)
+		// The bubble's cleanups run inside it, so the recovery probe
+		// exits before synctest.Test returns.
+		t.Cleanup(func() { _ = c.Close() })
 
-	c, err := hms.New(context.Background(), srv.URI(), hms.WithPoolSize(1))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
+		// Hold the only pooled conn on loan, so a second call has nowhere
+		// to come from but a release or ctx cancellation.
+		cn, err := hms.ClientAcquire(c, context.Background(), 0)
+		require.NoError(t, err)
+		t.Cleanup(func() { hms.ClientRelease(c, 0, cn) })
 
-	// Hold the only pooled conn on loan, so a second call has nowhere
-	// to come from but a release or ctx cancellation.
-	cn, err := hms.ClientAcquire(c, context.Background(), 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { hms.ClientRelease(c, 0, cn) })
+		ctx, cancel := context.WithCancel(context.Background())
+		waiterErr := make(chan error, 1)
+		go func() {
+			_, err := c.GetAllDatabases(ctx)
+			waiterErr <- err
+		}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	waiterErr := make(chan error, 1)
-	go func() {
-		_, err := c.GetAllDatabases(ctx)
-		waiterErr <- err
-	}()
+		// Wait until the waiter is parked in acquire's blocking select, so
+		// cancel exercises the ctx.Done() path rather than a fast-path
+		// check before it ever blocked.
+		synctest.Wait()
+		cancel()
 
-	// Give the waiter a moment to actually park in acquire's blocking
-	// select before cancelling, so this exercises the ctx.Done() path
-	// rather than a fast-path check before it ever blocked.
-	time.Sleep(20 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-waiterErr:
+		// A waiter that never returns fails the bubble as a deadlock.
+		err = <-waiterErr
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, context.Canceled) || errors.Is(err, hms.ErrUnavailable))
-	case <-time.After(2 * time.Second):
-		t.Fatal("call did not return promptly after ctx was cancelled")
-	}
 
-	idx, ok := hms.ClientPick(c)
-	assert.True(t, ok)
-	assert.Equal(t, 0, idx, "a caller's own ctx cancellation must not cool down the endpoint it was waiting on")
+		idx, ok := hms.ClientPick(c)
+		assert.True(t, ok)
+		assert.Equal(t, 0, idx, "a caller's own ctx cancellation must not cool down the endpoint it was waiting on")
+	})
 }

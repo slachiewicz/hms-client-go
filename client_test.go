@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -78,15 +79,8 @@ func TestClient_ReleaseRacingCloseDoesNotLeakConn(t *testing.T) {
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_ = c.Close()
-	}()
-	go func() {
-		defer wg.Done()
-		hms.ClientRelease(c, 0, cn)
-	}()
+	wg.Go(func() { _ = c.Close() })
+	wg.Go(func() { hms.ClientRelease(c, 0, cn) })
 	wg.Wait()
 
 	assert.Equal(t, int32(0), hms.ClientLiveConns(c, 0), "release racing Close must not leak the conn")
@@ -100,35 +94,35 @@ func TestClient_ReleaseRacingCloseDoesNotLeakConn(t *testing.T) {
 // closes exactly once.
 func TestClient_AcquireWakesOnClose(t *testing.T) {
 	t.Parallel()
+	// The fake server stays outside the bubble: its goroutines block on
+	// network I/O, which synctest never treats as durably blocked.
 	srv := hmstest.Start(t, hmstest.Hive40)
-	c, err := hms.New(context.Background(), srv.URI(), hms.WithPoolSize(1))
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		c, err := hms.New(context.Background(), srv.URI(), hms.WithPoolSize(1))
+		require.NoError(t, err)
 
-	// Hold the only pooled conn on loan so a second acquire has nowhere
-	// to come from but Close.
-	cn, err := hms.ClientAcquire(c, context.Background(), 0)
-	require.NoError(t, err)
+		// Hold the only pooled conn on loan so a second acquire has nowhere
+		// to come from but Close.
+		cn, err := hms.ClientAcquire(c, context.Background(), 0)
+		require.NoError(t, err)
 
-	waiterErr := make(chan error, 1)
-	go func() {
-		_, err := hms.ClientAcquire(c, context.Background(), 0)
-		waiterErr <- err
-	}()
+		waiterErr := make(chan error, 1)
+		go func() {
+			_, err := hms.ClientAcquire(c, context.Background(), 0)
+			waiterErr <- err
+		}()
 
-	// Give the waiter goroutine a moment to actually park in acquire's
-	// blocking select before Close runs, so this exercises the closeCh
-	// wakeup rather than the closed-check fast path at acquire's start.
-	time.Sleep(20 * time.Millisecond)
-	require.NoError(t, c.Close())
+		// Wait until the waiter is parked in acquire's blocking select, so
+		// Close exercises the closeCh wakeup rather than the closed-check
+		// fast path at acquire's start.
+		synctest.Wait()
+		require.NoError(t, c.Close())
 
-	select {
-	case err := <-waiterErr:
-		require.ErrorIs(t, err, hms.ErrUnavailable)
-	case <-time.After(2 * time.Second):
-		t.Fatal("acquire did not wake up promptly after Close")
-	}
+		// A waiter that never wakes fails the bubble as a deadlock.
+		require.ErrorIs(t, <-waiterErr, hms.ErrUnavailable)
 
-	hms.ClientRelease(c, 0, cn)
+		hms.ClientRelease(c, 0, cn)
+	})
 }
 
 // TestNew_PoolSizeClamped covers the fix for WithPoolSize(0) hanging New:
