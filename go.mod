@@ -3,7 +3,7 @@ module github.com/slachiewicz/hms-client-go
 go 1.26.0
 
 require (
-	github.com/apache/thrift v0.24.0
+	github.com/apache/thrift v0.24.1-0.20260924165031-27e8a425ffb4
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/stretchr/testify v1.12.1
 )
