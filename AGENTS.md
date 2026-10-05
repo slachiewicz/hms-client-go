@@ -51,9 +51,9 @@ Integration tests build with `-tags integration` and need Docker (`make test-doc
 
 ## Thrift
 
-* Compiler and library are both **0.24.0**. `scripts/gen-thrift.sh` refuses to run with a different compiler version. Bump both together.
+* Compiler and library are both **0.25.0**. `scripts/gen-thrift.sh` refuses to run with a different compiler version. Bump both together.
 * `idl/` and `gen/` are committed. Never hand-edit `gen/`; regenerate with `make gen` and commit the diff.
-* The script applies two IDL patches (drop `SkewedInfo.skewedColValueLocationMaps`; rename three `isSet*` fields). Both generator bugs are fixed on `apache/thrift` master but unreleased; the patches go, together, with the `go.mod` bump to the first release carrying them (SPEC §1.1, Appendix A).
+* The IDL is generated unpatched. Do not reintroduce an IDL patch to work around a generator bug; fix the generator upstream instead, as THRIFT-2063 and THRIFT-6176 were.
 
 ## Testing
 

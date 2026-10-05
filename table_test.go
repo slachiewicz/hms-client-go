@@ -146,6 +146,76 @@ func TestAlterTable_PreservesUnmodelledFields(t *testing.T) {
 // table must not carry the source table's server-assigned identity -- Id,
 // TxnId, WriteId, Privileges -- onto the wire as the definition of the new
 // one.
+// TestTable_SkewedInfoRoundTrip covers SkewedInfo.ColumnValueLocations, the
+// list-keyed map the Thrift Go generator could not express before 0.25.0
+// (THRIFT-2063).
+func TestTable_SkewedInfoRoundTrip(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		v      hmstest.Version
+		skewed *hms.SkewedInfo
+	}{
+		{"hive23/single_column", hmstest.Hive23, &hms.SkewedInfo{
+			ColumnNames:  []string{"region"},
+			ColumnValues: [][]string{{"us"}},
+			ColumnValueLocations: []hms.SkewedLocation{
+				{Values: []string{"us"}, Location: "s3://bucket/db/skewed/region=us"},
+			},
+		}},
+		{"hive31/single_column", hmstest.Hive31, &hms.SkewedInfo{
+			ColumnNames:  []string{"region"},
+			ColumnValues: [][]string{{"us"}, {"eu"}},
+			ColumnValueLocations: []hms.SkewedLocation{
+				{Values: []string{"us"}, Location: "s3://bucket/db/skewed/region=us"},
+				{Values: []string{"eu"}, Location: "s3://bucket/db/skewed/region=eu"},
+			},
+		}},
+		{"hive40/multi_column", hmstest.Hive40, &hms.SkewedInfo{
+			ColumnNames:  []string{"region", "tier"},
+			ColumnValues: [][]string{{"us", "gold"}},
+			ColumnValueLocations: []hms.SkewedLocation{
+				{Values: []string{"us", "gold"}, Location: "s3://bucket/db/skewed/region=us/tier=gold"},
+			},
+		}},
+		{"hive40/no_locations", hmstest.Hive40, &hms.SkewedInfo{
+			ColumnNames:  []string{"region"},
+			ColumnValues: [][]string{{"us"}},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := hmstest.Start(t, tt.v)
+			c := mustNew(t, srv.URI())
+			ctx := context.Background()
+
+			table := &hms.Table{
+				DatabaseName: "db",
+				TableName:    "skewed",
+				Storage: &hms.StorageDescriptor{
+					Columns:  []*hms.FieldSchema{{Name: "region", Type: "string"}, {Name: "tier", Type: "string"}},
+					Location: "s3://bucket/db/skewed",
+					Skewed:   tt.skewed,
+				},
+				TableType: hms.TableTypeExternal,
+			}
+			require.NoError(t, c.CreateTable(ctx, table))
+
+			got, err := c.GetTable(ctx, "db", "skewed")
+			require.NoError(t, err)
+			require.NotNil(t, got.Storage)
+			assert.Equal(t, tt.skewed, got.Storage.Skewed)
+
+			require.NoError(t, c.AlterTable(ctx, "db", "skewed", got))
+			again, err := c.GetTable(ctx, "db", "skewed")
+			require.NoError(t, err)
+			assert.Equal(t, tt.skewed, again.Storage.Skewed, "AlterTable must write the location maps back")
+		})
+	}
+}
+
 func TestCreateTable_DoesNotCarrySnapshot(t *testing.T) {
 	t.Parallel()
 	srv := hmstest.Start(t, hmstest.Hive40)

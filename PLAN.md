@@ -86,16 +86,13 @@ The public package is `hms` at the module root. There is no `api/` package: a cl
 
 ### 3.1. IDL Generation (`scripts/gen-thrift.sh`)
 * Base IDL from Apache Hive `rel/release-4.2.1`: `standalone-metastore/metastore-common/src/main/thrift/hive_metastore.thrift`.
-* `hive_metastore.thrift` includes `share/fb303/if/fb303.thrift`, so fb303 is stored at `idl/share/fb303/if/fb303.thrift` (from `apache/thrift` tag `v0.24.0`, `contrib/fb303/if/fb303.thrift`).
-* Thrift compiler **0.24.0**, matching `github.com/apache/thrift v0.24.0` in `go.mod`. Generated code and library must be the same minor version; the script refuses to run otherwise.
+* `hive_metastore.thrift` includes `share/fb303/if/fb303.thrift`, so fb303 is stored at `idl/share/fb303/if/fb303.thrift` (from `apache/thrift` tag `v0.25.0`, `contrib/fb303/if/fb303.thrift`).
+* Thrift compiler **0.25.0**, matching `github.com/apache/thrift v0.25.0` in `go.mod`. Generated code and library must be the same minor version; the script refuses to run otherwise.
 * Command:
   ```bash
   thrift -r --gen go:package_prefix=github.com/slachiewicz/hms-client-go/gen/ -out gen/ idl/hive_metastore.thrift
   ```
-* The script applies two wire-safe patches to the downloaded IDL before generating, and the patched IDL is what gets committed:
-  1. `SkewedInfo.skewedColValueLocationMaps` (`map<list<string>, string>`) is removed. Go has no valid type for a list-keyed map and the generator aborts (THRIFT-2063). See SPEC §1.1 for why removal is safe and retyping is not.
-  2. `WMNullableResourcePlan.isSetQueryParallelism`, `.isSetDefaultPoolPath` and `WMNullablePool.isSetSchedulingPolicy` are renamed with a `Flag` suffix. The Go generator emits an `IsSetX()` accessor for every field, so a field literally named `isSetX` produces a field and a method with the same name and the package does not compile (THRIFT-6176). Only field IDs are serialised, so the rename does not change the wire format.
-* Both generator bugs are fixed on `apache/thrift` master (PR 3778 and PR 3779, merged 2026-09-02) but unreleased; a compiler built from master generates the pristine 4.2.1 IDL and this module builds and passes its suite against master's `lib/go`. The patches stay until `go.mod` can pin a release that ships them, because the fixed generator's output needs `thrift.MapEntry`/`thrift.UnorderedEqual`, which v0.24.0's library lacks. See SPEC §1.1 and Slice 13.
+* The IDL is generated as published. Thrift 0.24.0 and earlier needed two patches (drop `SkewedInfo.skewedColValueLocationMaps`, THRIFT-2063; rename three `isSet*` fields, THRIFT-6176); 0.25.0 carries both generator fixes, and the patches were removed with the move to it.
 * The generated `*-remote` CLI packages (`package main`) are deleted; they are not part of the library.
 * Both `idl/` and `gen/` are committed so `go get` works without a Thrift compiler and so the diff of a regeneration is reviewable.
 
@@ -198,13 +195,12 @@ Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same r
 - [x] Integration matrix: `TestACID` covers an open/lock/checklock/unlock cycle and a heartbeat on every 2.3+ leg. Green on all five jobs in the 2026-09-02 run at `ff17b22` (the `v0.2.0` tag), so the images' Derby metastores do carry the ACID TXN tables.
 - [x] Review minors: the fixture's lock-conflict check honours `LockComponent.Level` hierarchically (`lockOverlaps` in `hmstest/acid.go`, covered by `TestACID_LockConflict_Levels`); `Heartbeat(0, 0)` is rejected client-side with `ErrInvalidOperation` (SPEC §5.9); `LockComponent` fields carry doc comments.
 
-### Slice 13: `SkewedInfo` exposure (gated)
-- [x] `SkewedInfo.ColumnNames`/`ColumnValues` (the wire's `skewedColNames`/`skewedColValues`, unaffected by the THRIFT-2063 gate) shipped early as part of Slice 3's struct additions: `types.go`, `convert.go`, round-trip fidelity. See SPEC §5.4.
-- [ ] **Still gated**: `skewedColValueLocationMaps` (the list-keyed `map<list<string>, string>`) remains unmodelled and genuinely lost on read (SPEC §1.1, §5.4). The generator fix (THRIFT-2063, PR 3778) merged on `apache/thrift` master on 2026-09-02, but the latest release is still v0.24.0 and the fixed output needs library symbols that release lacks. Not started until a `github.com/apache/thrift` release containing it is available to pin in `go.mod`.
-- [ ] Once ungated: bump `go.mod` and the compiler together; `scripts/gen-thrift.sh` drops both IDL patches (the `isSet*` rename from THRIFT-6176 / PR 3779 lands in the same release); regenerate `gen/`, which will represent the field as `[]thrift.MapEntry[[]string, string]`. `types.go`: `SkewedLocation` (or equivalent) per SPEC §5.4. `convert.go`: the list-keyed map conversion.
-- [ ] `hmstest`: a fixture table with skewed columns, values, and at least one location-map entry.
-- [ ] Unit tests: round-trip of `ColumnValueLocationMaps` through `CreateTable`/`GetTable`.
-- [ ] Integration matrix: extend the 3.x/4.x legs (skew is unsupported on 2.3) with a skewed-table create/read.
+### Slice 13: `SkewedInfo` exposure
+- [x] `SkewedInfo.ColumnNames`/`ColumnValues` (the wire's `skewedColNames`/`skewedColValues`) shipped early as part of Slice 3's struct additions: `types.go`, `convert.go`, round-trip fidelity. See SPEC §5.4.
+- [x] Ungated by `github.com/apache/thrift` v0.25.0, the first release carrying THRIFT-2063 (PR 3778) and THRIFT-6176 (PR 3779): `go.mod` and the compiler moved together, `scripts/gen-thrift.sh` dropped both IDL patches, and `gen/` was regenerated, representing the field as `[]thrift.MapEntry[[]string, string]`.
+- [x] `types.go`: `SkewedInfo.ColumnValueLocations []SkewedLocation`. `convert.go`: the list-keyed map conversion in both directions.
+- [x] Unit tests: `TestTable_SkewedInfoRoundTrip` (`CreateTable` -> `GetTable` -> `AlterTable` against `hmstest` on every version) and the location maps in `TestTableRoundTrip_PreservesUnmodelledFields`'s seed.
+- [ ] Integration matrix: `TestTables_SkewedInfo` creates, reads and alters a skewed table on the 3.x/4.x legs; not yet run against a real metastore.
 
 ### Slice 14: Kerberos (pure Go)
 - [x] `go.mod`: add `github.com/jcmturner/gokrb5/v8` (pure Go, zero Cgo, per AGENTS.md invariant #1). `options.go`: `WithKerberos` per SPEC §5.1. `internal/transport/gssapi.go`: SASL GSSAPI (QOP `auth`) negotiation over the binary socket, wired in alongside the existing SASL PLAIN path in `DialBinary`; `sasl.go` drives both through a shared `saslMech` interface. See SPEC §3.1.

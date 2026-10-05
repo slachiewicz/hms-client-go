@@ -136,14 +136,6 @@ type Order struct {
 // SkewedInfo describes a table's or partition's skewed-storage optimization:
 // which columns Hive considers skewed and which value combinations it keeps
 // in dedicated storage locations (1.0 addition; SPEC §5.4).
-//
-// ColumnValueLocationMaps, the wire's third SkewedInfo field mapping each
-// skewed value combination to its own storage location, has no field here:
-// it is gated behind THRIFT-2063 (SPEC §1.1) and is dropped from the
-// generated Thrift bindings before this package ever sees it. Because the
-// generated reader skips the field, a value already on the wire is lost on
-// read and therefore not written back by AlterTable; the raw snapshot
-// ("Round-trip fidelity" below) preserves only fields the bindings carry.
 type SkewedInfo struct {
 	// ColumnNames lists the columns Hive considers skewed, in
 	// ColumnValues' column order.
@@ -151,6 +143,20 @@ type SkewedInfo struct {
 	// ColumnValues lists the skewed value combinations, one per skew,
 	// each in ColumnNames order.
 	ColumnValues [][]string
+	// ColumnValueLocations maps skewed value combinations to the directory
+	// each is stored in. It is the wire's skewedColValueLocationMaps, a
+	// map<list<string>, string>; Go has no list-keyed map, so it is a slice
+	// of entries in the order the server sent them.
+	ColumnValueLocations []SkewedLocation
+}
+
+// SkewedLocation is one entry of SkewedInfo.ColumnValueLocations.
+type SkewedLocation struct {
+	// Values is the skewed value combination, in SkewedInfo.ColumnNames
+	// order.
+	Values []string
+	// Location is the storage location holding rows with Values.
+	Location string
 }
 
 // StorageDescriptor describes where and how a table's or partition's data

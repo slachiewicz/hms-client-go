@@ -111,10 +111,8 @@ c, err := hms.New(ctx, srv.URI())
 ```sh
 make check        # gofmt, go vet, go test -race, golangci-lint, govulncheck
 make test-docker  # integration suite; needs HMS_URIS and HMS_EXPECT_VERSION, see the workflow
-make gen          # regenerate gen/ from idl/ (Thrift 0.24.0 compiler required)
+make gen          # regenerate gen/ from idl/ (Thrift 0.25.0 compiler required)
 ```
-
-The released Thrift Go generator (0.24.0) cannot compile the Hive IDL as published; `scripts/gen-thrift.sh` applies two wire-safe patches and explains why ([THRIFT-2063](https://issues.apache.org/jira/browse/THRIFT-2063), [THRIFT-6176](https://issues.apache.org/jira/browse/THRIFT-6176)). Both are fixed on Thrift's master branch; the patches are dropped once a release carrying the fixes is pinned in `go.mod`.
 
 ## Documentation
 

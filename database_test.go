@@ -143,7 +143,7 @@ func TestAlterDatabase_PreservesUnmodelledFields(t *testing.T) {
 				"alice": {{Privilege: "SELECT", Grantor: "bob", GrantorType: hive_metastore.PrincipalType_USER}},
 			},
 		},
-		Type:               hive_metastore.DatabaseTypePtr(hive_metastore.DatabaseType_REMOTE),
+		Type:               new(hive_metastore.DatabaseType_REMOTE),
 		ConnectorName:      &connectorName,
 		RemoteDbname:       &remoteDbname,
 		ManagedLocationUri: &managedLocationURI,

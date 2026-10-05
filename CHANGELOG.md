@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `SkewedInfo.ColumnValueLocations` (`[]SkewedLocation`), the wire's `skewedColValueLocationMaps`.
+  It was previously removed from the IDL and lost on read, so `GetTable` -> `AlterTable` erased
+  it from the server (SPEC §5.4).
+
+### Changed
+
+- `github.com/apache/thrift` 0.24.0 -> 0.25.0, compiler and library together. `gen/` is
+  regenerated from the unpatched Hive IDL. In `gen/`, the three `WMNullable*` fields named
+  `isSet*` change from `IsSetQueryParallelismFlag` to `IsSetQueryParallelism_` (and likewise for
+  `IsSetDefaultPoolPath` and `IsSetSchedulingPolicy`), and their JSON names drop the `Flag`
+  suffix; wire field IDs are unchanged.
+
 ### Fixed
 
 - `WithTLS` over `thrift://` no longer fails with "either ServerName or InsecureSkipVerify must

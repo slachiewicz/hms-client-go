@@ -470,7 +470,7 @@ struct Order {
 struct SkewedInfo {
   1: list<string> skewedColNames, // skewed column names
   2: list<list<string>> skewedColValues, //skewed values
-  // 3: map<list<string>, string> skewedColValueLocationMaps -- removed by scripts/gen-thrift.sh (not representable in Go; skipped on read)
+  3: map<list<string>, string> skewedColValueLocationMaps, //skewed value to location mappings
 }
 
 // this object holds all the information about physical storage of the data belonging to a table
@@ -1858,9 +1858,9 @@ struct WMNullableResourcePlan {
   1: optional string name;
   2: optional WMResourcePlanStatus status;
   4: optional i32 queryParallelism;
-  5: optional bool isSetQueryParallelismFlag;
+  5: optional bool isSetQueryParallelism;
   6: optional string defaultPoolPath;
-  7: optional bool isSetDefaultPoolPathFlag;
+  7: optional bool isSetDefaultPoolPath;
   8: optional string ns;
 }
 
@@ -1880,7 +1880,7 @@ struct WMNullablePool {
   3: optional double allocFraction;
   4: optional i32 queryParallelism;
   5: optional string schedulingPolicy;
-  6: optional bool isSetSchedulingPolicyFlag;
+  6: optional bool isSetSchedulingPolicy;
   7: optional string ns;
 }
 

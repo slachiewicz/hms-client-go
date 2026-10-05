@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -94,7 +95,7 @@ func TestPartitionToThrift_DefaultsWriteId(t *testing.T) {
 // tableFromThrift -> tableToThriftFrom round trip silently dropped every field
 // hms.Table has no field for -- Privileges, RewriteEnabled, Id, TxnId,
 // AccessType, the capability lists, Temporary, CreationMetadata, and
-// SkewedInfo's names/values -- exactly what a GetTable -> AlterTable call
+// SkewedInfo's names, values and location maps -- exactly what a GetTable -> AlterTable call
 // against a table Spark or Trino registered would do to it. seed is built
 // with every modelled field also populated (and set to a value that itself
 // survives the modelled conversion unchanged, e.g. the CatName passed back
@@ -122,6 +123,10 @@ func TestTableRoundTrip_PreservesUnmodelledFields(t *testing.T) {
 		SkewedInfo: &hive_metastore.SkewedInfo{
 			SkewedColNames:  []string{"region"},
 			SkewedColValues: [][]string{{"us"}, {"eu"}},
+			SkewedColValueLocationMaps: []thrift.MapEntry[[]string, string]{
+				{Key: []string{"us"}, Value: "s3://bucket/t/region=us"},
+				{Key: []string{"eu"}, Value: "s3://bucket/t/region=eu"},
+			},
 		},
 		StoredAsSubDirectories: &stored,
 		// SerdeInfo's Description/SerializerClass/DeserializerClass/

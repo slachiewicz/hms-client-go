@@ -33,40 +33,6 @@ echo "==> Fetching Hive ${HIVE_VERSION} and fb303 (thrift v${THRIFT_VERSION}) ID
 curl -sSfL "${FB303_RAW}" -o "${IDL_DIR}/share/fb303/if/fb303.thrift"
 curl -sSfL "${HIVE_RAW_BASE}/hive_metastore.thrift" -o "${IDL_DIR}/hive_metastore.thrift"
 
-echo "==> Patching IDL for the Go generator..."
-# SkewedInfo.skewedColValueLocationMaps is map<list<string>, string>. Go has
-# no valid representation for a list-typed map key and the Thrift Go generator
-# aborts on it. Dropping the field is wire-safe: the generated reader skips the
-# unknown field 3 with Thrift's generic Skip (which handles list keys), and the
-# client never writes it. Retyping it to map<string,string> would misparse any
-# non-empty value sent by a server. See SPEC.md §1.1.
-# WMNullableResourcePlan.isSetQueryParallelism / isSetDefaultPoolPath and
-# WMNullablePool.isSetSchedulingPolicy collide with the IsSetX() accessors the
-# Go generator emits for the sibling fields, so the package does not compile.
-# Renaming a field is wire-safe: only the field ID is serialised.
-#
-# Both are fixed on apache/thrift master (THRIFT-2063 by PR 3778, THRIFT-6176
-# by PR 3779, merged 2026-09-02) but not in any release as of 0.24.0. The fixed
-# generator emits code that needs thrift.MapEntry/thrift.UnorderedEqual from
-# the matching library, so the patches cannot go before go.mod moves to the
-# first release carrying them; then delete this whole awk block, the guard
-# below it, and the SkewedInfo gate in SPEC.md §1.1 / PLAN.md Slice 13 together.
-awk '
-  /^[[:space:]]*[0-9]+:.*[[:space:]]isSet[A-Za-z]+;/ {
-    sub(/;[[:space:]]*$/, "Flag;")
-  }
-  /map<list<string>, *string> skewedColValueLocationMaps/ {
-    print "  // 3: map<list<string>, string> skewedColValueLocationMaps -- removed by scripts/gen-thrift.sh (not representable in Go; skipped on read)"
-    next
-  }
-  { print }
-' "${IDL_DIR}/hive_metastore.thrift" > "${IDL_DIR}/hive_metastore.thrift.tmp"
-mv "${IDL_DIR}/hive_metastore.thrift.tmp" "${IDL_DIR}/hive_metastore.thrift"
-if grep -qE '^[[:space:]]*[0-9]+:.*map<[[:space:]]*(list|set|map)<' "${IDL_DIR}/hive_metastore.thrift"; then
-  echo "error: IDL patch did not apply; an unsupported list-keyed map remains" >&2
-  exit 1
-fi
-
 echo "==> Compiling Thrift bindings..."
 rm -rf "${GEN_DIR:?}"/*
 thrift -r --gen "go:package_prefix=github.com/slachiewicz/hms-client-go/gen/" \

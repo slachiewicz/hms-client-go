@@ -408,6 +408,56 @@ func TestTables_FormatBuildersAndLifecycle(t *testing.T) {
 // AddPartitions' chunking (SPEC.md §2.3 Rule 5, defaultChunkSize=1000),
 // reads them back both unbounded and with maxParts=10, lists their names,
 // alters one's parameters, and drops it.
+// TestTables_SkewedInfo creates a table with skewed-storage metadata,
+// including the list-keyed location map (SkewedInfo.ColumnValueLocations,
+// THRIFT-2063), reads it back, and alters it unchanged to confirm the map is
+// written back. PLAN.md Slice 13 scopes this to the 3.x and 4.x legs.
+func TestTables_SkewedInfo(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	_, expectVersion := requireHMSEnv(t)
+	if expectVersion == "2.3" {
+		t.Skip("skewed-table coverage runs on the 3.x and 4.x legs (PLAN.md Slice 13)")
+	}
+	ctx := context.Background()
+
+	dbName := uniqueName("it_skewdb_")
+	createDB(t, c, ctx, dbName, "")
+
+	location := "file:///tmp/" + dbName + "/skewed"
+	want := &hms.SkewedInfo{
+		ColumnNames:  []string{"region", "tier"},
+		ColumnValues: [][]string{{"us", "gold"}, {"eu", "silver"}},
+		ColumnValueLocations: []hms.SkewedLocation{
+			{Values: []string{"us", "gold"}, Location: location + "/region=us/tier=gold"},
+		},
+	}
+	table := &hms.Table{
+		DatabaseName: dbName,
+		TableName:    "skewed",
+		Storage: &hms.StorageDescriptor{
+			Columns:      []*hms.FieldSchema{{Name: "region", Type: "string"}, {Name: "tier", Type: "string"}},
+			Location:     location,
+			InputFormat:  "org.apache.hadoop.mapred.TextInputFormat",
+			OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+			SerDe:        &hms.SerDeInfo{SerializationLib: "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"},
+			Skewed:       want,
+		},
+		TableType: hms.TableTypeExternal,
+	}
+	require.NoError(t, c.CreateTable(ctx, table))
+
+	got, err := c.GetTable(ctx, dbName, "skewed")
+	require.NoError(t, err)
+	require.NotNil(t, got.Storage)
+	assert.Equal(t, want, got.Storage.Skewed)
+
+	require.NoError(t, c.AlterTable(ctx, dbName, "skewed", got))
+	again, err := c.GetTable(ctx, dbName, "skewed")
+	require.NoError(t, err)
+	assert.Equal(t, want, again.Storage.Skewed, "AlterTable must write the location map back")
+}
+
 func TestPartitions_AddGetAlterDrop(t *testing.T) {
 	t.Parallel()
 	c := dial(t)

@@ -313,21 +313,15 @@ func copyStringSlices(s [][]string) [][]string {
 }
 
 // skewedInfoFromThrift converts a generated SkewedInfo to the exported
-// SkewedInfo type. ColumnValueLocationMaps has no source field to read from
-// (SPEC §1.1: dropped from the generated IDL pending THRIFT-2063), so it is
-// simply absent from the result -- and, unlike every other field this
-// package does not model, genuinely lost rather than merely unexposed: the
-// generated SkewedInfo struct has no field for it either, so there is
-// nothing for Table.raw/Partition.raw to have captured (see Appendix A: the
-// generated Read skips those wire bytes without storing them anywhere). It
-// returns nil for a nil input.
+// SkewedInfo type. It returns nil for a nil input.
 func skewedInfoFromThrift(si *hive_metastore.SkewedInfo) *SkewedInfo {
 	if si == nil {
 		return nil
 	}
 	return &SkewedInfo{
-		ColumnNames:  copyStrings(si.SkewedColNames),
-		ColumnValues: copyStringSlices(si.SkewedColValues),
+		ColumnNames:          copyStrings(si.SkewedColNames),
+		ColumnValues:         copyStringSlices(si.SkewedColValues),
+		ColumnValueLocations: skewedLocationsFromThrift(si.SkewedColValueLocationMaps),
 	}
 }
 
@@ -338,9 +332,36 @@ func skewedInfoToThrift(si *SkewedInfo) *hive_metastore.SkewedInfo {
 		return nil
 	}
 	return &hive_metastore.SkewedInfo{
-		SkewedColNames:  copyStrings(si.ColumnNames),
-		SkewedColValues: copyStringSlices(si.ColumnValues),
+		SkewedColNames:             copyStrings(si.ColumnNames),
+		SkewedColValues:            copyStringSlices(si.ColumnValues),
+		SkewedColValueLocationMaps: skewedLocationsToThrift(si.ColumnValueLocations),
 	}
+}
+
+// skewedLocationsFromThrift deep-copies the generated list-keyed map
+// entries. It returns nil for a nil or empty input, for the same reason as
+// copyStringMap.
+func skewedLocationsFromThrift(m []thrift.MapEntry[[]string, string]) []SkewedLocation {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]SkewedLocation, len(m))
+	for i, e := range m {
+		out[i] = SkewedLocation{Values: copyStrings(e.Key), Location: e.Value}
+	}
+	return out
+}
+
+// skewedLocationsToThrift is skewedLocationsFromThrift's inverse.
+func skewedLocationsToThrift(l []SkewedLocation) []thrift.MapEntry[[]string, string] {
+	if len(l) == 0 {
+		return nil
+	}
+	out := make([]thrift.MapEntry[[]string, string], len(l))
+	for i, e := range l {
+		out[i] = thrift.MapEntry[[]string, string]{Key: copyStrings(e.Values), Value: e.Location}
+	}
+	return out
 }
 
 // timeFromUnix32 converts a Thrift int32 "seconds since epoch" field to a
