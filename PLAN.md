@@ -200,7 +200,7 @@ Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same r
 - [x] Ungated by `github.com/apache/thrift` v0.25.0, the first release carrying THRIFT-2063 (PR 3778) and THRIFT-6176 (PR 3779): `go.mod` and the compiler moved together, `scripts/gen-thrift.sh` dropped both IDL patches, and `gen/` was regenerated, representing the field as `[]thrift.MapEntry[[]string, string]`.
 - [x] `types.go`: `SkewedInfo.ColumnValueLocations []SkewedLocation`. `convert.go`: the list-keyed map conversion in both directions.
 - [x] Unit tests: `TestTable_SkewedInfoRoundTrip` (`CreateTable` -> `GetTable` -> `AlterTable` against `hmstest` on every version) and the location maps in `TestTableRoundTrip_PreservesUnmodelledFields`'s seed.
-- [ ] Integration matrix: `TestTables_SkewedInfo` creates, reads and alters a skewed table on the 3.x/4.x legs; not yet run against a real metastore.
+- [x] Integration matrix: `TestTables_SkewedInfo` creates, reads and alters a skewed table on the 3.x/4.x legs. Green on all seven 3.x/4.x jobs at `062e91d` (run 37376542543); skipped on 2.3 by design.
 
 ### Slice 14: Kerberos (pure Go)
 - [x] `go.mod`: add `github.com/jcmturner/gokrb5/v8` (pure Go, zero Cgo, per AGENTS.md invariant #1). `options.go`: `WithKerberos` per SPEC §5.1. `internal/transport/gssapi.go`: SASL GSSAPI (QOP `auth`) negotiation over the binary socket, wired in alongside the existing SASL PLAIN path in `DialBinary`; `sasl.go` drives both through a shared `saslMech` interface. See SPEC §3.1.

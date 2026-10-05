@@ -5,29 +5,13 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-05
+
 ### Added
 
 - `SkewedInfo.ColumnValueLocations` (`[]SkewedLocation`), the wire's `skewedColValueLocationMaps`.
   It was previously removed from the IDL and lost on read, so `GetTable` -> `AlterTable` erased
   it from the server (SPEC §5.4).
-
-### Changed
-
-- `github.com/apache/thrift` 0.24.0 -> 0.25.0, compiler and library together. `gen/` is
-  regenerated from the unpatched Hive IDL. In `gen/`, the three `WMNullable*` fields named
-  `isSet*` change from `IsSetQueryParallelismFlag` to `IsSetQueryParallelism_` (and likewise for
-  `IsSetDefaultPoolPath` and `IsSetSchedulingPolicy`), and their JSON names drop the `Flag`
-  suffix; wire field IDs are unchanged.
-
-### Fixed
-
-- `WithTLS` over `thrift://` no longer fails with "either ServerName or InsecureSkipVerify must
-  be specified" when the `tls.Config` carries no `ServerName`: the dialed endpoint's host is used,
-  as `tls.Dial` and `http.Transport` do, on a clone of the caller's config. Found by the new TLS
-  integration legs; a config with only `RootCAs` now works against an HA list too (SPEC §3.1).
-
-### Added
-
 - `GetTableColumnStatisticsForEngine`, requesting the column statistics a named computing engine
   (`"spark"`, `"impala"`, ...) stored, where `GetTableColumnStatistics` always asks for the `"hive"`
   set. An empty engine returns `ErrInvalidOperation`. Pre-4.x servers have no engine field and
@@ -37,6 +21,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- `github.com/apache/thrift` 0.24.0 -> 0.25.0, compiler and library together. `gen/` is
+  regenerated from the unpatched Hive IDL. In `gen/`, the three `WMNullable*` fields named
+  `isSet*` change from `IsSetQueryParallelismFlag` to `IsSetQueryParallelism_` (and likewise for
+  `IsSetDefaultPoolPath` and `IsSetSchedulingPolicy`), and their JSON names drop the `Flag`
+  suffix; wire field IDs are unchanged.
 - `Heartbeat(ctx, 0, 0)` now returns `ErrInvalidOperation` without issuing the RPC: with both
   ids omitted the request names nothing to keep alive. Previously it sent an empty
   `HeartbeatRequest` (SPEC §5.9).
@@ -48,6 +37,13 @@ All notable changes to this project are documented in this file. The format foll
   versa, instead of only an exact database-and-table match. A downstream test that held a
   database-level exclusive lock and expected a table lock in that database to be `ACQUIRED` will
   now see `WAITING`, which is what a real metastore returns.
+
+### Fixed
+
+- `WithTLS` over `thrift://` no longer fails with "either ServerName or InsecureSkipVerify must
+  be specified" when the `tls.Config` carries no `ServerName`: the dialed endpoint's host is used,
+  as `tls.Dial` and `http.Transport` do, on a clone of the caller's config. Found by the new TLS
+  integration legs; a config with only `RootCAs` now works against an HA list too (SPEC §3.1).
 
 ## [0.2.0] - 2026-09-02
 
