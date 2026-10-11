@@ -22,6 +22,8 @@ All notable changes to this project are documented in this file. The format foll
   to the pool with the rest of the reply unread, so the next call on it read leftover bytes. The
   connection is now discarded (SPEC §4.2).
 
+- Closing a client while a cancelled dial's Kerberos ticket request was still running raced with
+  that request on the credentials. The credentials are now released when the request ends.
 - A canceled call could leave its deadline-reset callback running past the call's end, so the
   next call on the same connection failed with a spurious timeout.
 - SASL and Kerberos rejections quote the server's message, so control characters in it no longer
@@ -32,6 +34,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Security
 
+- A Kerberos AP_REP or KDC reply whose ciphertext was shorter than its checksum panicked the
+  client inside gokrb5, before the server was authenticated. The client now rejects it with an
+  error. gokrb5's own ticket-renewal goroutine still depends on the upstream fix,
+  jcmturner/gokrb5#580.
 - The HTTP transport refuses redirects. Following one replayed the request, with its
   `Authorization`, `x-actor-username` and `WithHTTPHeaders` headers, to the redirect target. A
   `WithHTTPClient` client that sets its own `CheckRedirect` keeps it (SPEC §3.2).

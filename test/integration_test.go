@@ -42,6 +42,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -150,7 +151,7 @@ func requireHMSEnv(t *testing.T) (uris, expectVersion string) {
 	return uris, expectVersion
 }
 
-// dial connects a Client to HMS_URIS, applying HMS_USER, HMS_TLS_CA, and
+// dial connects a Client to HMS_URIS, logging to t, applying HMS_USER, HMS_TLS_CA, and
 // HMS_KRB5_* (whichever are set) before any caller-supplied opts, and
 // registers t.Cleanup to close it. Under Kerberos the server's view of the
 // caller is the principal, not HMS_USER (set_ugi is not sent over SASL,
@@ -160,7 +161,12 @@ func dial(t *testing.T, opts ...hms.Option) *hms.Client {
 	t.Helper()
 	uris, _ := requireHMSEnv(t)
 
-	all := make([]hms.Option, 0, len(opts)+3)
+	// Every client logs into its test's output, so each leg exercises the
+	// logging paths (SPEC §5.10) and a failure shows the client's dials and
+	// failovers next to it. Close, run in Cleanup, waits for the client's
+	// background goroutine, so nothing logs after the test ends.
+	all := make([]hms.Option, 0, len(opts)+4)
+	all = append(all, hms.WithLogger(slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelDebug}))))
 	if u := os.Getenv(envUser); u != "" {
 		all = append(all, hms.WithUser(u))
 	}
