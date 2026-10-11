@@ -183,20 +183,23 @@ jobs:
 
       - name: Build the connector with the Hive 4 shim
         working-directory: connector
+        timeout-minutes: 25
         run: |
-          # Phase 1 installs the shim without -Phive4 (the PR's cycle
-          # workaround); phase 2 builds the connector against it.
+          # The connector is built without -Phive4 and the shim next to it,
+          # the recipe reported to work on the PR: the connector loads
+          # HiveShimV400 by reflection. Packaging with -Phive4 hangs in
+          # maven-shade-plugin's dependency-reduced POM, a path the PR's CI
+          # does not exercise (it only runs mvn test).
           $MVN install -pl flink-connector-hive -am
           $MVN install -pl flink-connector-hive-4.0.0 -am
-          $MVN install -pl flink-connector-hive -Phive4
           mkdir -p /tmp/hive4-lib
           cp flink-connector-hive/target/flink-connector-hive-*.jar flink-connector-hive-4.0.0/target/flink-connector-hive-4.0.0_2.12-*.jar /tmp/hive4-lib/
           rm -f /tmp/hive4-lib/*-tests.jar /tmp/hive4-lib/*-sources.jar /tmp/hive4-lib/original-*.jar
-          # Hive 4 and Hadoop, minus what Flink itself provides.
-          $MVN dependency:copy-dependencies -pl flink-connector-hive -Phive4 \
+          # Hive 4 and Hadoop, from the shim module, minus what Flink provides.
+          $MVN dependency:copy-dependencies -pl flink-connector-hive-4.0.0 \
             -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback \
             -DoutputDirectory=/tmp/hive4-lib
-          ls /tmp/hive4-lib | wc -l; du -sh /tmp/hive4-lib
+          ls /tmp/hive4-lib; du -sh /tmp/hive4-lib
 
       - name: Start the metastore
         run: |
@@ -220,6 +223,7 @@ jobs:
           sleep 1
 
       - name: Run Flink
+        timeout-minutes: 15
         run: |
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
