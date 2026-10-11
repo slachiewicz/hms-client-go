@@ -238,12 +238,12 @@ From the audit's hardening notes; none was an exploitable finding.
 - [x] `sasl.go`: frames read as bytes arrive, not allocated from the header; server rejection text quoted, as is a KRB-ERROR's (`gssapi.go`).
 - [x] `ctxclient.go`: `Call` waits for a cancellation callback that already started, so it cannot reset the next call's deadline.
 - [x] `conn.go`: `warnCleartext` logs credentials sent without TLS (SPEC §5.10); SPEC §3.1 says Kerberos needs `WithTLS` for data protection.
-- [x] Supply chain: the Hive 2.3.9 image verifies its tarballs' checksums; `govulncheck` pinned.
+- [x] Supply chain: the Hive 2.3.9 image verifies its tarballs' checksums; `govulncheck` pinned; golangci-lint v2.14.0 built with `go install` instead of `curl | sh` (v2.13.2 cannot read Go 1.27.2's export data, which had failed CI on `main` since the toolchain bump).
 - [x] Tests: `TestNewHTTP_Redirects`, `TestNewHTTP_EndlessErrorBody`, `TestReadFrame*`, `TestNew_WarnsOnCleartextCredentials`.
 
 ### Open follow-ups (not blocking 1.0)
 - Security audit deferred units, not yet hunted: gokrb5 parsing of pre-auth KDC and server bytes, and the abandoned `serviceTicket` goroutine on cancel.
-- CI: actions pinned by tag rather than SHA; golangci-lint installed through `curl | sh`; `gen-thrift.sh` fetches the IDL without a checksum.
+- CI: actions pinned by tag rather than SHA; `gen-thrift.sh` fetches the IDL without a checksum.
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 - §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).
 
