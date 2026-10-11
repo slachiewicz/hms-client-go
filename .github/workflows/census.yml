@@ -67,12 +67,15 @@ jobs:
       - name: Run Spark
         if: startsWith(matrix.engine, 'spark')
         run: |
-          docker run --rm --network host --user 1000 --env HOME=/tmp \
+          # uid 1000 has no passwd entry in the Spark image, so user.home is
+          # "?" unless set; Ivy refuses a relative base directory.
+          docker run --rm --network host --user 1000 --env HOME=/tmp --env SPARK_SUBMIT_OPTS=-Duser.home=/tmp \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             "${{ matrix.image }}" /opt/spark/bin/spark-sql --master 'local[2]' \
             --conf spark.sql.catalogImplementation=hive \
             --conf spark.hadoop.hive.metastore.uris=thrift://127.0.0.1:9083 \
             --conf spark.sql.warehouse.dir=file:///tmp/warehouse \
+            --conf spark.jars.ivy=/tmp/.ivy2 \
             -f /census/spark.sql
 
       - name: Run Trino
