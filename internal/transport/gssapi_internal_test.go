@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -914,6 +915,57 @@ func TestGSSAPITicketAcquisitionHonoursContext(t *testing.T) {
 		t.Fatal("DialBinary did not return after the context was cancelled")
 	}
 	drain(t, errs)
+}
+
+// TestKerberosSessionCloseWaitsForAbandonedAcquisition proves Close does not
+// destroy the credentials under a ticket acquisition that a cancelled dial
+// abandoned: gokrb5's Destroy writes the credentials without a lock while
+// that acquisition may still read them. The last acquisition destroys them
+// instead, and a closed session starts no new one.
+func TestKerberosSessionCloseWaitsForAbandonedAcquisition(t *testing.T) {
+	t.Parallel()
+	ln, host := newTestListener(t)
+	fixture := newKrbFixture(t, host)
+	fixture.block = make(chan struct{})
+	fixture.entered = make(chan struct{})
+	var unblock sync.Once
+	release := func() { unblock.Do(func() { close(fixture.block) }) }
+	t.Cleanup(release)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errs := serveGSSAPI(t, ln, &gssAcceptor{fixture: fixture, layers: qopAuth}, false)
+	session := fixture.session(t)
+
+	dialed := make(chan error, 1)
+	go func() {
+		_, err := DialBinary(ctx, ln.Addr().String(), BinaryConfig{
+			Kerberos: &KerberosConfig{Session: session},
+		})
+		dialed <- err
+	}()
+	select {
+	case <-fixture.entered:
+	case <-time.After(testServerTimeout):
+		t.Fatal("ticket acquisition never started")
+	}
+	cancel()
+	select {
+	case err := <-dialed:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(testServerTimeout):
+		t.Fatal("DialBinary did not return after the context was cancelled")
+	}
+	drain(t, errs)
+
+	session.Close()
+	assert.Equal(t, int32(0), fixture.destroyed.Load(), "Close must not destroy credentials an acquisition is still using")
+	assert.False(t, session.begin(), "a closed session must refuse new acquisitions")
+
+	release()
+	require.Eventually(t, func() bool { return fixture.destroyed.Load() == 1 },
+		testServerTimeout, 10*time.Millisecond, "the last acquisition destroys the credentials")
+	session.Close()
+	assert.Equal(t, int32(1), fixture.destroyed.Load(), "Destroy runs once")
 }
 
 func TestNewKerberosSessionCredentialErrors(t *testing.T) {

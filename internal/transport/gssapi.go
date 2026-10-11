@@ -121,6 +121,16 @@ type KerberosSession struct {
 	init initiator
 	// once makes Close idempotent, since a client's Close is.
 	once sync.Once
+
+	// A ticket acquisition abandoned on cancel (see serviceTicket) keeps
+	// running inside gokrb5, which writes the client's credentials in
+	// Destroy without a lock. Close therefore leaves Destroy to the last
+	// acquisition still running: mu guards closed and pending, and
+	// destroyOnce runs Destroy exactly once from whichever side is last.
+	mu          sync.Mutex
+	closed      bool
+	pending     int
+	destroyOnce sync.Once
 }
 
 // NewKerberosSession loads the credentials cfg names -- a keytab when one
@@ -157,10 +167,46 @@ func (s *KerberosSession) Close() {
 		return
 	}
 	s.once.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		idle := s.pending == 0
+		s.mu.Unlock()
+		if idle {
+			s.destroy()
+		}
+	})
+}
+
+func (s *KerberosSession) destroy() {
+	s.destroyOnce.Do(func() {
 		if d, ok := s.init.(interface{ Destroy() }); ok {
 			d.Destroy()
 		}
 	})
+}
+
+// begin registers a ticket acquisition, or reports false once the session
+// is closed.
+func (s *KerberosSession) begin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.pending++
+	return true
+}
+
+// end unregisters a ticket acquisition, destroying the credentials if the
+// session was closed while it ran.
+func (s *KerberosSession) end() {
+	s.mu.Lock()
+	s.pending--
+	last := s.closed && s.pending == 0
+	s.mu.Unlock()
+	if last {
+		s.destroy()
+	}
 }
 
 // initiator supplies the Kerberos identity and service tickets that a
@@ -216,7 +262,7 @@ func NewSaslGSSAPI(inner thrift.TTransport, hostPort string, cfg KerberosConfig)
 	if cfg.Session == nil {
 		return nil, errors.New("hms: kerberos: no session; build one with NewKerberosSession and set KerberosConfig.Session")
 	}
-	return &saslTransport{inner: inner, mech: &gssapiMech{init: cfg.Session.init, spn: spn}}, nil
+	return &saslTransport{inner: inner, mech: &gssapiMech{session: cfg.Session, init: cfg.Session.init, spn: spn}}, nil
 }
 
 // servicePrincipal returns the metastore's service principal name:
@@ -256,8 +302,9 @@ const (
 // token, the server's AP_REP (verified for mutual authentication), and the
 // security layer negotiation, whose reply is the mechanism's last token.
 type gssapiMech struct {
-	init initiator
-	spn  string
+	session *KerberosSession
+	init    initiator
+	spn     string
 
 	stage gssStage
 	// auth is the authenticator sent inside the AP_REQ; the AP_REP must
@@ -374,10 +421,27 @@ func (m *gssapiMech) serviceTicket(ctx context.Context) (messages.Ticket, types.
 		key    types.EncryptionKey
 		err    error
 	}
+	if !m.session.begin() {
+		return messages.Ticket{}, types.EncryptionKey{}, errors.New("hms: kerberos: the client is closed")
+	}
 	done := make(chan acquired, 1)
 	go func() {
-		ticket, key, err := m.init.ServiceTicket(m.spn)
-		done <- acquired{ticket: ticket, key: key, err: err}
+		// The goroutine outlives the call when ctx ends first; end lets a
+		// Close that ran meanwhile release the credentials once it is done.
+		defer m.session.end()
+		var got acquired
+		// gokrb5 parses and decrypts the KDC's replies here, and a reply
+		// too short for its encryption type panics it (see
+		// decryptEncPart). The KDC is not authenticated until that
+		// decryption succeeds, so turn the panic into an error instead of
+		// letting it end the process.
+		defer func() {
+			if r := recover(); r != nil {
+				got = acquired{err: fmt.Errorf("hms: kerberos: malformed reply from the KDC: %v", r)}
+			}
+			done <- got
+		}()
+		got.ticket, got.key, got.err = m.init.ServiceTicket(m.spn)
 	}()
 	select {
 	case got := <-done:
@@ -388,6 +452,26 @@ func (m *gssapiMech) serviceTicket(ctx context.Context) (messages.Ticket, types.
 	case <-ctx.Done():
 		return messages.Ticket{}, types.EncryptionKey{}, ctx.Err()
 	}
+}
+
+// decryptEncPart is crypto.DecryptEncPart for bytes the server controls.
+// gokrb5 v8.4.4 slices the ciphertext by its checksum and confounder sizes
+// without checking its length first, so a short ciphertext panics; this
+// rejects one first, and recovers any other panic in that code as an error.
+func decryptEncPart(ed types.EncryptedData, key types.EncryptionKey, usage uint32) (plain []byte, err error) {
+	et, err := crypto.GetEtype(key.KeyType)
+	if err != nil {
+		return nil, fmt.Errorf("hms: kerberos: unsupported encryption type %d: %w", key.KeyType, err)
+	}
+	if minLen := et.GetConfounderByteSize() + et.GetHMACBitLength()/8; len(ed.Cipher) < minLen {
+		return nil, fmt.Errorf("hms: kerberos: ciphertext of %d bytes is shorter than encryption type %d's minimum of %d", len(ed.Cipher), key.KeyType, minLen)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			plain, err = nil, fmt.Errorf("hms: kerberos: malformed ciphertext: %v", r)
+		}
+	}()
+	return crypto.DecryptEncPart(ed, key, usage)
 }
 
 // verifyAPRep checks the server's reply to the AP_REQ. The reply proves
@@ -416,7 +500,7 @@ func (m *gssapiMech) verifyAPRep(token []byte) error {
 	if err := apRep.Unmarshal(msg); err != nil {
 		return fmt.Errorf("hms: kerberos: could not parse the AP_REP: %w", err)
 	}
-	plain, err := crypto.DecryptEncPart(apRep.EncPart, m.sessionKey, keyusage.AP_REP_ENCPART)
+	plain, err := decryptEncPart(apRep.EncPart, m.sessionKey, keyusage.AP_REP_ENCPART)
 	if err != nil {
 		return fmt.Errorf("hms: kerberos: could not decrypt the AP_REP: %w", err)
 	}

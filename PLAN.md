@@ -212,7 +212,7 @@ Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same r
 - [x] `options.go`: `WithLogger`, `WithRPCObserver` per SPEC §5.10. `client.go`: emit `RPCInfo` from the `call`/`read` retry loop (`do`); log connection dial/close, `MarkFailed`/`MarkHealthy` transitions, and recovery-probe sweeps through the configured logger. `MarkFailed`/`MarkHealthy` (`internal/ha`) report whether the call was a real transition, so a transition is logged at Info and a repeat is logged at Debug (or not at all), rather than once per attempt/success.
 - [x] `go.mod`/tag policy: confirmed module tags stay `v0.x` until the `polytable` adoption note below ships, per SPEC §8 (no change needed — the policy was already correctly stated).
 - [x] Unit tests: an observer sees one `RPCInfo` per attempt (including retried attempts) with the right `Attempt`/`Err`; a logger sees a failover transition (and its later recovery) under a simulated endpoint outage, and no transition line on repeated successes or repeated failures against an already-cooling endpoint.
-- [ ] Integration matrix: no new job; observability is exercised incidentally by the other legs via `WithLogger` attached to the test harness's own logger.
+- [x] Integration matrix: no new job. `dial` in `test/integration_test.go` attaches `WithLogger` at debug level, writing to the test's output, so every leg runs the logging paths against a real server.
 
 ### Slice 16: `v0.2.0` -- streaming listings, batched drops, public test double
 Driven by the `polytable` adoption review; every item is recorded under `0.2.0` in CHANGELOG.md.
@@ -241,8 +241,14 @@ From the audit's hardening notes; none was an exploitable finding.
 - [x] Supply chain: the Hive 2.3.9 image verifies its tarballs' checksums; `govulncheck` pinned; golangci-lint v2.14.0 built with `go install` instead of `curl | sh` (v2.13.2 cannot read Go 1.27.2's export data, which had failed CI on `main` since the toolchain bump).
 - [x] Tests: `TestNewHTTP_Redirects`, `TestNewHTTP_EndlessErrorBody`, `TestReadFrame*`, `TestNew_WarnsOnCleartextCredentials`.
 
+### Slice 19: Kerberos hardening (2026-10-11)
+The security audit's two deferred units.
+- [x] `gssapi.go` `decryptEncPart`: gokrb5 v8.4.4 panics on a ciphertext shorter than its checksum (every etype; open upstream as [jcmturner/gokrb5#580](https://github.com/jcmturner/gokrb5/pull/580)). The AP_REP is decrypted before mutual authentication, so any server at the metastore's address could crash the client. Length checked first, any other panic recovered as an error.
+- [x] `serviceTicket`: a panic while gokrb5 parses the KDC's replies is recovered as an error. `KerberosSession.Close` no longer destroys the credentials under an acquisition a cancelled dial abandoned (gokrb5's `Destroy` writes them unlocked); the last acquisition destroys them, and a closed session starts none.
+- [x] Fuzz targets `FuzzVerifyAPRep`, `FuzzUnwrap`, `FuzzKDCReply` (seeds run in `go test`; 60 s each locally found nothing after the fix). `TestKerberosSessionCloseWaitsForAbandonedAcquisition`.
+
 ### Open follow-ups (not blocking 1.0)
-- Security audit deferred units, not yet hunted: gokrb5 parsing of pre-auth KDC and server bytes, and the abandoned `serviceTicket` goroutine on cancel.
+- gokrb5's own session-renewal goroutine decrypts KDC replies where the client cannot recover a panic; that path waits on jcmturner/gokrb5#580 (or a fork).
 - CI: actions pinned by tag rather than SHA; `gen-thrift.sh` fetches the IDL without a checksum.
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 - §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).
