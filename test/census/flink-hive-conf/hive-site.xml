@@ -8,4 +8,9 @@
     <name>hive.metastore.warehouse.dir</name>
     <value>file:///tmp/warehouse</value>
   </property>
+  <property>
+    <!-- Lets the metastore (uid 1000) delete what Flink (root) writes. -->
+    <name>fs.permissions.umask-mode</name>
+    <value>000</value>
+  </property>
 </configuration>

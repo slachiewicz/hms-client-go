@@ -69,16 +69,18 @@ jobs:
       - name: Run Spark
         if: startsWith(matrix.engine, 'spark')
         run: |
-          # As root under umask 0, as for Flink below: uid 1000 has no passwd
-          # entry in the Spark image, which Hadoop's login refuses, and the
-          # metastore (uid 1000) must still be able to delete what Spark
-          # writes.
+          # As root, with Hadoop's own umask (fs.permissions.umask-mode, which
+          # the shell's umask does not reach) at 000, as for Flink below: uid
+          # 1000 has no passwd entry in the Spark image, which Hadoop's login
+          # refuses, and the metastore (uid 1000) must still be able to delete
+          # what Spark writes.
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             "${{ matrix.image }}" -c 'umask 0 && exec /opt/spark/bin/spark-sql --master "local[2]" \
               --conf spark.sql.catalogImplementation=hive \
               --conf spark.hadoop.hive.metastore.uris=thrift://127.0.0.1:9083 \
               --conf spark.sql.warehouse.dir=file:///tmp/warehouse \
+              --conf spark.hadoop.fs.permissions.umask-mode=000 \
               -f /census/spark.sql'
 
       - name: Run Trino
