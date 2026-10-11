@@ -65,9 +65,13 @@ func (b *budgetTransport) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// budgetTransport is a TRichTransport, so TBinaryProtocol uses its
+// ReadByte directly rather than wrapping it in a RichTransport whose
+// per-byte reads would each allocate.
+var _ thrift.TRichTransport = (*budgetTransport)(nil)
+
 // ReadByte reads one byte against the budget, through the wrapped
-// transport's own ReadByte when it has one, so the protocol's per-byte
-// reads stay as cheap as they are without the budget.
+// transport's own ReadByte when it has one.
 func (b *budgetTransport) ReadByte() (byte, error) {
 	if b.read >= b.limit {
 		return 0, b.errTooLarge()
@@ -86,6 +90,22 @@ func (b *budgetTransport) ReadByte() (byte, error) {
 		b.read++
 	}
 	return c, err
+}
+
+// WriteByte writes c through the wrapped transport's own WriteByte when it
+// has one. Writes do not count against the budget.
+func (b *budgetTransport) WriteByte(c byte) error {
+	if bw, ok := b.TTransport.(io.ByteWriter); ok {
+		return bw.WriteByte(c)
+	}
+	_, err := b.Write([]byte{c})
+	return err
+}
+
+// WriteString writes s through the wrapped transport's own WriteString
+// when it has one.
+func (b *budgetTransport) WriteString(s string) (int, error) {
+	return io.WriteString(b.TTransport, s)
 }
 
 // Flush sends the buffered request and starts a fresh budget for its reply.

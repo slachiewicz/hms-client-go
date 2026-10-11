@@ -1022,7 +1022,9 @@ func (c *Client) DropDatabase(ctx context.Context, name string, deleteData, casc
 		}
 		qname := qualifyDBName(cat, name)
 		err = cn.dropDatabase(ctx, qname, deleteData, cascade)
-		if err != nil && classify(err) != ErrNotFound {
+		// After a protocol error the rest of drop_database's reply is
+		// still on the connection, so it cannot carry a follow-up.
+		if err != nil && classify(err) != ErrNotFound && !isProtocolError(err) {
 			if _, gerr := cn.getDatabase(ctx, qname); classify(gerr) == ErrNotFound {
 				err = gerr
 			}
