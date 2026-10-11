@@ -47,7 +47,7 @@ Integration tests build with `-tags integration` and need Docker (`make test-doc
 ## Go Version
 
 * **Floor**: `go 1.26.0` in `go.mod`.
-* **CI Build Toolchain**: `1.27.0` in both workflows. Bump the two workflow files together.
+* **CI Build Toolchain**: `1.27.2` in both workflows. Bump the two workflow files together.
 
 ## Thrift
 
