@@ -43,8 +43,19 @@ func (c *ContextClient) Call(ctx context.Context, method string, args, result th
 	} else {
 		_ = c.conn.SetDeadline(time.Time{})
 	}
-	stop := context.AfterFunc(ctx, func() { _ = c.conn.SetDeadline(time.Now()) })
-	defer stop()
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(fired)
+		_ = c.conn.SetDeadline(time.Now())
+	})
+	// stop does not wait for a callback that already started. Wait here,
+	// or its SetDeadline(now) could land after the next Call has set its
+	// own deadline and fail that call spuriously.
+	defer func() {
+		if !stop() {
+			<-fired
+		}
+	}()
 
 	meta, err := c.inner.Call(ctx, method, args, result)
 	if err != nil && ctx.Err() != nil {

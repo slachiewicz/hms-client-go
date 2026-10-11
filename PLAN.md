@@ -232,8 +232,18 @@ Driven by the `polytable` adoption review; every item is recorded under `0.2.0` 
 - [x] `gssapi.go`: `derContent`'s length check no longer overflows a 32-bit `int`; 32-bit platforms build but are unsupported (SPEC §1.1).
 - [x] Unit tests: `TestBudgetTransport*`, `TestMaxResponseBytes` (oversized reply, then a correct answer on a pool of one), `TestCreateDatabase_CatalogWithoutBody`, `TestObserver_RedactsEndpointPassword`, `TestParseEndpoints_ErrorsOmitPassword`, `TestEndpointRedacted`.
 
+### Slice 18: security hardening (2026-10-11)
+From the audit's hardening notes; none was an exploitable finding.
+- [x] `internal/transport/http.go`: redirects refused, response bodies capped at `WithMaxResponseBytes`, on a copy of any `WithHTTPClient` client (SPEC §3.2).
+- [x] `sasl.go`: frames read as bytes arrive, not allocated from the header; server rejection text quoted, as is a KRB-ERROR's (`gssapi.go`).
+- [x] `ctxclient.go`: `Call` waits for a cancellation callback that already started, so it cannot reset the next call's deadline.
+- [x] `conn.go`: `warnCleartext` logs credentials sent without TLS (SPEC §5.10); SPEC §3.1 says Kerberos needs `WithTLS` for data protection.
+- [x] Supply chain: the Hive 2.3.9 image verifies its tarballs' checksums; `govulncheck` pinned; golangci-lint v2.14.0 built with `go install` instead of `curl | sh` (v2.13.2 cannot read Go 1.27.2's export data, which had failed CI on `main` since the toolchain bump).
+- [x] Tests: `TestNewHTTP_Redirects`, `TestNewHTTP_EndlessErrorBody`, `TestReadFrame*`, `TestNew_WarnsOnCleartextCredentials`.
+
 ### Open follow-ups (not blocking 1.0)
-- HTTP transport: no `CheckRedirect` policy, so a redirect replays the request with `x-actor-username` and `WithHTTPHeaders` to the redirect target (security audit hardening note, 2026-10-11).
+- Security audit deferred units, not yet hunted: gokrb5 parsing of pre-auth KDC and server bytes, and the abandoned `serviceTicket` goroutine on cancel.
+- CI: actions pinned by tag rather than SHA; `gen-thrift.sh` fetches the IDL without a checksum.
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 - §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).
 

@@ -22,12 +22,25 @@ All notable changes to this project are documented in this file. The format foll
   to the pool with the rest of the reply unread, so the next call on it read leftover bytes. The
   connection is now discarded (SPEC §4.2).
 
+- A canceled call could leave its deadline-reset callback running past the call's end, so the
+  next call on the same connection failed with a spurious timeout.
+- SASL and Kerberos rejections quote the server's message, so control characters in it no longer
+  reach logs verbatim.
 - The GSSAPI token parser's length check overflowed on a 32-bit `int`, so a four-octet DER
   length from the server could panic the client before mutual authentication. 32-bit platforms
   remain unsupported but build (SPEC §1.1).
 
 ### Security
 
+- The HTTP transport refuses redirects. Following one replayed the request, with its
+  `Authorization`, `x-actor-username` and `WithHTTPHeaders` headers, to the redirect target. A
+  `WithHTTPClient` client that sets its own `CheckRedirect` keeps it (SPEC §3.2).
+- HTTP response bodies are capped at `WithMaxResponseBytes`. Thrift's HTTP client drains each body
+  to its end, so a non-200 reply that never ended held the call forever when no deadline applied.
+- SASL frames are read as their bytes arrive. A frame header alone made the client allocate up to
+  64 MiB.
+- `New` logs a warning when a `WithPlainAuth` password or a `WithBearerToken` token would be sent
+  without TLS (SPEC §5.10).
 - The password in an HTTP endpoint URI's userinfo (`https://user:pass@host/...`, which net/http
   sends as Basic auth) was written to log records, `RPCInfo.Endpoint`, and the errors `New`
   returns for an unparseable, unsupported or mixed-scheme endpoint list. It is now masked

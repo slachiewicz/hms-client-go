@@ -3,6 +3,7 @@ package hms_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -295,5 +296,45 @@ func TestObserver_RedactsEndpointPassword(t *testing.T) {
 	for _, ep := range endpoints {
 		assert.NotContains(t, ep, secret)
 		assert.Contains(t, ep, "svc:xxxxx@")
+	}
+}
+
+// TestNew_WarnsOnCleartextCredentials proves New logs a warning for
+// credentials that would cross the network without TLS, and stays quiet
+// when TLS protects them. New's own outcome is beside the point: nothing
+// listens on these endpoints.
+func TestNew_WarnsOnCleartextCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		uri  string
+		opts []hms.Option
+		want string
+	}{
+		{name: "PLAIN without TLS", uri: "thrift://127.0.0.1:1", opts: []hms.Option{hms.WithPlainAuth("u", "p")}, want: "WithPlainAuth sends the password without TLS"},
+		{name: "PLAIN with TLS", uri: "thrift://127.0.0.1:1", opts: []hms.Option{hms.WithPlainAuth("u", "p"), hms.WithTLS(&tls.Config{MinVersion: tls.VersionTLS12})}},
+		{name: "bearer over http", uri: "http://127.0.0.1:1/metastore", opts: []hms.Option{hms.WithBearerToken("t")}, want: "WithBearerToken sends the token over http://"},
+		{name: "bearer over https", uri: "https://127.0.0.1:1/metastore", opts: []hms.Option{hms.WithBearerToken("t")}},
+		{name: "no credentials", uri: "http://127.0.0.1:1/metastore"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs syncBuffer
+			opts := append([]hms.Option{
+				hms.WithMaxRetries(1),
+				hms.WithConnectTimeout(time.Second),
+				hms.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))),
+			}, tt.opts...)
+			if c, err := hms.New(context.Background(), tt.uri, opts...); err == nil {
+				_ = c.Close()
+			}
+			if tt.want == "" {
+				assert.NotContains(t, logs.String(), "level=WARN")
+				return
+			}
+			assert.Contains(t, logs.String(), tt.want)
+		})
 	}
 }

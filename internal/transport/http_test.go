@@ -300,3 +300,98 @@ func TestNewHTTP_TLSIgnoredWhenClientSupplied(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// TestNewHTTP_Redirects proves a metastore redirect is refused before
+// anything reaches its target, whether NewHTTP builds the client or the
+// caller supplies one without a policy of its own, and that a caller's own
+// CheckRedirect is respected.
+func TestNewHTTP_Redirects(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		client     func(target *httptest.Server) *http.Client
+		wantErr    bool
+		wantTarget int
+	}{
+		{name: "built client", client: func(*httptest.Server) *http.Client { return nil }, wantErr: true},
+		{name: "caller client without a policy", client: func(*httptest.Server) *http.Client { return &http.Client{} }, wantErr: true},
+		{
+			name: "caller client with its own policy",
+			client: func(*httptest.Server) *http.Client {
+				return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+			},
+			wantTarget: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			hits := 0
+			rec := &recordedRequest{}
+			fb := fb303HTTPHandler(rec)
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				hits++
+				mu.Unlock()
+				fb(w, r)
+			}))
+			t.Cleanup(target.Close)
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+transport.DefaultHTTPPath, http.StatusTemporaryRedirect)
+			}))
+			t.Cleanup(redirector.Close)
+
+			client := tt.client(target)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := callGetStatus(ctx, t, redirector.URL+transport.DefaultHTTPPath, transport.HTTPConfig{
+				Client:      client,
+				BearerToken: "secret",
+			})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "redirect")
+			} else {
+				require.NoError(t, err)
+			}
+			mu.Lock()
+			assert.Equal(t, tt.wantTarget, hits)
+			mu.Unlock()
+			if client != nil && tt.wantErr {
+				assert.Nil(t, client.CheckRedirect, "the caller's client must not be modified")
+			}
+		})
+	}
+}
+
+// TestNewHTTP_EndlessErrorBody proves a non-200 reply whose body never ends
+// does not hang the call when no deadline applies: THttpClient drains the
+// body before returning, and the drain stops at MaxResponseBytes.
+func TestNewHTTP_EndlessErrorBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		chunk := make([]byte, 4096)
+		for r.Context().Err() == nil {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- callGetStatus(context.Background(), t, srv.URL+transport.DefaultHTTPPath,
+			transport.HTTPConfig{MaxResponseBytes: 64 << 10})
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "500")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call did not return: the error body was drained without a limit")
+	}
+}

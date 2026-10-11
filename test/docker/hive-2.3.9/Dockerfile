@@ -9,6 +9,10 @@ FROM eclipse-temurin:8-jre
 
 ARG HIVE_VERSION=2.3.9
 ARG HADOOP_VERSION=2.10.2
+# From the .sha512 / .sha256 files next to each tarball on archive.apache.org.
+# Change them together with the versions above.
+ARG HADOOP_SHA512=13e95907073d815e3f86cdcc24193bb5eec0374239c79151923561e863326988c7f32a05fb7a1e5bc962728deb417f546364c2149541d6234221b00459154576
+ARG HIVE_SHA256=1996327c96672e7ea8eaa8fc63972c75bc095287a32612e545e0e51c1622cb5c
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
@@ -23,6 +27,8 @@ RUN set -eu; \
                 --speed-limit 50000 --speed-time 60 --max-time 1500 -o "$2" "$1"; }; \
     fetch https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz /tmp/hadoop.tgz; \
     fetch https://archive.apache.org/dist/hive/hive-${HIVE_VERSION}/apache-hive-${HIVE_VERSION}-bin.tar.gz /tmp/hive.tgz; \
+    echo "${HADOOP_SHA512}  /tmp/hadoop.tgz" | sha512sum -c -; \
+    echo "${HIVE_SHA256}  /tmp/hive.tgz" | sha256sum -c -; \
     tar -xzf /tmp/hadoop.tgz -C /opt; tar -xzf /tmp/hive.tgz -C /opt; rm -f /tmp/hadoop.tgz /tmp/hive.tgz
 
 ENV HADOOP_HOME=/opt/hadoop-${HADOOP_VERSION}

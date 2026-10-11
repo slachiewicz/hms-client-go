@@ -160,7 +160,7 @@ func (s *saslTransport) OpenContext(ctx context.Context) error {
 			s.open = true
 			return nil
 		case saslBad, saslError:
-			return fmt.Errorf("hms: sasl %s rejected: %s", name, payload)
+			return fmt.Errorf("hms: sasl %s rejected: %q", name, payload)
 		case saslOK:
 			if done {
 				return fmt.Errorf("hms: sasl %s: server sent a challenge after the mechanism completed", name)
@@ -217,11 +217,25 @@ func (s *saslTransport) recvNegotiate() (byte, []byte, error) {
 	if n > saslMaxFrame {
 		return 0, nil, errors.New("hms: sasl frame too large")
 	}
-	payload := make([]byte, n)
-	if _, err := io.ReadFull(s.inner, payload); err != nil {
+	payload, err := readFrame(s.inner, n)
+	if err != nil {
 		return 0, nil, err
 	}
 	return hdr[0], payload, nil
+}
+
+// readFrame reads an n-byte frame body from r. Memory grows with the bytes
+// that actually arrive, so a header announcing a large frame costs nothing
+// until the server sends it.
+func readFrame(r io.Reader, n uint32) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, int64(n)))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) < int(n) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return b, nil
 }
 
 // IsOpen reports whether the SASL handshake completed and the inner
@@ -250,8 +264,8 @@ func (s *saslTransport) Read(p []byte) (int, error) {
 		if n > saslMaxFrame {
 			return 0, errors.New("hms: sasl frame too large")
 		}
-		frame := make([]byte, n)
-		if _, err := io.ReadFull(s.inner, frame); err != nil {
+		frame, err := readFrame(s.inner, n)
+		if err != nil {
 			return 0, err
 		}
 		s.rbuf.Reset(frame)
