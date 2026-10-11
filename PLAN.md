@@ -123,7 +123,7 @@ Defined in SPEC §5. Implementation notes:
 
 ## 4. Step-by-Step Implementation Slices
 
-Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same release; 16 is `v0.2.0`. There is no Slice 6: the 1.0-scope work was numbered from 7 and the gap was never filled; it stays so existing references to slice numbers remain valid. Boxes left open are deliberate deferrals, each with its reason.
+Slices 1 to 5 shipped in `v0.1.0`; 7 to 15 completed the 1.0 scope in the same release; 16 is `v0.2.0`; 17 to 20 are `v0.4.0`. There is no Slice 6: the 1.0-scope work was numbered from 7 and the gap was never filled; it stays so existing references to slice numbers remain valid. Boxes left open are deliberate deferrals, each with its reason.
 
 ### Slice 1: Scaffold & Thrift Generation
 - [x] `go.mod` with Go `1.26.0`, `github.com/apache/thrift v0.24.0`, `github.com/stretchr/testify`.
@@ -253,7 +253,6 @@ The security audit's two deferred units.
 ### Open follow-ups (not blocking 1.0)
 - gokrb5's own session-renewal goroutine decrypts KDC replies where the client cannot recover a panic; that path waits on jcmturner/gokrb5#580 (or a fork).
 - CI: actions pinned by tag rather than SHA; `gen-thrift.sh` fetches the IDL without a checksum.
-- Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.

@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
 ### Added
 
 - `WithMaxResponseBytes`, a cap on the wire size of one reply over both transports, default
@@ -21,7 +23,6 @@ All notable changes to this project are documented in this file. The format foll
 - A reply that failed to decode partway through (`TProtocolException`) returned its connection
   to the pool with the rest of the reply unread, so the next call on it read leftover bytes. The
   connection is now discarded (SPEC §4.2).
-
 - Closing a client while a cancelled dial's Kerberos ticket request was still running raced with
   that request on the credentials. The credentials are now released when the request ends.
 - A canceled call could leave its deadline-reset callback running past the call's end, so the
