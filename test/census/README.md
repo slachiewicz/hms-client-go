@@ -12,16 +12,20 @@ The statements each engine runs are in this directory: `spark.sql`,
 
 ## Results
 
-Recorded 2026-10-11, run 38137289850, against `apache/hive:3.1.3`:
+Recorded 2026-10-11, run 38138983220, against `apache/hive:3.1.3`:
 
-- Spark 3.5.9 and 4.1.3, through Spark's built-in Hive 2.3 client.
+- Spark 3.5.9 and 4.2.0, through Spark's built-in Hive 2.3 client.
 - Trino 483, Hive connector.
-- Flink 1.20.4, `flink-sql-connector-hive-3.1.3` 1.20.4.
+- Flink 1.20.5 with `flink-sql-connector-hive-3.1.3` 1.20.5. Flink 2.x has
+  no Hive connector, so 1.20 is the newest line that can use a Hive catalog.
+
+An earlier run with Spark 4.1.3 and Flink 1.20.4 issued the same set of
+RPCs.
 
 Counts are calls per run. The last column says whether `hmstest` already
 implements the call.
 
-| RPC | flink | spark-3.5 | spark-4.1 | trino | hmstest |
+| RPC | flink | spark-3.5 | spark-4.2 | trino | hmstest |
 |---|---|---|---|---|---|
 | `add_partition_with_environment_context` | 2 |  |  |  | no |
 | `add_partitions` |  |  |  | 1 | no |
@@ -39,9 +43,9 @@ implements the call.
 | `drop_table_with_environment_context` | 3 | 4 | 4 |  | no |
 | `get_all_databases` |  |  |  | 1 | yes |
 | `get_all_tables` | 4 | 1 | 1 |  | yes |
-| `get_database` | 42 | 121 | 145 | 5 | yes |
+| `get_database` | 42 | 121 | 81 | 5 | yes |
 | `get_databases` | 4 | 1 | 1 |  | yes |
-| `get_function` | 3 | 7 | 7 |  | no |
+| `get_function` | 3 | 7 | 4 |  | no |
 | `get_functions` | 1 | 1 | 1 |  | no |
 | `get_not_null_constraints` | 18 |  |  |  | no |
 | `get_part_specs_by_filter` | 1 |  |  |  | no |
@@ -53,7 +57,7 @@ implements the call.
 | `get_partitions_ps_with_auth` |  | 2 | 2 |  | no |
 | `get_partitions_statistics_req` | 1 |  |  |  | no |
 | `get_primary_keys` | 18 |  |  |  | no |
-| `get_table` |  | 167 | 164 |  | not in 4.2.1 IDL |
+| `get_table` |  | 167 | 108 |  | not in 4.2.1 IDL |
 | `get_table_meta` |  |  |  | 2 | no |
 | `get_table_req` | 66 |  |  | 33 | yes |
 | `get_table_statistics_req` | 9 |  |  | 6 | yes |
