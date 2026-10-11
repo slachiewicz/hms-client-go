@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         hive: ["3.1.3"]
-        engine: [spark-3.5, spark-4.1, trino]
+        engine: [spark-3.5, spark-4.1, trino, flink]
         include:
           - engine: spark-3.5
             image: apache/spark:3.5.9-scala2.12-java17-python3-r-ubuntu
@@ -29,6 +29,8 @@ jobs:
             image: apache/spark:4.1.3-java17
           - engine: trino
             image: trinodb/trino:483
+          - engine: flink
+            image: flink:1.20.4-java11
     steps:
       - uses: actions/checkout@v7
 
@@ -90,6 +92,26 @@ jobs:
             sleep 2
           done
           docker exec trino trino -f /census/trino.sql
+
+      - name: Run Flink
+        if: matrix.engine == 'flink'
+        run: |
+          # The Hive connector needs Hadoop on the classpath; the shaded
+          # hadoop-client jars are enough for a file:/// warehouse. Flink
+          # runs as root under umask 0, so the metastore (uid 1000) can
+          # still delete the partition directories Flink creates.
+          mkdir -p /tmp/flink-lib
+          base=https://repo1.maven.org/maven2/org/apache
+          curl -sSfL -o /tmp/flink-lib/flink-sql-connector-hive.jar \
+            "$base/flink/flink-sql-connector-hive-3.1.3_2.12/1.20.4/flink-sql-connector-hive-3.1.3_2.12-1.20.4.jar"
+          curl -sSfL -o /tmp/flink-lib/hadoop-client-api.jar "$base/hadoop/hadoop-client-api/3.3.6/hadoop-client-api-3.3.6.jar"
+          curl -sSfL -o /tmp/flink-lib/hadoop-client-runtime.jar "$base/hadoop/hadoop-client-runtime/3.3.6/hadoop-client-runtime-3.3.6.jar"
+          docker run --rm --network host --user 0 --entrypoint bash \
+            -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
+            -v /tmp/flink-lib/flink-sql-connector-hive.jar:/opt/flink/lib/flink-sql-connector-hive.jar:ro \
+            -v /tmp/flink-lib/hadoop-client-api.jar:/opt/flink/lib/hadoop-client-api.jar:ro \
+            -v /tmp/flink-lib/hadoop-client-runtime.jar:/opt/flink/lib/hadoop-client-runtime.jar:ro \
+            "${{ matrix.image }}" -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -40; exit $rc'
 
       - name: Stop the recorder and summarise
         if: always()
