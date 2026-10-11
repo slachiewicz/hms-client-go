@@ -107,12 +107,17 @@ jobs:
             "$base/flink/flink-sql-connector-hive-3.1.3_2.12/1.20.4/flink-sql-connector-hive-3.1.3_2.12-1.20.4.jar"
           curl -sSfL -o /tmp/flink-lib/hadoop-client-api.jar "$base/hadoop/hadoop-client-api/3.3.6/hadoop-client-api-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/hadoop-client-runtime.jar "$base/hadoop/hadoop-client-runtime/3.3.6/hadoop-client-runtime-3.3.6.jar"
+          curl -sSfL -o /tmp/flink-lib/commons-logging.jar "https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar"
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             -v /tmp/flink-lib/flink-sql-connector-hive.jar:/opt/flink/lib/flink-sql-connector-hive.jar:ro \
             -v /tmp/flink-lib/hadoop-client-api.jar:/opt/flink/lib/hadoop-client-api.jar:ro \
             -v /tmp/flink-lib/hadoop-client-runtime.jar:/opt/flink/lib/hadoop-client-runtime.jar:ro \
-            "${{ matrix.image }}" -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -40; exit $rc'
+            -v /tmp/flink-lib/commons-logging.jar:/opt/flink/lib/commons-logging.jar:ro \
+            "${{ matrix.image }}" -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -40; exit $rc' \
+            | tee /tmp/census/flink.out
+          # sql-client exits 0 even when a statement fails.
+          ! grep -q '\[ERROR\]' /tmp/census/flink.out
 
       - name: Stop the recorder and summarise
         if: always()
