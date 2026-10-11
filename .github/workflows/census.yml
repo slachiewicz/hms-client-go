@@ -115,6 +115,7 @@ jobs:
           curl -sSfL -o /tmp/flink-lib/hadoop-client-api.jar "$base/hadoop/hadoop-client-api/3.3.6/hadoop-client-api-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/hadoop-client-runtime.jar "$base/hadoop/hadoop-client-runtime/3.3.6/hadoop-client-runtime-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/commons-logging.jar "https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar"
+          set -o pipefail
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             -v /tmp/flink-lib/flink-sql-connector-hive.jar:/opt/flink/lib/flink-sql-connector-hive.jar:ro \
@@ -138,6 +139,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/census/summary.txt /tmp/census/recorder.log
+          # An engine that never reached the metastore must not pass.
+          test -s /tmp/census/summary.txt || { echo "the recorder saw no calls" >&2; exit 1; }
 
       - name: Engine and metastore logs on failure
         if: failure()
@@ -225,10 +228,11 @@ jobs:
       - name: Run Flink
         timeout-minutes: 15
         run: |
+          set -o pipefail
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             -v /tmp/hive4-lib:/opt/flink/lib/hive4:ro \
-            apache/flink:2.0-preview1-java11 -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink-hive4.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -60; exit $rc' \
+            flink:2.0-preview1-java11 -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink-hive4.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -60; exit $rc' \
             | tee /tmp/census/flink.out
           ! grep -q '\[ERROR\]' /tmp/census/flink.out
 
@@ -244,6 +248,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/census/summary.txt /tmp/census/recorder.log
+          # An engine that never reached the metastore must not pass.
+          test -s /tmp/census/summary.txt || { echo "the recorder saw no calls" >&2; exit 1; }
 
       - uses: actions/upload-artifact@v7
         if: always()
