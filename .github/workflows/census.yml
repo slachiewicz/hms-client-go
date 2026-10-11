@@ -5,6 +5,10 @@ name: census
 # Results and their reading: test/census/README.md.
 on:
   workflow_dispatch:
+  # Until this workflow is on main, where workflow_dispatch can reach it.
+  push:
+    branches: [agent/call-census]
+    paths: [".github/workflows/census.yml", "test/census/**"]
 permissions:
   contents: read
 jobs:
@@ -16,16 +20,17 @@ jobs:
       fail-fast: false
       matrix:
         hive: ["3.1.3"]
-        engine: [spark-3.5, spark-4.1, trino, flink]
+        engine: [spark-3.5, spark-4.2, trino, flink]
         include:
           - engine: spark-3.5
             image: apache/spark:3.5.9-scala2.12-java17-python3-r-ubuntu
-          - engine: spark-4.1
-            image: apache/spark:4.1.3-java17
+          - engine: spark-4.2
+            image: apache/spark:4.2.0-java17
           - engine: trino
             image: trinodb/trino:483
           - engine: flink
-            image: flink:1.20.4-java11
+            # Flink 2.x has no Hive connector; 1.20 is the last line with one.
+            image: flink:1.20.5-java11
     steps:
       - uses: actions/checkout@v7
 
@@ -101,7 +106,7 @@ jobs:
           mkdir -p /tmp/flink-lib
           base=https://repo1.maven.org/maven2/org/apache
           curl -sSfL -o /tmp/flink-lib/flink-sql-connector-hive.jar \
-            "$base/flink/flink-sql-connector-hive-3.1.3_2.12/1.20.4/flink-sql-connector-hive-3.1.3_2.12-1.20.4.jar"
+            "$base/flink/flink-sql-connector-hive-3.1.3_2.12/1.20.5/flink-sql-connector-hive-3.1.3_2.12-1.20.5.jar"
           curl -sSfL -o /tmp/flink-lib/hadoop-client-api.jar "$base/hadoop/hadoop-client-api/3.3.6/hadoop-client-api-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/hadoop-client-runtime.jar "$base/hadoop/hadoop-client-runtime/3.3.6/hadoop-client-runtime-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/commons-logging.jar "https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar"
