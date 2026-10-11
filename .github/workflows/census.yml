@@ -2,14 +2,9 @@ name: census
 # Records which metastore RPCs each engine issues for ordinary DDL and DML,
 # by running it against a real metastore through internal/cmd/hmsrecord.
 # The call lists are the requirements for a lightweight Go metastore.
+# Results and their reading: test/census/README.md.
 on:
   workflow_dispatch:
-  push:
-    branches: [agent/call-census]
-    paths:
-      - ".github/workflows/census.yml"
-      - "internal/cmd/hmsrecord/**"
-      - "test/census/**"
 permissions:
   contents: read
 jobs:
