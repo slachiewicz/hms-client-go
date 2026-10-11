@@ -69,16 +69,17 @@ jobs:
       - name: Run Spark
         if: startsWith(matrix.engine, 'spark')
         run: |
-          # uid 1000 has no passwd entry in the Spark image, so user.home is
-          # "?" unless set; Ivy refuses a relative base directory.
-          docker run --rm --network host --user 1000 --env HOME=/tmp --env SPARK_SUBMIT_OPTS=-Duser.home=/tmp \
+          # As root under umask 0, as for Flink below: uid 1000 has no passwd
+          # entry in the Spark image, which Hadoop's login refuses, and the
+          # metastore (uid 1000) must still be able to delete what Spark
+          # writes.
+          docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
-            "${{ matrix.image }}" /opt/spark/bin/spark-sql --master 'local[2]' \
-            --conf spark.sql.catalogImplementation=hive \
-            --conf spark.hadoop.hive.metastore.uris=thrift://127.0.0.1:9083 \
-            --conf spark.sql.warehouse.dir=file:///tmp/warehouse \
-            --conf spark.jars.ivy=/tmp/.ivy2 \
-            -f /census/spark.sql
+            "${{ matrix.image }}" -c 'umask 0 && exec /opt/spark/bin/spark-sql --master "local[2]" \
+              --conf spark.sql.catalogImplementation=hive \
+              --conf spark.hadoop.hive.metastore.uris=thrift://127.0.0.1:9083 \
+              --conf spark.sql.warehouse.dir=file:///tmp/warehouse \
+              -f /census/spark.sql'
 
       - name: Run Trino
         if: matrix.engine == 'trino'
