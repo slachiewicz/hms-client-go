@@ -209,6 +209,11 @@ jobs:
           m=https://repo1.maven.org/maven2
           curl -sSfL -o /tmp/hive4-lib/stax2-api.jar "$m/org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar"
           curl -sSfL -o /tmp/hive4-lib/woodstox-core.jar "$m/com/fasterxml/woodstox/woodstox-core/5.4.0/woodstox-core-5.4.0.jar"
+          # The shim's tree resolves hadoop-common 3.3.0 next to 3.3.6 for every
+          # other Hadoop artifact; hadoop-hdfs-client 3.3.6 needs 3.3.6
+          # (org.apache.hadoop.fs.LeaseRecoverable).
+          rm -f /tmp/hive4-lib/hadoop-common-*.jar
+          curl -sSfL -o /tmp/hive4-lib/hadoop-common-3.3.6.jar "$m/org/apache/hadoop/hadoop-common/3.3.6/hadoop-common-3.3.6.jar"
           ls /tmp/hive4-lib; du -sh /tmp/hive4-lib
 
       - name: Start the metastore
