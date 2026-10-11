@@ -1060,6 +1060,8 @@ func TestParseKrb5TokenRejectsGarbage(t *testing.T) {
 		{name: "wrong application tag", token: []byte{0x30, 0x02, 0x00, 0x00}, wantErr: "did not return a GSS-API context token"},
 		{name: "truncated body", token: valid[:len(valid)-4], wantErr: "malformed GSS-API token"},
 		{name: "not a kerberos mechanism", token: []byte{0x60, 0x03, 0x06, 0x01, 0x2a}, wantErr: "not a Kerberos 5 mechanism token"},
+		// start+length overflows a 32-bit int for this length.
+		{name: "four-octet length past the end", token: []byte{0x60, 0x84, 0x7f, 0xff, 0xff, 0xff}, wantErr: "malformed GSS-API token"},
 	}
 
 	for _, tc := range tests {

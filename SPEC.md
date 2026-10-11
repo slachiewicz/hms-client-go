@@ -23,7 +23,7 @@ restate signatures or version claims.
 ### 1.1. Out of scope for 1.0
 * **Hive 2.2 and earlier**. Hive 2.2 lacks `get_table_req`, and the Hive 4 IDL this client is generated from no longer declares the legacy `get_table` / `get_table_objects_by_name` RPCs, so no fallback can be generated. Hive 2.2 is end of life; Spark 4 still defaults its metastore client to 2.3.10, which makes 2.3 the practical floor.
 * **Compact protocol** (`metastore.thrift.compact.protocol.enabled=true`) and **framed transport** (`metastore.thrift.framed.transport.enabled=true`). Both are off by default on every supported server version.
-* **32-bit platforms**. Package `hms` fails to compile where `int` is narrower than 64 bits (`GOARCH=386`, `arm`, `mips`, `mipsle`): the wire-length arithmetic is written and tested for a 64-bit `int` only.
+* **32-bit platforms** (`GOARCH=386`, `arm`, `mips`, `mipsle`). The module builds there, but it is tested on 64-bit platforms only and 32-bit problems are not treated as defects.
 
 Kerberos / GSSAPI is **in scope for 1.0** via a pure-Go implementation (`gokrb5`); native C Kerberos remains forbidden by the zero-Cgo invariant. See §3.1 and §5.1 (`WithKerberos`).
 

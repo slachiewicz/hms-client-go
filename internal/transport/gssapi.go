@@ -617,7 +617,9 @@ func derContent(b []byte) ([]byte, error) {
 		}
 		start = 2 + n
 	}
-	if length < 0 || start+length > len(b) {
+	// Compare against what is left rather than computing start+length,
+	// which overflows a 32-bit int for a four-octet length.
+	if length < 0 || length > len(b)-start {
 		return nil, errors.New(malformed)
 	}
 	return b[start : start+length], nil

@@ -229,7 +229,7 @@ Driven by the `polytable` adoption review; every item is recorded under `0.2.0` 
 - [x] `client.go`: a `TProtocolException` discards the connection instead of pooling it; still `ErrMeta`, not retried (SPEC §4.2 point 2).
 - [x] `client.go`: `warehouseRoot` tolerates a `get_catalog` reply without its catalog.
 - [x] `internal/transport/uri.go`: `Endpoint.Redacted` for logs, `RPCInfo.Endpoint` and `ParseEndpoints` errors (SPEC §5.10).
-- [x] `arch.go`: the package fails to compile on 32-bit `int` (SPEC §1.1).
+- [x] `gssapi.go`: `derContent`'s length check no longer overflows a 32-bit `int`; 32-bit platforms build but are unsupported (SPEC §1.1).
 - [x] Unit tests: `TestBudgetTransport*`, `TestMaxResponseBytes` (oversized reply, then a correct answer on a pool of one), `TestCreateDatabase_CatalogWithoutBody`, `TestObserver_RedactsEndpointPassword`, `TestParseEndpoints_ErrorsOmitPassword`, `TestEndpointRedacted`.
 
 ### Open follow-ups (not blocking 1.0)

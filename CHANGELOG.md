@@ -13,11 +13,6 @@ All notable changes to this project are documented in this file. The format foll
   million empty structs cost the server 100 MB and the client tens of gigabytes. A reply over the
   cap fails with `ErrMeta` (SPEC §3.3).
 
-### Changed
-
-- 64-bit platforms only: package `hms` no longer compiles for `GOARCH=386`, `arm`, `mips` or
-  `mipsle` (SPEC §1.1).
-
 ### Fixed
 
 - `CreateDatabase` with an empty `LocationURI` panicked on a nil pointer when `get_catalog`
@@ -26,6 +21,10 @@ All notable changes to this project are documented in this file. The format foll
 - A reply that failed to decode partway through (`TProtocolException`) returned its connection
   to the pool with the rest of the reply unread, so the next call on it read leftover bytes. The
   connection is now discarded (SPEC §4.2).
+
+- The GSSAPI token parser's length check overflowed on a 32-bit `int`, so a four-octet DER
+  length from the server could panic the client before mutual authentication. 32-bit platforms
+  remain unsupported but build (SPEC §1.1).
 
 ### Security
 
