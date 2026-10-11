@@ -115,6 +115,7 @@ jobs:
           curl -sSfL -o /tmp/flink-lib/hadoop-client-api.jar "$base/hadoop/hadoop-client-api/3.3.6/hadoop-client-api-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/hadoop-client-runtime.jar "$base/hadoop/hadoop-client-runtime/3.3.6/hadoop-client-runtime-3.3.6.jar"
           curl -sSfL -o /tmp/flink-lib/commons-logging.jar "https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar"
+          set -o pipefail
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             -v /tmp/flink-lib/flink-sql-connector-hive.jar:/opt/flink/lib/flink-sql-connector-hive.jar:ro \
@@ -138,6 +139,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/census/summary.txt /tmp/census/recorder.log
+          # An engine that never reached the metastore must not pass.
+          test -s /tmp/census/summary.txt || { echo "the recorder saw no calls" >&2; exit 1; }
 
       - name: Engine and metastore logs on failure
         if: failure()
@@ -183,20 +186,35 @@ jobs:
 
       - name: Build the connector with the Hive 4 shim
         working-directory: connector
+        timeout-minutes: 25
         run: |
-          # Phase 1 installs the shim without -Phive4 (the PR's cycle
-          # workaround); phase 2 builds the connector against it.
+          # The connector is built without -Phive4 and the shim next to it,
+          # the recipe reported to work on the PR: the connector loads
+          # HiveShimV400 by reflection. Packaging with -Phive4 hangs in
+          # maven-shade-plugin's dependency-reduced POM, a path the PR's CI
+          # does not exercise (it only runs mvn test).
           $MVN install -pl flink-connector-hive -am
           $MVN install -pl flink-connector-hive-4.0.0 -am
-          $MVN install -pl flink-connector-hive -Phive4
           mkdir -p /tmp/hive4-lib
           cp flink-connector-hive/target/flink-connector-hive-*.jar flink-connector-hive-4.0.0/target/flink-connector-hive-4.0.0_2.12-*.jar /tmp/hive4-lib/
           rm -f /tmp/hive4-lib/*-tests.jar /tmp/hive4-lib/*-sources.jar /tmp/hive4-lib/original-*.jar
-          # Hive 4 and Hadoop, minus what Flink itself provides.
-          $MVN dependency:copy-dependencies -pl flink-connector-hive -Phive4 \
-            -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback \
+          # Hive 4 and Hadoop, from the shim module, minus what Flink provides.
+          $MVN dependency:copy-dependencies -pl flink-connector-hive-4.0.0 \
+            -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback,org.jline,jline \
             -DoutputDirectory=/tmp/hive4-lib
-          ls /tmp/hive4-lib | wc -l; du -sh /tmp/hive4-lib
+          # Hadoop's Configuration needs woodstox, which the shim's provided
+          # dependencies do not bring. PR 37 has no bundled
+          # flink-sql-connector-hive-4.x jar, so this classpath is assembled
+          # by hand; the bundles for Hive 2.3.10 and 3.1.3 do this for users.
+          m=https://repo1.maven.org/maven2
+          curl -sSfL -o /tmp/hive4-lib/stax2-api.jar "$m/org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar"
+          curl -sSfL -o /tmp/hive4-lib/woodstox-core.jar "$m/com/fasterxml/woodstox/woodstox-core/5.4.0/woodstox-core-5.4.0.jar"
+          # The shim's tree resolves hadoop-common 3.3.0 next to 3.3.6 for every
+          # other Hadoop artifact; hadoop-hdfs-client 3.3.6 needs 3.3.6
+          # (org.apache.hadoop.fs.LeaseRecoverable).
+          rm -f /tmp/hive4-lib/hadoop-common-*.jar
+          curl -sSfL -o /tmp/hive4-lib/hadoop-common-3.3.6.jar "$m/org/apache/hadoop/hadoop-common/3.3.6/hadoop-common-3.3.6.jar"
+          ls /tmp/hive4-lib; du -sh /tmp/hive4-lib
 
       - name: Start the metastore
         run: |
@@ -220,11 +238,13 @@ jobs:
           sleep 1
 
       - name: Run Flink
+        timeout-minutes: 15
         run: |
+          set -o pipefail
           docker run --rm --network host --user 0 --entrypoint bash \
             -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
             -v /tmp/hive4-lib:/opt/flink/lib/hive4:ro \
-            apache/flink:2.0-preview1-java11 -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink-hive4.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -60; exit $rc' \
+            flink:2.0-preview1-java11 -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink-hive4.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -60; exit $rc' \
             | tee /tmp/census/flink.out
           ! grep -q '\[ERROR\]' /tmp/census/flink.out
 
@@ -240,6 +260,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/census/summary.txt /tmp/census/recorder.log
+          # An engine that never reached the metastore must not pass.
+          test -s /tmp/census/summary.txt || { echo "the recorder saw no calls" >&2; exit 1; }
 
       - uses: actions/upload-artifact@v7
         if: always()
