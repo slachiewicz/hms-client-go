@@ -145,3 +145,99 @@ jobs:
         with:
           name: census-${{ matrix.engine }}-hive-${{ matrix.hive }}
           path: /tmp/census/
+
+  # Flink 2.0-preview1 with the Hive 4 client from apache/flink-connector-hive
+  # PR #37 (FLINK-35515), built at a pinned commit with the PR's own two-phase
+  # build, against a Hive 4.2.1 metastore. Evidence for that PR, not a release.
+  flink-hive4-pr37:
+    name: flink-2.0-preview1 + PR 37 (Hive 4 client) on hive-4.2.1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PR_SHA: b0ac9fdbbb777a2378655a6a33e3926e0361afcf
+      MVN: mvn -B --no-transfer-progress -Dflink.version=2.0-preview1 -Dscala-2.12 -DskipTests -Drat.skip -Dcheckstyle.skip -Dspotless.check.skip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: jlalwani-amazon/flink-connector-hive
+          ref: b0ac9fdbbb777a2378655a6a33e3926e0361afcf
+          path: connector
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.2"
+          cache: true
+
+      - uses: actions/setup-java@v5
+        with:
+          java-version: 11
+          distribution: temurin
+          cache: maven
+
+      - name: Build the connector with the Hive 4 shim
+        working-directory: connector
+        run: |
+          # Phase 1 installs the shim without -Phive4 (the PR's cycle
+          # workaround); phase 2 builds the connector against it.
+          $MVN install -pl flink-connector-hive -am
+          $MVN install -pl flink-connector-hive-4.0.0 -am
+          $MVN install -pl flink-connector-hive -Phive4
+          mkdir -p /tmp/hive4-lib
+          cp flink-connector-hive/target/flink-connector-hive-*.jar flink-connector-hive-4.0.0/target/flink-connector-hive-4.0.0_2.12-*.jar /tmp/hive4-lib/
+          rm -f /tmp/hive4-lib/*-tests.jar /tmp/hive4-lib/*-sources.jar /tmp/hive4-lib/original-*.jar
+          # Hive 4 and Hadoop, minus what Flink itself provides.
+          $MVN dependency:copy-dependencies -pl flink-connector-hive -Phive4 \
+            -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback \
+            -DoutputDirectory=/tmp/hive4-lib
+          ls /tmp/hive4-lib | wc -l; du -sh /tmp/hive4-lib
+
+      - name: Start the metastore
+        run: |
+          mkdir -m 777 -p /tmp/warehouse /tmp/census
+          docker run -d --name hms -p 9084:9083 -v /tmp/warehouse:/tmp/warehouse \
+            --env SERVICE_NAME=metastore \
+            --env SERVICE_OPTS="-Dmetastore.warehouse.dir=file:///tmp/warehouse" \
+            apache/hive:4.2.1
+          for i in $(seq 1 150); do
+            if docker exec hms bash -c 'exec 3<>/dev/tcp/127.0.0.1/9083' 2>/dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker logs hms; exit 1
+
+      - name: Start the recorder
+        run: |
+          go build -o /tmp/hmsrecord ./internal/cmd/hmsrecord
+          nohup /tmp/hmsrecord -listen 0.0.0.0:9083 -upstream 127.0.0.1:9084 \
+            -out /tmp/census/calls-flink-hive4-pr37.jsonl > /tmp/census/summary.txt 2> /tmp/census/recorder.log &
+          echo $! > /tmp/census/recorder.pid
+          sleep 1
+
+      - name: Run Flink
+        run: |
+          docker run --rm --network host --user 0 --entrypoint bash \
+            -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
+            -v /tmp/hive4-lib:/opt/flink/lib/hive4:ro \
+            apache/flink:2.0-preview1-java11 -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink-hive4.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -60; exit $rc' \
+            | tee /tmp/census/flink.out
+          ! grep -q '\[ERROR\]' /tmp/census/flink.out
+
+      - name: Stop the recorder and summarise
+        if: always()
+        run: |
+          kill -TERM "$(cat /tmp/census/recorder.pid)" || true
+          sleep 2
+          {
+            echo "### flink-2.0-preview1 + PR 37 on hive-4.2.1"
+            echo '```'
+            cat /tmp/census/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/census/summary.txt /tmp/census/recorder.log
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: census-flink-hive4-pr37
+          path: /tmp/census/
