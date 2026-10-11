@@ -200,8 +200,15 @@ jobs:
           rm -f /tmp/hive4-lib/*-tests.jar /tmp/hive4-lib/*-sources.jar /tmp/hive4-lib/original-*.jar
           # Hive 4 and Hadoop, from the shim module, minus what Flink provides.
           $MVN dependency:copy-dependencies -pl flink-connector-hive-4.0.0 \
-            -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback \
+            -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback,org.jline,jline \
             -DoutputDirectory=/tmp/hive4-lib
+          # Hadoop's Configuration needs woodstox, which the shim's provided
+          # dependencies do not bring. PR 37 has no bundled
+          # flink-sql-connector-hive-4.x jar, so this classpath is assembled
+          # by hand; the bundles for Hive 2.3.10 and 3.1.3 do this for users.
+          m=https://repo1.maven.org/maven2
+          curl -sSfL -o /tmp/hive4-lib/stax2-api.jar "$m/org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar"
+          curl -sSfL -o /tmp/hive4-lib/woodstox-core.jar "$m/com/fasterxml/woodstox/woodstox-core/5.4.0/woodstox-core-5.4.0.jar"
           ls /tmp/hive4-lib; du -sh /tmp/hive4-lib
 
       - name: Start the metastore
