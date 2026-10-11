@@ -113,6 +113,57 @@ against both metastores.
   (`get_primary_keys`, `get_not_null_constraints`) for Flink; column
   statistics updates for Trino.
 
+## Flink on a Hive 4 client (flink-connector-hive PR 37)
+
+Flink 2.x has no released Hive connector.
+[apache/flink-connector-hive#37](https://github.com/apache/flink-connector-hive/pull/37)
+(FLINK-35515) adds a Hive 4 shim. The `flink-hive4-pr37` job builds it at
+`b0ac9fdbbb` and runs `flink-hive4.sql` on Flink 2.0-preview1 against
+`apache/hive:4.2.1`. In run 38145920995 every statement succeeded, through
+the Hive 4 `*_req` API:
+
+| RPC | calls |
+|---|---|
+| `get_table_req` | 57 |
+| `get_database_req` | 31 |
+| `get_not_null_constraints` | 16 |
+| `get_primary_keys` | 16 |
+| `set_ugi` | 10 |
+| `shutdown` | 10 |
+| `get_table_statistics_req` | 7 |
+| `get_partition` | 6 |
+| `alter_table_req` | 3 |
+| `create_table_req` | 3 |
+| `drop_table_with_environment_context` | 3 |
+| `get_function` | 3 |
+| `add_partition_with_environment_context` | 2 |
+| `get_all_tables` | 2 |
+| `get_partitions_by_names_req` | 2 |
+| `create_database` | 1 |
+| `create_function` | 1 |
+| `drop_database_req` | 1 |
+| `drop_function` | 1 |
+| `get_databases` | 1 |
+| `get_functions` | 1 |
+| `get_part_specs_by_filter` | 1 |
+| `get_partition_names` | 1 |
+| `get_partitions_statistics_req` | 1 |
+| `get_table_objects_by_name_req` | 1 |
+| `get_tables_by_type` | 1 |
+
+Getting there took three classpath fixes, each a gap in the PR as built:
+
+- The PR has no bundled `flink-sql-connector-hive-4.x` jar, unlike the
+  2.3.10 and 3.1.3 lines, so the runtime classpath is assembled from the shim
+  module's dependencies by hand.
+- That dependency tree resolves `hadoop-common` 3.3.0 next to 3.3.6 for every
+  other Hadoop artifact; catalog creation then fails with
+  `NoClassDefFoundError: org/apache/hadoop/fs/LeaseRecoverable`.
+- Packaging the connector with `-Phive4` hangs in maven-shade-plugin's
+  dependency-reduced POM. The PR's CI only runs `mvn test`, so it does not
+  reach that step; the job builds without `-Phive4` and puts the shim next to
+  the connector, which loads it by reflection.
+
 ## Not covered yet
 
 - A Hive 2.3 metastore.
