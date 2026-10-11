@@ -1001,17 +1001,149 @@ func rawClient(t *testing.T) *hive_metastore.ThriftHiveMetastoreClient {
 	return hive_metastore.NewThriftHiveMetastoreClient(conn.Client)
 }
 
-// TestColumnStatistics_PerEngine writes statistics for one column under the
-// "spark" engine and then under "hive", and reads them back through both
-// read methods (SPEC §5.8). Hive 4 keeps a set per engine, so each method
-// sees its own; 2.3 and 3.1 have no engine field, drop it on the wire, and
-// keep one set, so both methods see the last write.
+// statsColumn is one column of TestColumnStatistics_PerEngine's table: its
+// Hive type, the statistics written for it (numNulls varies by engine, so
+// the engines' sets are told apart), and what the client must read back.
+type statsColumn struct {
+	name, typ string
+	// hive4Only marks a statistics type older servers cannot decode:
+	// timestamp statistics are the union's 8th arm, added in Hive 4.
+	hive4Only bool
+	wire      func(data *hive_metastore.ColumnStatisticsData, numNulls int64)
+	want      func(numNulls int64) hms.ColumnStatistics
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// statsColumns covers every arm of ColumnStatisticsData. Values are exact
+// in binary and decimal alike, so a round trip through the metastore's
+// database compares equal.
+func statsColumns() []statsColumn {
+	day := time.Date(2022, 1, 8, 0, 0, 0, 0, time.UTC) // 19000 days after the epoch
+	return []statsColumn{
+		{
+			name: "b", typ: "boolean",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				d.BooleanStats = &hive_metastore.BooleanColumnStatsData{NumTrues: 3, NumFalses: 4, NumNulls: n}
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Boolean: &hms.BooleanColumnStats{NumTrues: 3, NumFalses: 4, NumNulls: n}}
+			},
+		},
+		{
+			name: "l", typ: "bigint",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				x := hive_metastore.NewLongColumnStatsData()
+				x.LowValue, x.HighValue, x.NumNulls, x.NumDVs = ptr(int64(-5)), ptr(int64(100)), n, 10
+				d.LongStats = x
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Long: &hms.LongColumnStats{LowValue: ptr(int64(-5)), HighValue: ptr(int64(100)), NumNulls: n, NumDistinct: 10}}
+			},
+		},
+		{
+			name: "d", typ: "double",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				x := hive_metastore.NewDoubleColumnStatsData()
+				x.LowValue, x.HighValue, x.NumNulls, x.NumDVs = ptr(0.5), ptr(99.25), n, 11
+				d.DoubleStats = x
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Double: &hms.DoubleColumnStats{LowValue: ptr(0.5), HighValue: ptr(99.25), NumNulls: n, NumDistinct: 11}}
+			},
+		},
+		{
+			name: "s", typ: "string",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				d.StringStats = &hive_metastore.StringColumnStatsData{MaxColLen: 20, AvgColLen: 5.5, NumNulls: n, NumDVs: 12}
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{String: &hms.StringColumnStats{MaxColLen: 20, AvgColLen: 5.5, NumNulls: n, NumDistinct: 12}}
+			},
+		},
+		{
+			name: "bin", typ: "binary",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				d.BinaryStats = &hive_metastore.BinaryColumnStatsData{MaxColLen: 64, AvgColLen: 32.5, NumNulls: n}
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Binary: &hms.BinaryColumnStats{MaxColLen: 64, AvgColLen: 32.5, NumNulls: n}}
+			},
+		},
+		{
+			// 12.34 and 98.76: unscaled 1234 and 9876, no trailing zeros
+			// for the server to normalise away.
+			name: "dec", typ: "decimal(10,2)",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				x := hive_metastore.NewDecimalColumnStatsData()
+				x.LowValue = &hive_metastore.Decimal{Unscaled: []byte{0x04, 0xD2}, Scale: 2}
+				x.HighValue = &hive_metastore.Decimal{Unscaled: []byte{0x26, 0x94}, Scale: 2}
+				x.NumNulls, x.NumDVs = n, 13
+				d.DecimalStats = x
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Decimal: &hms.DecimalColumnStats{
+					LowValue:  &hms.Decimal{Unscaled: []byte{0x04, 0xD2}, Scale: 2},
+					HighValue: &hms.Decimal{Unscaled: []byte{0x26, 0x94}, Scale: 2},
+					NumNulls:  n, NumDistinct: 13,
+				}}
+			},
+		},
+		{
+			name: "dt", typ: "date",
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				x := hive_metastore.NewDateColumnStatsData()
+				x.LowValue, x.HighValue = &hive_metastore.Date{DaysSinceEpoch: 19000}, &hive_metastore.Date{DaysSinceEpoch: 19010}
+				x.NumNulls, x.NumDVs = n, 14
+				d.DateStats = x
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Date: &hms.DateColumnStats{LowValue: ptr(day), HighValue: ptr(day.AddDate(0, 0, 10)), NumNulls: n, NumDistinct: 14}}
+			},
+		},
+		{
+			name: "ts", typ: "timestamp", hive4Only: true,
+			wire: func(d *hive_metastore.ColumnStatisticsData, n int64) {
+				x := hive_metastore.NewTimestampColumnStatsData()
+				x.LowValue, x.HighValue = &hive_metastore.Timestamp{SecondsSinceEpoch: 1700000000}, &hive_metastore.Timestamp{SecondsSinceEpoch: 1700003600}
+				x.NumNulls, x.NumDVs = n, 15
+				d.TimestampStats = x
+			},
+			want: func(n int64) hms.ColumnStatistics {
+				return hms.ColumnStatistics{Timestamp: &hms.TimestampColumnStats{
+					LowValue: ptr(time.Unix(1700000000, 0).UTC()), HighValue: ptr(time.Unix(1700003600, 0).UTC()),
+					NumNulls: n, NumDistinct: 15,
+				}}
+			},
+		},
+	}
+}
+
+// TestColumnStatistics_PerEngine writes statistics for a column of every
+// statistics type, under the "spark" engine and then under "hive", and reads
+// them back through both read methods (SPEC §5.8). Hive 4 keeps a set per
+// engine, so each method sees its own; 2.3 and 3.1 have no engine field,
+// drop it on the wire, and keep one set, so both methods see the last write.
 func TestColumnStatistics_PerEngine(t *testing.T) {
 	t.Parallel()
 	c := dial(t)
 	raw := rawClient(t)
 	_, expectVersion := requireHMSEnv(t)
+	hive4 := expectVersion == "4.0" || expectVersion == "4.2"
 	ctx := context.Background()
+
+	cols := statsColumns()
+	var schema []*hms.FieldSchema
+	var names []string
+	var written []statsColumn
+	for _, col := range cols {
+		schema = append(schema, &hms.FieldSchema{Name: col.name, Type: col.typ})
+		if col.hive4Only && !hive4 {
+			continue
+		}
+		names = append(names, col.name)
+		written = append(written, col)
+	}
 
 	dbName := uniqueName("it_statsdb_")
 	createDB(t, c, ctx, dbName, "")
@@ -1020,24 +1152,23 @@ func TestColumnStatistics_PerEngine(t *testing.T) {
 		DatabaseName: dbName,
 		TableName:    tableName,
 		TableType:    hms.TableTypeManaged,
-		Storage:      textStorage("file:///tmp/"+dbName+"/"+tableName, []*hms.FieldSchema{{Name: "id", Type: "bigint"}}),
+		Storage:      textStorage("file:///tmp/"+dbName+"/"+tableName, schema),
 	}))
 
 	write := func(engine string, numNulls int64) {
 		t.Helper()
-		long := hive_metastore.NewLongColumnStatsData()
-		long.NumNulls = numNulls
-		long.NumDVs = 10
-		low, high := int64(1), int64(100)
-		long.LowValue, long.HighValue = &low, &high
-		data := hive_metastore.NewColumnStatisticsData()
-		data.LongStats = long
-		obj := hive_metastore.NewColumnStatisticsObj()
-		obj.ColName, obj.ColType, obj.StatsData = "id", "bigint", data
+		objs := make([]*hive_metastore.ColumnStatisticsObj, 0, len(written))
+		for _, col := range written {
+			data := hive_metastore.NewColumnStatisticsData()
+			col.wire(data, numNulls)
+			obj := hive_metastore.NewColumnStatisticsObj()
+			obj.ColName, obj.ColType, obj.StatsData = col.name, col.typ, data
+			objs = append(objs, obj)
+		}
 		desc := hive_metastore.NewColumnStatisticsDesc()
 		desc.IsTblLevel, desc.DbName, desc.TableName = true, dbName, tableName
 		stats := hive_metastore.NewColumnStatistics()
-		stats.StatsDesc, stats.StatsObj, stats.Engine = desc, []*hive_metastore.ColumnStatisticsObj{obj}, engine
+		stats.StatsDesc, stats.StatsObj, stats.Engine = desc, objs, engine
 		ok, err := raw.UpdateTableColumnStatistics(ctx, stats)
 		require.NoError(t, err, "writing %s statistics", engine)
 		require.True(t, ok)
@@ -1045,26 +1176,36 @@ func TestColumnStatistics_PerEngine(t *testing.T) {
 	write("spark", 7)
 	write("hive", 1)
 
-	numNulls := func(stats []hms.ColumnStatistics) int64 {
+	// check compares one read against the statistics written with
+	// numNulls, column by column, ignoring the server's order.
+	check := func(label string, got []hms.ColumnStatistics, numNulls int64) {
 		t.Helper()
-		require.Len(t, stats, 1)
-		require.NotNil(t, stats[0].Long)
-		assert.Equal(t, "id", stats[0].ColumnName)
-		return stats[0].Long.NumNulls
+		byName := make(map[string]hms.ColumnStatistics, len(got))
+		for _, st := range got {
+			byName[st.ColumnName] = st
+		}
+		assert.Len(t, got, len(written), label)
+		for _, col := range written {
+			want := col.want(numNulls)
+			want.ColumnName, want.ColumnType = col.name, col.typ
+			assert.Equal(t, want, byName[col.name], "%s: column %s (%s)", label, col.name, col.typ)
+		}
 	}
-	hive, err := c.GetTableColumnStatistics(ctx, dbName, tableName, []string{"id"})
+
+	hive, err := c.GetTableColumnStatistics(ctx, dbName, tableName, names)
 	require.NoError(t, err)
-	spark, err := c.GetTableColumnStatisticsForEngine(ctx, dbName, tableName, "spark", []string{"id"})
+	spark, err := c.GetTableColumnStatisticsForEngine(ctx, dbName, tableName, "spark", names)
 	require.NoError(t, err)
-	absent, err := c.GetTableColumnStatisticsForEngine(ctx, dbName, tableName, "impala", []string{"id"})
+	absent, err := c.GetTableColumnStatisticsForEngine(ctx, dbName, tableName, "impala", names)
 	require.NoError(t, err)
 
-	assert.Equal(t, int64(1), numNulls(hive))
-	if expectVersion == "4.0" || expectVersion == "4.2" {
-		assert.Equal(t, int64(7), numNulls(spark), "Hive 4 keeps the spark engine's set apart")
+	check("hive", hive, 1)
+	if hive4 {
+		check("spark", spark, 7)
 		assert.Empty(t, absent, "no statistics were written under impala")
 		return
 	}
-	assert.Equal(t, int64(1), numNulls(spark), "pre-4 servers keep one engine-less set")
-	assert.Equal(t, int64(1), numNulls(absent))
+	// Pre-4 servers keep one engine-less set: the last write.
+	check("spark", spark, 1)
+	check("impala", absent, 1)
 }

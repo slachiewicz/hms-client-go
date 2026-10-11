@@ -248,7 +248,7 @@ The security audit's two deferred units.
 - [x] Fuzz targets `FuzzVerifyAPRep`, `FuzzUnwrap`, `FuzzKDCReply` (seeds run in `go test`; 60 s each locally found nothing after the fix). `TestKerberosSessionCloseWaitsForAbandonedAcquisition`.
 
 ### Slice 20: per-engine statistics against real servers (2026-10-11)
-- [x] `TestColumnStatistics_PerEngine`: writes `spark` then `hive` statistics through the generated client (`rawClient`, since §5.8 is read-only) and reads them back with both methods. Hive 4 keeps the sets apart; 2.3 and 3.1 keep the last write. Runs on the plain binary and HTTP legs; the TLS and Kerberos legs skip it.
+- [x] `TestColumnStatistics_PerEngine`: writes `spark` then `hive` statistics for a column of every statistics type (boolean, bigint, double, string, binary, decimal, date; timestamp on 4.x only, the union arm Hive 4 added) through the generated client (`rawClient`, since §5.8 is read-only) and compares each column's read-back field by field, through both methods. Hive 4 keeps the sets apart; 2.3 and 3.1 keep the last write. Runs on the plain binary and HTTP legs; the TLS and Kerberos legs skip it.
 
 ### Open follow-ups (not blocking 1.0)
 - gokrb5's own session-renewal goroutine decrypts KDC replies where the client cannot recover a panic; that path waits on jcmturner/gokrb5#580 (or a fork).
