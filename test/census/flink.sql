@@ -32,4 +32,5 @@ DROP FUNCTION census_upper;
 DROP VIEW v;
 DROP TABLE plain2;
 DROP TABLE parted;
+USE `default`;
 DROP DATABASE census CASCADE;
