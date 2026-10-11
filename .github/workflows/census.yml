@@ -1,0 +1,248 @@
+name: census
+# Records which metastore RPCs each engine issues for ordinary DDL and DML,
+# by running it against a real metastore through internal/cmd/hmsrecord.
+# The call lists are the requirements for a lightweight Go metastore.
+# Results and their reading: test/census/README.md.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  census:
+    name: ${{ matrix.engine }} on hive-${{ matrix.hive }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        hive: ["3.1.3", "4.2.1"]
+        engine: [spark-3.5, spark-4.2, trino, flink]
+        include:
+          - engine: spark-3.5
+            image: apache/spark:3.5.9-scala2.12-java17-python3-r-ubuntu
+          - engine: spark-4.2
+            image: apache/spark:4.2.0-java17
+          - engine: trino
+            image: trinodb/trino:483
+          - engine: flink
+            # Flink 2.x has no Hive connector; 1.20 is the last line with one.
+            image: flink:1.20.5-java11
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.2"
+          cache: true
+
+      - name: Start the metastore
+        run: |
+          # The warehouse is a host directory mounted at the same path in the
+          # metastore and the engine, so file:/// locations resolve in both.
+          # Every container runs as uid 1000, the image's hive user, so the
+          # metastore can delete what the engine wrote.
+          mkdir -m 777 -p /tmp/warehouse /tmp/census
+          docker run -d --name hms -p 9084:9083 -v /tmp/warehouse:/tmp/warehouse \
+            --env SERVICE_NAME=metastore \
+            --env SERVICE_OPTS="-Dmetastore.warehouse.dir=file:///tmp/warehouse" \
+            "apache/hive:${{ matrix.hive }}"
+          for i in $(seq 1 150); do
+            if docker exec hms bash -c 'exec 3<>/dev/tcp/127.0.0.1/9083' 2>/dev/null; then
+              echo "metastore is listening (after $((i*2))s)"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs hms; exit 1
+
+      - name: Start the recorder
+        run: |
+          go build -o /tmp/hmsrecord ./internal/cmd/hmsrecord
+          nohup /tmp/hmsrecord -listen 0.0.0.0:9083 -upstream 127.0.0.1:9084 \
+            -out "/tmp/census/calls-${{ matrix.engine }}.jsonl" > /tmp/census/summary.txt 2> /tmp/census/recorder.log &
+          echo $! > /tmp/census/recorder.pid
+          sleep 1
+
+      - name: Run Spark
+        if: startsWith(matrix.engine, 'spark')
+        run: |
+          # Spark's built-in Hive 2.3 client reads tables with get_table,
+          # which a Hive 4 metastore no longer serves ("Invalid method name"),
+          # so against Hive 4 use the newest client each Spark line supports.
+          HIVE_CLIENT_CONF=""
+          case "${{ matrix.hive }}/${{ matrix.engine }}" in
+            4.*/spark-3.5) HIVE_CLIENT_CONF="--conf spark.sql.hive.metastore.version=3.1.3 --conf spark.sql.hive.metastore.jars=maven" ;;
+            4.*/spark-4.*) HIVE_CLIENT_CONF="--conf spark.sql.hive.metastore.version=4.0.1 --conf spark.sql.hive.metastore.jars=maven" ;;
+          esac
+          # As root, with Hadoop's own umask (fs.permissions.umask-mode, which
+          # the shell's umask does not reach) at 000, as for Flink below: uid
+          # 1000 has no passwd entry in the Spark image, which Hadoop's login
+          # refuses, and the metastore (uid 1000) must still be able to delete
+          # what Spark writes.
+          docker run --rm --network host --user 0 --entrypoint bash \
+            -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
+            "${{ matrix.image }}" -c 'umask 0 && exec /opt/spark/bin/spark-sql --master "local[2]" \
+              --conf spark.sql.catalogImplementation=hive \
+              --conf spark.hadoop.hive.metastore.uris=thrift://127.0.0.1:9083 \
+              --conf spark.sql.warehouse.dir=file:///tmp/warehouse \
+              --conf spark.hadoop.fs.permissions.umask-mode=000 \
+              '"$HIVE_CLIENT_CONF"' \
+              -f /census/spark.sql'
+
+      - name: Run Trino
+        if: matrix.engine == 'trino'
+        run: |
+          docker run -d --name trino --network host --user 1000 \
+            -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
+            -v "$PWD/test/census/trino-hive.properties:/etc/trino/catalog/hive.properties:ro" \
+            "${{ matrix.image }}"
+          for i in $(seq 1 90); do
+            docker exec trino trino --execute 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec trino trino -f /census/trino.sql
+
+      - name: Run Flink
+        if: matrix.engine == 'flink'
+        run: |
+          # The Hive connector needs Hadoop on the classpath; the shaded
+          # hadoop-client jars are enough for a file:/// warehouse. Flink
+          # runs as root under umask 0, so the metastore (uid 1000) can
+          # still delete the partition directories Flink creates.
+          mkdir -p /tmp/flink-lib
+          base=https://repo1.maven.org/maven2/org/apache
+          curl -sSfL -o /tmp/flink-lib/flink-sql-connector-hive.jar \
+            "$base/flink/flink-sql-connector-hive-3.1.3_2.12/1.20.5/flink-sql-connector-hive-3.1.3_2.12-1.20.5.jar"
+          curl -sSfL -o /tmp/flink-lib/hadoop-client-api.jar "$base/hadoop/hadoop-client-api/3.3.6/hadoop-client-api-3.3.6.jar"
+          curl -sSfL -o /tmp/flink-lib/hadoop-client-runtime.jar "$base/hadoop/hadoop-client-runtime/3.3.6/hadoop-client-runtime-3.3.6.jar"
+          curl -sSfL -o /tmp/flink-lib/commons-logging.jar "https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar"
+          docker run --rm --network host --user 0 --entrypoint bash \
+            -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
+            -v /tmp/flink-lib/flink-sql-connector-hive.jar:/opt/flink/lib/flink-sql-connector-hive.jar:ro \
+            -v /tmp/flink-lib/hadoop-client-api.jar:/opt/flink/lib/hadoop-client-api.jar:ro \
+            -v /tmp/flink-lib/hadoop-client-runtime.jar:/opt/flink/lib/hadoop-client-runtime.jar:ro \
+            -v /tmp/flink-lib/commons-logging.jar:/opt/flink/lib/commons-logging.jar:ro \
+            "${{ matrix.image }}" -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -40; exit $rc' \
+            | tee /tmp/census/flink.out
+          # sql-client exits 0 even when a statement fails.
+          ! grep -q '\[ERROR\]' /tmp/census/flink.out
+
+      - name: Stop the recorder and summarise
+        if: always()
+        run: |
+          kill -TERM "$(cat /tmp/census/recorder.pid)" || true
+          sleep 2
+          {
+            echo "### ${{ matrix.engine }} on hive-${{ matrix.hive }}"
+            echo '```'
+            cat /tmp/census/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/census/summary.txt /tmp/census/recorder.log
+
+      - name: Engine and metastore logs on failure
+        if: failure()
+        run: |
+          docker logs trino 2>&1 | tail -100 || true
+          docker logs hms 2>&1 | tail -100 || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: census-${{ matrix.engine }}-hive-${{ matrix.hive }}
+          path: /tmp/census/
+
+  # Flink 2.0-preview1 with the Hive 4 client from apache/flink-connector-hive
+  # PR #37 (FLINK-35515), built at a pinned commit with the PR's own two-phase
+  # build, against a Hive 4.2.1 metastore. Evidence for that PR, not a release.
+  flink-hive4-pr37:
+    name: flink-2.0-preview1 + PR 37 (Hive 4 client) on hive-4.2.1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PR_SHA: b0ac9fdbbb777a2378655a6a33e3926e0361afcf
+      MVN: mvn -B --no-transfer-progress -Dflink.version=2.0-preview1 -Dscala-2.12 -DskipTests -Drat.skip -Dcheckstyle.skip -Dspotless.check.skip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: jlalwani-amazon/flink-connector-hive
+          ref: b0ac9fdbbb777a2378655a6a33e3926e0361afcf
+          path: connector
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.2"
+          cache: true
+
+      - uses: actions/setup-java@v5
+        with:
+          java-version: 11
+          distribution: temurin
+          cache: maven
+
+      - name: Build the connector with the Hive 4 shim
+        working-directory: connector
+        run: |
+          # Phase 1 installs the shim without -Phive4 (the PR's cycle
+          # workaround); phase 2 builds the connector against it.
+          $MVN install -pl flink-connector-hive -am
+          $MVN install -pl flink-connector-hive-4.0.0 -am
+          $MVN install -pl flink-connector-hive -Phive4
+          mkdir -p /tmp/hive4-lib
+          cp flink-connector-hive/target/flink-connector-hive-*.jar flink-connector-hive-4.0.0/target/flink-connector-hive-4.0.0_2.12-*.jar /tmp/hive4-lib/
+          rm -f /tmp/hive4-lib/*-tests.jar /tmp/hive4-lib/*-sources.jar /tmp/hive4-lib/original-*.jar
+          # Hive 4 and Hadoop, minus what Flink itself provides.
+          $MVN dependency:copy-dependencies -pl flink-connector-hive -Phive4 \
+            -DincludeScope=compile -DexcludeGroupIds=org.apache.flink,org.slf4j,org.apache.logging.log4j,log4j,ch.qos.logback \
+            -DoutputDirectory=/tmp/hive4-lib
+          ls /tmp/hive4-lib | wc -l; du -sh /tmp/hive4-lib
+
+      - name: Start the metastore
+        run: |
+          mkdir -m 777 -p /tmp/warehouse /tmp/census
+          docker run -d --name hms -p 9084:9083 -v /tmp/warehouse:/tmp/warehouse \
+            --env SERVICE_NAME=metastore \
+            --env SERVICE_OPTS="-Dmetastore.warehouse.dir=file:///tmp/warehouse" \
+            apache/hive:4.2.1
+          for i in $(seq 1 150); do
+            if docker exec hms bash -c 'exec 3<>/dev/tcp/127.0.0.1/9083' 2>/dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker logs hms; exit 1
+
+      - name: Start the recorder
+        run: |
+          go build -o /tmp/hmsrecord ./internal/cmd/hmsrecord
+          nohup /tmp/hmsrecord -listen 0.0.0.0:9083 -upstream 127.0.0.1:9084 \
+            -out /tmp/census/calls-flink-hive4-pr37.jsonl > /tmp/census/summary.txt 2> /tmp/census/recorder.log &
+          echo $! > /tmp/census/recorder.pid
+          sleep 1
+
+      - name: Run Flink
+        run: |
+          docker run --rm --network host --user 0 --entrypoint bash \
+            -v /tmp/warehouse:/tmp/warehouse -v "$PWD/test/census:/census:ro" \
+            -v /tmp/hive4-lib:/opt/flink/lib/hive4:ro \
+            apache/flink:2.0-preview1-java11 -c 'umask 0 && /opt/flink/bin/start-cluster.sh && /opt/flink/bin/sql-client.sh -f /census/flink-hive4.sql; rc=$?; cat /opt/flink/log/*.log | grep -iE "error|exception" | head -60; exit $rc' \
+            | tee /tmp/census/flink.out
+          ! grep -q '\[ERROR\]' /tmp/census/flink.out
+
+      - name: Stop the recorder and summarise
+        if: always()
+        run: |
+          kill -TERM "$(cat /tmp/census/recorder.pid)" || true
+          sleep 2
+          {
+            echo "### flink-2.0-preview1 + PR 37 on hive-4.2.1"
+            echo '```'
+            cat /tmp/census/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/census/summary.txt /tmp/census/recorder.log
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: census-flink-hive4-pr37
+          path: /tmp/census/
