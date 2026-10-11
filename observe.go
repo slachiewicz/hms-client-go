@@ -67,11 +67,9 @@ func WithRPCObserver(f func(RPCInfo)) Option {
 }
 
 // endpointURI returns ep's URI as reported in RPCInfo.Endpoint and in log
-// records: the full URL for the Thrift-over-HTTP transport, ep.Host
-// (host:port) for the binary Thrift transport.
+// records: the full URL, with any userinfo password masked, for the
+// Thrift-over-HTTP transport; ep.Host (host:port) for the binary Thrift
+// transport.
 func endpointURI(ep transport.Endpoint) string {
-	if ep.URL != "" {
-		return ep.URL
-	}
-	return ep.Host
+	return ep.Redacted()
 }

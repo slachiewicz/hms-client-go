@@ -9,6 +9,52 @@ import (
 	"github.com/slachiewicz/hms-client-go/internal/transport"
 )
 
+// TestParseEndpoints_ErrorsOmitPassword covers that no ParseEndpoints error
+// echoes a URI's userinfo password, since callers commonly log New's error.
+func TestParseEndpoints_ErrorsOmitPassword(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cret-dummy"
+	tests := []struct {
+		name    string
+		in      string
+		wantErr string
+	}{
+		{"unparseable", "http://svc:" + secret + "@host:port/x", "parse endpoint #1"},
+		{"bad scheme", "ftp://svc:" + secret + "@host", "unsupported scheme"},
+		{"mixed schemes", "http://svc:" + secret + "@a,thrift://b", "mixed schemes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := transport.ParseEndpoints(tt.in)
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
+
+func TestEndpointRedacted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"thrift host", "thrift://hms1", "hms1:9083"},
+		{"http without userinfo", "http://hms1:8080", "http://hms1:8080/metastore"},
+		{"http with password", "https://svc:pw@hms1/m", "https://svc:xxxxx@hms1/m"},
+		{"http user only", "https://svc@hms1/m", "https://svc@hms1/m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			eps, err := transport.ParseEndpoints(tt.in)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, eps[0].Redacted())
+		})
+	}
+}
+
 func TestParseEndpoints(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

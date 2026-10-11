@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -255,4 +257,43 @@ func TestWithLogger_NilIsSafe(t *testing.T) {
 
 	_, err := c.GetAllDatabases(context.Background())
 	require.NoError(t, err)
+}
+
+// TestObserver_RedactsEndpointPassword covers SPEC §5.10's promise that
+// neither WithLogger nor WithRPCObserver ever sees credentials: an HTTP
+// endpoint URI's userinfo password, which net/http sends as Basic auth,
+// is masked in log records and in RPCInfo.Endpoint.
+func TestObserver_RedactsEndpointPassword(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cret-dummy"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(ts.Close)
+	uri := strings.Replace(ts.URL, "http://", "http://svc:"+secret+"@", 1)
+
+	var logs syncBuffer
+	var mu sync.Mutex
+	var endpoints []string
+	c := mustNew(t, uri,
+		hms.WithMaxRetries(1),
+		hms.WithLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
+		hms.WithRPCObserver(func(info hms.RPCInfo) {
+			mu.Lock()
+			defer mu.Unlock()
+			endpoints = append(endpoints, info.Endpoint)
+		}))
+
+	_, err := c.GetAllDatabases(context.Background())
+	require.Error(t, err)
+
+	assert.Contains(t, logs.String(), "endpoint marked failed")
+	assert.NotContains(t, logs.String(), secret)
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, endpoints)
+	for _, ep := range endpoints {
+		assert.NotContains(t, ep, secret)
+		assert.Contains(t, ep, "svc:xxxxx@")
+	}
 }

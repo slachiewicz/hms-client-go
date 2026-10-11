@@ -42,6 +42,9 @@ type config struct {
 	// Rule 5), separate from chunkSize (GetTables, GetPartitionsByNames and
 	// their Seq forms): see WithPartitionBatchSize.
 	partitionBatchSize int
+	// maxResponseBytes caps one reply's wire size (WithMaxResponseBytes);
+	// zero selects transport.DefaultMaxResponseBytes.
+	maxResponseBytes int64
 
 	httpClient  *http.Client
 	httpHeaders map[string]string
@@ -243,6 +246,17 @@ func WithChunkSize(n int) Option {
 // clamped to 1.
 func WithPartitionBatchSize(n int) Option {
 	return func(c *config) { c.partitionBatchSize = n }
+}
+
+// WithMaxResponseBytes caps the bytes a single reply may occupy on the wire,
+// over either transport (SPEC §3.1, §5.1). A reply over the cap fails with
+// ErrMeta and its connection is discarded. The default, and the value a
+// limit below 1 selects, is 100 MiB, the Java client's
+// thrift.max.message.size. Decoded replies take more memory than their
+// wire size -- a list of empty structs can take a few hundred times more --
+// so lower it when the server is not fully trusted.
+func WithMaxResponseBytes(n int64) Option {
+	return func(c *config) { c.maxResponseBytes = n }
 }
 
 // WithHTTPClient sets the *http.Client used for the "http://" and "https://"

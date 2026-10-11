@@ -415,9 +415,14 @@ func (c *Client) release(idx int, cn *conn) {
 // after an error that leaves the connection's state unknown
 // (ErrUnavailable).
 func (c *Client) discard(idx int, cn *conn) {
+	c.discardWith(idx, cn, "unavailable")
+}
+
+// discardWith is discard with the reason it logs.
+func (c *Client) discardWith(idx int, cn *conn, reason string) {
 	_ = cn.close()
 	c.pools[idx].live.Add(-1)
-	c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", "unavailable")
+	c.cfg.logger.Debug("conn discarded", "endpoint", endpointURI(c.endpoints[idx]), "reason", reason)
 }
 
 // call runs fn as a non-idempotent RPC (create_*, add_partitions*, drop_*,
@@ -456,7 +461,8 @@ func (c *Client) read(ctx context.Context, op string, fn func(ctx context.Contex
 //
 // Two further decisions are made separately. Whether the conn
 // is discarded rather than released back to its pool depends only on
-// whether classify(err) is ErrUnavailable: the connection's state on the
+// whether classify(err) is ErrUnavailable, or the reply failed to decode
+// partway through (isProtocolError): the connection's state on the
 // wire is unknown regardless of why fn failed, including when fn failed
 // because ctx was cancelled or its deadline passed mid-RPC -- releasing it
 // in that case would hand the next caller a conn with a half-read response
@@ -537,8 +543,15 @@ func (c *Client) do(ctx context.Context, op string, idempotent bool, fn func(ctx
 			// The endpoint answered -- with a MetaException, a
 			// NoSuchObjectException, whatever fn asked for -- so it is
 			// healthy however unwelcome the answer was; a cooling
-			// endpoint that answers this way has recovered.
-			c.release(idx, cn)
+			// endpoint that answers this way has recovered. A reply
+			// that failed to decode partway through (isProtocolError)
+			// still counts as an answer, but the rest of it is unread
+			// on the wire, so that conn is discarded, not pooled.
+			if isProtocolError(err) {
+				c.discardWith(idx, cn, "protocol error")
+			} else {
+				c.release(idx, cn)
+			}
 			c.markHealthy(idx, op)
 		}
 		return wrapError(op, err)
@@ -940,7 +953,12 @@ func (c *Client) warehouseRoot(ctx context.Context, cn *conn, cat *string) (stri
 		if err != nil {
 			return "", err
 		}
-		base = resp.Catalog.LocationUri
+		// catalog is not required in the IDL, so a reply may omit it; an
+		// empty base is then reported by CreateDatabase like any other
+		// unknown warehouse root.
+		if resp.Catalog != nil {
+			base = resp.Catalog.LocationUri
+		}
 	} else {
 		v, err := cn.getConfigValue(ctx, "hive.metastore.warehouse.dir", "")
 		if err != nil {

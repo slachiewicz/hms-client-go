@@ -39,6 +39,10 @@ type BinaryConfig struct {
 	// authentication, mutually exclusive with PlainUser. See DialBinary
 	// and NewSaslGSSAPI.
 	Kerberos *KerberosConfig
+	// MaxResponseBytes caps the bytes one reply may occupy on the wire;
+	// a reply over it fails with a SIZE_LIMIT TProtocolException. Zero or
+	// less selects DefaultMaxResponseBytes.
+	MaxResponseBytes int64
 }
 
 // Conn is an open connection to a metastore, ready to bind to a generated
@@ -167,7 +171,11 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 	// completeness -- TSocket applies it in Open(), which is never called
 	// on this TSocket (it is constructed from an already connected conn),
 	// so the dial timeout is the net.Dialer's above.
-	tcfg := &thrift.TConfiguration{SocketTimeout: 0, ConnectTimeout: cfg.ConnectTimeout}
+	tcfg := &thrift.TConfiguration{
+		SocketTimeout:  0,
+		ConnectTimeout: cfg.ConnectTimeout,
+		MaxMessageSize: maxMessageSize(cfg.MaxResponseBytes),
+	}
 	var trans thrift.TTransport = thrift.NewTSocketFromConnConf(deadlineShield{conn}, tcfg)
 
 	var sasl SaslTransport
@@ -207,7 +215,7 @@ func DialBinary(ctx context.Context, hostPort string, cfg BinaryConfig) (*Conn, 
 		}
 		trans = sasl
 	}
-	trans = thrift.NewTBufferedTransport(trans, bufferSize)
+	trans = newBudgetTransport(thrift.NewTBufferedTransport(trans, bufferSize), cfg.MaxResponseBytes)
 	proto := thrift.NewTBinaryProtocolConf(trans, tcfg)
 	std := thrift.NewTStandardClient(proto, proto)
 	return &Conn{

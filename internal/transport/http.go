@@ -39,6 +39,9 @@ type HTTPConfig struct {
 	Headers map[string]string
 	// UserAgent sets the "User-Agent" header.
 	UserAgent string
+	// MaxResponseBytes caps the bytes one reply may occupy, as
+	// BinaryConfig.MaxResponseBytes does.
+	MaxResponseBytes int64
 }
 
 // NewHTTP opens a Thrift-over-HTTP connection to rawURL. The returned
@@ -78,8 +81,8 @@ func NewHTTP(_ context.Context, rawURL string, cfg HTTPConfig) (*Conn, error) {
 	for k, v := range cfg.Headers {
 		setHeader(h, k, v)
 	}
-	tcfg := &thrift.TConfiguration{}
-	proto := thrift.NewTBinaryProtocolConf(t, tcfg)
+	tcfg := &thrift.TConfiguration{MaxMessageSize: maxMessageSize(cfg.MaxResponseBytes)}
+	proto := thrift.NewTBinaryProtocolConf(newBudgetTransport(t, cfg.MaxResponseBytes), tcfg)
 	return &Conn{Client: thrift.NewTStandardClient(proto, proto), Close: t.Close}, nil
 }
 

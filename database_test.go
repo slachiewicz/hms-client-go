@@ -112,6 +112,22 @@ func TestCreateDatabase_CachesWarehouseRoot(t *testing.T) {
 	assert.Equal(t, 1, n, "the warehouse root must be resolved once and cached, not once per CreateDatabase call")
 }
 
+// TestCreateDatabase_CatalogWithoutBody covers a get_catalog reply whose
+// catalog field is absent, which the IDL allows: CreateDatabase reports an
+// unknown warehouse root instead of dereferencing the missing catalog.
+func TestCreateDatabase_CatalogWithoutBody(t *testing.T) {
+	t.Parallel()
+	srv := hmstest.Start(t, hmstest.Hive40)
+	// Before any client connects, so no handler reads the map concurrently.
+	srv.Store().Catalogs["hive"] = nil
+	c := mustNew(t, srv.URI())
+
+	var err error
+	require.NotPanics(t, func() { err = c.CreateDatabase(context.Background(), &hms.Database{Name: "d"}) })
+	require.ErrorIs(t, err, hms.ErrInvalidOperation)
+	assert.ErrorContains(t, err, "warehouse dir is unknown")
+}
+
 // TestAlterDatabase_PreservesUnmodelledFields covers G3/SPEC §5.4's
 // round-trip fidelity guarantee for Database (finding 3 of the Task 3
 // review): before Database.raw existed, databaseToThrift always built a

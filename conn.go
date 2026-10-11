@@ -149,22 +149,24 @@ func newConn(ctx context.Context, ep transport.Endpoint, cfg *config) (outConn *
 	switch ep.Scheme {
 	case transport.SchemeThrift:
 		tc, err = transport.DialBinary(ctx, ep.Host, transport.BinaryConfig{
-			Timeout:        cfg.timeout,
-			ConnectTimeout: cfg.connectTimeout,
-			TLS:            cfg.tlsConfig,
-			PlainUser:      cfg.plainUser,
-			PlainPassword:  cfg.plainPassword,
-			Kerberos:       krbConfig(cfg),
+			Timeout:          cfg.timeout,
+			ConnectTimeout:   cfg.connectTimeout,
+			TLS:              cfg.tlsConfig,
+			PlainUser:        cfg.plainUser,
+			PlainPassword:    cfg.plainPassword,
+			Kerberos:         krbConfig(cfg),
+			MaxResponseBytes: cfg.maxResponseBytes,
 		})
 	default:
 		tc, err = transport.NewHTTP(ctx, ep.URL, transport.HTTPConfig{
-			Client:      cfg.httpClient,
-			Timeout:     cfg.timeout,
-			TLS:         cfg.tlsConfig,
-			BearerToken: cfg.bearerToken,
-			User:        cfg.user,
-			Headers:     cfg.httpHeaders,
-			UserAgent:   userAgent(),
+			Client:           cfg.httpClient,
+			Timeout:          cfg.timeout,
+			TLS:              cfg.tlsConfig,
+			BearerToken:      cfg.bearerToken,
+			User:             cfg.user,
+			Headers:          cfg.httpHeaders,
+			UserAgent:        userAgent(),
+			MaxResponseBytes: cfg.maxResponseBytes,
 		})
 	}
 	if err != nil {

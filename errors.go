@@ -237,6 +237,19 @@ func isUnknownMethod(err error) bool {
 	return errors.As(err, &appErr) && appErr.TypeId() == thrift.UNKNOWN_METHOD
 }
 
+// isProtocolError reports whether err is a thrift.TProtocolException: a
+// reply that failed to decode partway through -- a size over
+// WithMaxResponseBytes, a negative length, a missing required field, a
+// SASL frame over its limit -- with the rest of that reply still unread on
+// the connection. It does not change err's classification (a server that
+// sends such a reply did answer, so it stays ErrMeta and is not retried
+// elsewhere), but do discards the conn instead of handing the next caller
+// a stream positioned mid-reply.
+func isProtocolError(err error) bool {
+	var te thrift.TException
+	return errors.As(err, &te) && te.TExceptionType() == thrift.TExceptionTypeProtocol
+}
+
 // isDesyncError reports whether err is a TApplicationException of the
 // frame-desync class: BAD_SEQUENCE_ID, INVALID_MESSAGE_TYPE_EXCEPTION,
 // PROTOCOL_ERROR, or WRONG_METHOD_NAME. Any of these means the shared

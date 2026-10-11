@@ -23,6 +23,7 @@ restate signatures or version claims.
 ### 1.1. Out of scope for 1.0
 * **Hive 2.2 and earlier**. Hive 2.2 lacks `get_table_req`, and the Hive 4 IDL this client is generated from no longer declares the legacy `get_table` / `get_table_objects_by_name` RPCs, so no fallback can be generated. Hive 2.2 is end of life; Spark 4 still defaults its metastore client to 2.3.10, which makes 2.3 the practical floor.
 * **Compact protocol** (`metastore.thrift.compact.protocol.enabled=true`) and **framed transport** (`metastore.thrift.framed.transport.enabled=true`). Both are off by default on every supported server version.
+* **32-bit platforms**. Package `hms` fails to compile where `int` is narrower than 64 bits (`GOARCH=386`, `arm`, `mips`, `mipsle`): the wire-length arithmetic is written and tested for a 64-bit `int` only.
 
 Kerberos / GSSAPI is **in scope for 1.0** via a pure-Go implementation (`gokrb5`); native C Kerberos remains forbidden by the zero-Cgo invariant. See §3.1 and §5.1 (`WithKerberos`).
 
@@ -106,6 +107,11 @@ The client is generated from the Hive 4 IDL. Fields that older servers do not kn
 * **TLS**: `WithTLS(cfg *tls.Config)` (§5.1) configures the TLS client used for `https://` endpoints, the same option used for `thrift://` (§3.1). It applies to the client this package constructs; a client supplied with `WithHTTPClient` is used as-is, so its own `Transport.TLSClientConfig` governs instead. Combining the two for an `https://` endpoint is rejected by `New` as `ErrInvalidOperation` rather than silently ignoring `WithTLS`.
 * **Connection setup timing**: `WithConnectTimeout` (§3.1, §5.1) has no effect here -- it bounds dialing, the TLS handshake, and the SASL handshake / `set_ugi` over `thrift://` only. Over `http(s)://`, connection setup (dialing, TLS) is governed by the `*http.Client`'s own `Transport` (a caller-supplied one via `WithHTTPClient`, or the default this package builds), and each request -- including the first, which establishes the connection -- is bounded by `WithTimeout` when the caller's `ctx` carries no deadline of its own, the same as every later call.
 
+### 3.3. Response size limit
+* One reply may occupy at most `WithMaxResponseBytes` bytes on the wire (default 100 MiB, libthrift's `DEFAULT_MAX_MESSAGE_SIZE` and the Java client's `thrift.max.message.size`), over both transports. Go Thrift itself checks `MaxMessageSize` per string and per container, not per message, so the client counts the bytes the protocol reads for each reply and resets the count when the next request is flushed. `MaxMessageSize` is set to the same value, and the budget left is reported as the transport's remaining bytes, so an oversized string or container is rejected from its declared length before it is read.
+* A reply over the limit fails with a `TProtocolException(SIZE_LIMIT)`, which classifies as `ErrMeta` (§7) and is not retried on another endpoint: a reply that is too large on one endpoint would be too large on the next. Its connection is discarded (§4.2 point 2).
+* The limit bounds wire bytes, not decoded memory. A degenerate reply such as a list of empty structs decodes to a few hundred times its wire size; lower the limit when the server is not fully trusted.
+
 ---
 
 ## 4. High Availability (HA) & Clustering Specification
@@ -123,6 +129,7 @@ This mirrors the Java `HiveMetaStoreClient`: sticky active endpoint, not round-r
    * The active endpoint is marked unhealthy with an exponential backoff cooldown (initial 1s, max 30s, full jitter).
    * A desync exception additionally means the shared connection's read/write framing is itself corrupted, not merely that one call failed, so the connection is always discarded rather than returned to its pool, regardless of point 3 below.
    * The request is retried on the next healthy endpoint, subject to point 3.
+   * A reply that fails to decode partway through -- a `TProtocolException`: a size over `WithMaxResponseBytes` (§3.3), a negative length, a missing required field, a SASL frame over its limit -- also leaves the rest of that reply unread on the connection, so that connection is discarded too. It is not an endpoint failure: the error classifies as `ErrMeta` (§7), the endpoint is not cooled, and the call is not retried.
 3. **Retry budget**: at most 3 attempts per RPC across endpoints by default (`WithMaxRetries`). Two distinct decisions apply:
    * A connection that could not be **acquired** at all (dial failure, or no pooled connection available) is always retried on another endpoint — this holds for every RPC, idempotent or not, since nothing has reached the server yet.
    * Once the RPC has **started** on an acquired connection, only an idempotent (read-only, `get_*`) RPC is retried elsewhere, and only on `ErrUnavailable` while the caller's context is still live: `GetCatalogs`, `GetCatalog`, `GetAllDatabases`, `GetDatabase`, `GetAllTables`, `GetTable`, `GetTables`, `GetPartitions`, `GetPartitionNames`, `GetPartitionsByNames`, `GetPartitionsByFilter`, `GetPartitionNamesByValues`, `GetTableColumnStatistics`, `GetTableColumnStatisticsForEngine`, `CurrentNotificationID`, `GetNextNotifications`, `GetConfigValue`, `ServerVersion`. Every other RPC (`Create*`, `Alter*`, `Drop*`, `AddPartitions`, and every ACID/lock RPC in §5.9 including `CheckLock` and `Heartbeat`, which advance server-side state) returns the failure immediately once started, since the request may already have reached the server. In the implementation this is the `read` versus `call` choice in `client.go`; a new RPC must pick the one this list implies.
@@ -161,6 +168,7 @@ func WithRandomEndpointOrder() Option
 func WithPoolSize(n int) Option
 func WithChunkSize(n int) Option                // per-request chunk size for GetTables/GetTablesSeq and GetPartitionsByNames/GetPartitionsSeq; default 1000; see §5.4, §5.5
 func WithPartitionBatchSize(n int) Option       // per-request batch size for AddPartitions, AlterPartitions, DropPartitionsByNames/DropPartitions, independent of WithChunkSize; default 1000; see §5.5
+func WithMaxResponseBytes(n int64) Option       // cap on one reply's wire size, both transports; default 100 MiB, also selected by n < 1; see §3.3
 func WithHTTPClient(hc *http.Client) Option
 func WithHTTPHeaders(h map[string]string) Option
 func WithBearerToken(token string) Option       // HTTP JWT mode
@@ -557,7 +565,7 @@ type RPCInfo struct {
 }
 ```
 
-`WithLogger` logs connection lifecycle (dial, close), failover (`MarkFailed`/`MarkHealthy` transitions), and recovery-probe events at `slog.LevelDebug` or `slog.LevelInfo`; it never logs RPC payloads or credentials. `WithRPCObserver`'s `f` is called once per attempt of every RPC (so a retried call invokes it more than once), after that attempt completes; `RPCInfo.Attempt` is 1-based and `Err` is the error `classify` would map (nil on success). An attempt that could not get a connection to the endpoint is an attempt: `f` sees it with the dial failure in `Err` and the time spent acquiring in `Duration`. `f` must not block or call back into the `Client`.
+`WithLogger` logs connection lifecycle (dial, close), failover (`MarkFailed`/`MarkHealthy` transitions), and recovery-probe events at `slog.LevelDebug` or `slog.LevelInfo`; it never logs RPC payloads or credentials. An HTTP endpoint's URL is reported with any userinfo password masked (`url.URL.Redacted`), in log records, in `RPCInfo.Endpoint`, and in the errors `New` returns for an endpoint list it cannot parse. `WithRPCObserver`'s `f` is called once per attempt of every RPC (so a retried call invokes it more than once), after that attempt completes; `RPCInfo.Attempt` is 1-based and `Err` is the error `classify` would map (nil on success). An attempt that could not get a connection to the endpoint is an attempt: `f` sees it with the dial failure in `Err` and the time spent acquiring in `Duration`. `f` must not block or call back into the `Client`.
 
 ---
 
@@ -615,6 +623,7 @@ All HMS exceptions are unwrapped into idiomatic Go errors. The original Thrift e
 | `NoSuchTxnException`, `NoSuchLockException` (§5.9) | `hms.ErrNotFound` | `errors.Is(err, hms.ErrNotFound)` |
 | `TxnAbortedException`, `TxnOpenException` (§5.9) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 | Connection / network failure, context cancellation during I/O, HTTP against a server without the HTTP transport (Hive < 4), `TApplicationException` in the frame-desync class (`BAD_SEQUENCE_ID`, `INVALID_MESSAGE_TYPE_EXCEPTION`, `PROTOCOL_ERROR`, `WRONG_METHOD_NAME`) | `hms.ErrUnavailable` | `errors.Is(err, hms.ErrUnavailable)` |
+| `TProtocolException`: a reply that fails to decode, including one over `WithMaxResponseBytes` (§3.3) | `hms.ErrMeta` | `errors.Is(err, hms.ErrMeta)` |
 | `TApplicationException(UNKNOWN_METHOD)` with no fallback, non-default catalog against Hive 2 | `hms.ErrNotSupported` | `errors.Is(err, hms.ErrNotSupported)` |
 | `ConfigValSecurityException` (`get_config_value` on a key not beginning with `hive`, `mapred`, or `hdfs`) | `hms.ErrInvalidOperation` | `errors.Is(err, hms.ErrInvalidOperation)` |
 

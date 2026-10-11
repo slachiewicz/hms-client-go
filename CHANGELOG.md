@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `WithMaxResponseBytes`, a cap on the wire size of one reply over both transports, default
+  100 MiB. Go Thrift checks its message size limit per string and per container only, so a
+  metastore could stream a reply of any length and the client decoded all of it; a hundred
+  million empty structs cost the server 100 MB and the client tens of gigabytes. A reply over the
+  cap fails with `ErrMeta` (SPEC §3.3).
+
+### Changed
+
+- 64-bit platforms only: package `hms` no longer compiles for `GOARCH=386`, `arm`, `mips` or
+  `mipsle` (SPEC §1.1).
+
+### Fixed
+
+- `CreateDatabase` with an empty `LocationURI` panicked on a nil pointer when `get_catalog`
+  answered without its catalog field, which the IDL allows. It now returns
+  `ErrInvalidOperation`, as for any other unknown warehouse root.
+- A reply that failed to decode partway through (`TProtocolException`) returned its connection
+  to the pool with the rest of the reply unread, so the next call on it read leftover bytes. The
+  connection is now discarded (SPEC §4.2).
+
+### Security
+
+- The password in an HTTP endpoint URI's userinfo (`https://user:pass@host/...`, which net/http
+  sends as Basic auth) was written to log records, `RPCInfo.Endpoint`, and the errors `New`
+  returns for an unparseable, unsupported or mixed-scheme endpoint list. It is now masked
+  (SPEC §5.10).
+
 ## [0.3.0] - 2026-10-05
 
 ### Added

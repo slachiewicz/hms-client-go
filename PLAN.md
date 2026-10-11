@@ -224,7 +224,16 @@ Driven by the `polytable` adoption review; every item is recorded under `0.2.0` 
 - [x] Connection-setup RPCs (`set_ugi`) bounded by `WithConnectTimeout`; migration note in CHANGELOG.md.
 - [x] Real-server matrix green at `ff17b22` (Hive 2.3.9, 3.1.3, 4.0.1, 4.2.1 binary, 4.2.1 HTTP).
 
+### Slice 17: security audit fixes (2026-10-11)
+- [x] `internal/transport/budget.go`: per-reply byte budget under the protocol on both transports, `WithMaxResponseBytes` (default 100 MiB); SPEC §3.3.
+- [x] `client.go`: a `TProtocolException` discards the connection instead of pooling it; still `ErrMeta`, not retried (SPEC §4.2 point 2).
+- [x] `client.go`: `warehouseRoot` tolerates a `get_catalog` reply without its catalog.
+- [x] `internal/transport/uri.go`: `Endpoint.Redacted` for logs, `RPCInfo.Endpoint` and `ParseEndpoints` errors (SPEC §5.10).
+- [x] `arch.go`: the package fails to compile on 32-bit `int` (SPEC §1.1).
+- [x] Unit tests: `TestBudgetTransport*`, `TestMaxResponseBytes` (oversized reply, then a correct answer on a pool of one), `TestCreateDatabase_CatalogWithoutBody`, `TestObserver_RedactsEndpointPassword`, `TestParseEndpoints_ErrorsOmitPassword`, `TestEndpointRedacted`.
+
 ### Open follow-ups (not blocking 1.0)
+- HTTP transport: no `CheckRedirect` policy, so a redirect replays the request with `x-actor-username` and `WithHTTPHeaders` to the redirect target (security audit hardening note, 2026-10-11).
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
 - §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).
 
