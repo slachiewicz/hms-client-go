@@ -247,11 +247,13 @@ The security audit's two deferred units.
 - [x] `serviceTicket`: a panic while gokrb5 parses the KDC's replies is recovered as an error. `KerberosSession.Close` no longer destroys the credentials under an acquisition a cancelled dial abandoned (gokrb5's `Destroy` writes them unlocked); the last acquisition destroys them, and a closed session starts none.
 - [x] Fuzz targets `FuzzVerifyAPRep`, `FuzzUnwrap`, `FuzzKDCReply` (seeds run in `go test`; 60 s each locally found nothing after the fix). `TestKerberosSessionCloseWaitsForAbandonedAcquisition`.
 
+### Slice 20: per-engine statistics against real servers (2026-10-11)
+- [x] `TestColumnStatistics_PerEngine`: writes `spark` then `hive` statistics through the generated client (`rawClient`, since §5.8 is read-only) and reads them back with both methods. Hive 4 keeps the sets apart; 2.3 and 3.1 keep the last write. Runs on the plain binary and HTTP legs; the TLS and Kerberos legs skip it.
+
 ### Open follow-ups (not blocking 1.0)
 - gokrb5's own session-renewal goroutine decrypts KDC replies where the client cannot recover a panic; that path waits on jcmturner/gokrb5#580 (or a fork).
 - CI: actions pinned by tag rather than SHA; `gen-thrift.sh` fetches the IDL without a checksum.
 - Slice 13: `skewedColValueLocationMaps`, gated on a Thrift release.
-- §5.8: `GetTableColumnStatisticsForEngine` is verified against `hmstest` only; the integration matrix has no engine-scoped statistics fixture (nothing in it writes statistics under a non-Hive engine name).
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.

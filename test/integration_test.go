@@ -54,6 +54,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	hms "github.com/slachiewicz/hms-client-go"
+	"github.com/slachiewicz/hms-client-go/gen/hive_metastore"
+	"github.com/slachiewicz/hms-client-go/internal/transport"
 )
 
 // envURIs is the environment variable naming the metastore endpoint(s)
@@ -970,4 +972,99 @@ func TestKerberos(t *testing.T) {
 		}
 		require.Error(t, err, "a principal missing from the keytab must not authenticate")
 	}
+}
+
+// rawClient returns the generated metastore client over the leg's
+// HMS_URIS, for fixtures the public API cannot create because it does not
+// write them (SPEC §5.8 is read-only). It covers the plain thrift:// and
+// the http(s):// legs; the TLS and Kerberos legs skip, since what such a
+// fixture serves is not transport-specific.
+func rawClient(t *testing.T) *hive_metastore.ThriftHiveMetastoreClient {
+	t.Helper()
+	uris, _ := requireHMSEnv(t)
+	if os.Getenv(envTLSCA) != "" || os.Getenv(envKrb5Principal) != "" {
+		t.Skip("raw fixture client covers plain thrift:// and http(s):// legs only")
+	}
+	eps, err := transport.ParseEndpoints(uris)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	var conn *transport.Conn
+	switch eps[0].Scheme {
+	case transport.SchemeThrift:
+		conn, err = transport.DialBinary(ctx, eps[0].Host, transport.BinaryConfig{ConnectTimeout: dialTimeout})
+	default:
+		conn, err = transport.NewHTTP(ctx, eps[0].URL, transport.HTTPConfig{User: os.Getenv(envUser)})
+	}
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return hive_metastore.NewThriftHiveMetastoreClient(conn.Client)
+}
+
+// TestColumnStatistics_PerEngine writes statistics for one column under the
+// "spark" engine and then under "hive", and reads them back through both
+// read methods (SPEC §5.8). Hive 4 keeps a set per engine, so each method
+// sees its own; 2.3 and 3.1 have no engine field, drop it on the wire, and
+// keep one set, so both methods see the last write.
+func TestColumnStatistics_PerEngine(t *testing.T) {
+	t.Parallel()
+	c := dial(t)
+	raw := rawClient(t)
+	_, expectVersion := requireHMSEnv(t)
+	ctx := context.Background()
+
+	dbName := uniqueName("it_statsdb_")
+	createDB(t, c, ctx, dbName, "")
+	const tableName = "engines"
+	require.NoError(t, c.CreateTable(ctx, &hms.Table{
+		DatabaseName: dbName,
+		TableName:    tableName,
+		TableType:    hms.TableTypeManaged,
+		Storage:      textStorage("file:///tmp/"+dbName+"/"+tableName, []*hms.FieldSchema{{Name: "id", Type: "bigint"}}),
+	}))
+
+	write := func(engine string, numNulls int64) {
+		t.Helper()
+		long := hive_metastore.NewLongColumnStatsData()
+		long.NumNulls = numNulls
+		long.NumDVs = 10
+		low, high := int64(1), int64(100)
+		long.LowValue, long.HighValue = &low, &high
+		data := hive_metastore.NewColumnStatisticsData()
+		data.LongStats = long
+		obj := hive_metastore.NewColumnStatisticsObj()
+		obj.ColName, obj.ColType, obj.StatsData = "id", "bigint", data
+		desc := hive_metastore.NewColumnStatisticsDesc()
+		desc.IsTblLevel, desc.DbName, desc.TableName = true, dbName, tableName
+		stats := hive_metastore.NewColumnStatistics()
+		stats.StatsDesc, stats.StatsObj, stats.Engine = desc, []*hive_metastore.ColumnStatisticsObj{obj}, engine
+		ok, err := raw.UpdateTableColumnStatistics(ctx, stats)
+		require.NoError(t, err, "writing %s statistics", engine)
+		require.True(t, ok)
+	}
+	write("spark", 7)
+	write("hive", 1)
+
+	numNulls := func(stats []hms.ColumnStatistics) int64 {
+		t.Helper()
+		require.Len(t, stats, 1)
+		require.NotNil(t, stats[0].Long)
+		assert.Equal(t, "id", stats[0].ColumnName)
+		return stats[0].Long.NumNulls
+	}
+	hive, err := c.GetTableColumnStatistics(ctx, dbName, tableName, []string{"id"})
+	require.NoError(t, err)
+	spark, err := c.GetTableColumnStatisticsForEngine(ctx, dbName, tableName, "spark", []string{"id"})
+	require.NoError(t, err)
+	absent, err := c.GetTableColumnStatisticsForEngine(ctx, dbName, tableName, "impala", []string{"id"})
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1), numNulls(hive))
+	if expectVersion == "4.0" || expectVersion == "4.2" {
+		assert.Equal(t, int64(7), numNulls(spark), "Hive 4 keeps the spark engine's set apart")
+		assert.Empty(t, absent, "no statistics were written under impala")
+		return
+	}
+	assert.Equal(t, int64(1), numNulls(spark), "pre-4 servers keep one engine-less set")
+	assert.Equal(t, int64(1), numNulls(absent))
 }
