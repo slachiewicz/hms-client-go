@@ -3,6 +3,10 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"os/user"
 	"time"
@@ -15,7 +19,8 @@ type HTTPConfig struct {
 	// Client is the underlying HTTP client. If nil, a fresh *http.Client
 	// with Timeout and TLS applied is used in its place. When Client is
 	// set, TLS is ignored: the caller's Transport wins, so configure TLS
-	// on that client directly.
+	// on that client directly. Either way NewHTTP sends through a copy
+	// that refuses redirects and caps response bodies (see hardenClient).
 	Client *http.Client
 	// Timeout bounds each request when Client is nil. Zero means no
 	// client-side timeout; the call's context deadline still governs.
@@ -49,15 +54,9 @@ type HTTPConfig struct {
 // each call's context to the underlying HTTP request, so no ContextClient
 // wrapper is needed here. When cfg.Client is nil, cfg.TLS configures the
 // constructed client's transport for "https://" endpoints (SPEC §3.2); a
-// caller-supplied cfg.Client is used as-is, so its own Transport's TLS
-// configuration governs instead.
+// caller-supplied cfg.Client keeps its own Transport's TLS configuration.
 func NewHTTP(_ context.Context, rawURL string, cfg HTTPConfig) (*Conn, error) {
-	hc := cfg.Client
-	if hc == nil {
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		t.TLSClientConfig = cfg.TLS
-		hc = &http.Client{Timeout: cfg.Timeout, Transport: t}
-	}
+	hc := hardenClient(cfg)
 	t, err := thrift.NewTHttpClientWithOptions(rawURL, thrift.THttpClientOptions{Client: hc})
 	if err != nil {
 		return nil, err
@@ -84,6 +83,84 @@ func NewHTTP(_ context.Context, rawURL string, cfg HTTPConfig) (*Conn, error) {
 	tcfg := &thrift.TConfiguration{MaxMessageSize: maxMessageSize(cfg.MaxResponseBytes)}
 	proto := thrift.NewTBinaryProtocolConf(newBudgetTransport(t, cfg.MaxResponseBytes), tcfg)
 	return &Conn{Client: thrift.NewTStandardClient(proto, proto), Close: t.Close}, nil
+}
+
+// hardenClient returns the *http.Client NewHTTP sends through: cfg.Client
+// when set, else one built from cfg.Timeout and cfg.TLS. Either way it is a
+// shallow copy whose CheckRedirect refuses redirects (unless the caller's
+// client sets its own policy) and whose response bodies are capped, so
+// neither the caller's client nor http.DefaultClient is modified.
+//
+// A metastore never redirects a Thrift call. Following one would replay
+// the request, with Authorization, x-actor-username and every WithHTTPHeaders
+// header, to wherever the redirect points; Go keeps Authorization on a
+// same-host https-to-http redirect and forwards custom headers to any host.
+//
+// THttpClient drains each response body to completion before reusing the
+// connection, with no limit of its own, so a reply that never ends would
+// hold the next call forever when no deadline applies. The cap stops the
+// drain at cfg.MaxResponseBytes; the connection is then closed rather than
+// reused.
+func hardenClient(cfg HTTPConfig) *http.Client {
+	var hc http.Client
+	if cfg.Client != nil {
+		hc = *cfg.Client
+	} else {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.TLSClientConfig = cfg.TLS
+		hc = http.Client{Timeout: cfg.Timeout, Transport: t}
+	}
+	if hc.CheckRedirect == nil {
+		hc.CheckRedirect = refuseRedirect
+	}
+	rt := hc.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	hc.Transport = capBody{rt: rt, limit: responseCap(cfg.MaxResponseBytes)}
+	return &hc
+}
+
+// errRedirect is returned, wrapped in a *url.Error, when a metastore
+// answers with a redirect.
+var errRedirect = errors.New("hms: the metastore answered with a redirect, which is refused")
+
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	u := *req.URL
+	return fmt.Errorf("%w (to %s)", errRedirect, u.Redacted())
+}
+
+// responseCap is the byte cap capBody applies: the reply budget, plus one so
+// the budget transport, not a silent EOF, reports a reply that exceeds it.
+func responseCap(limit int64) int64 {
+	if limit <= 0 {
+		limit = DefaultMaxResponseBytes
+	}
+	if limit == math.MaxInt64 {
+		return limit
+	}
+	return limit + 1
+}
+
+// capBody wraps a RoundTripper so every response body yields at most limit
+// bytes.
+type capBody struct {
+	rt    http.RoundTripper
+	limit int64
+}
+
+func (c capBody) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.rt.RoundTrip(req)
+	if err != nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = cappedBody{Reader: io.LimitReader(resp.Body, c.limit), Closer: resp.Body}
+	return resp, nil
+}
+
+type cappedBody struct {
+	io.Reader
+	io.Closer
 }
 
 // setHeader replaces any existing values of k on h with the single value v.

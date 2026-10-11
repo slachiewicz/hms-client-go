@@ -406,7 +406,7 @@ func (m *gssapiMech) verifyAPRep(token []byte) error {
 		if err := kerr.Unmarshal(msg); err != nil {
 			return fmt.Errorf("hms: kerberos: the server rejected the AP_REQ with an unreadable error: %w", err)
 		}
-		return fmt.Errorf("hms: kerberos: the server rejected the AP_REQ: %s", kerr.Error())
+		return fmt.Errorf("hms: kerberos: the server rejected the AP_REQ: %q", kerr.Error())
 	case tokIDAPRep:
 		// The expected reply; parsed below.
 	default:

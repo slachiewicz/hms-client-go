@@ -261,8 +261,10 @@ func WithMaxResponseBytes(n int64) Option {
 
 // WithHTTPClient sets the *http.Client used for the "http://" and "https://"
 // transports. If unset, a default client is constructed. The supplied
-// client is used as-is: its Transport governs TLS, proxies, and connection
-// pooling, and WithTimeout does not override its Timeout. For an "https://"
+// client's Transport governs TLS, proxies, and connection pooling, and
+// WithTimeout does not override its Timeout. The client is copied, never
+// modified: the copy refuses redirects unless the client sets its own
+// CheckRedirect, and caps response bodies at WithMaxResponseBytes. For an "https://"
 // endpoint it cannot be combined with WithTLS (see there).
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *config) { c.httpClient = hc }
@@ -396,7 +398,7 @@ func WithKrb5Config(path string) Option {
 // endpoints. cfg is never mutated; the per-endpoint name goes on a clone.
 //
 // It cannot be combined with WithHTTPClient for an "https://" endpoint:
-// a supplied client is used as-is, so its own Transport's TLS
+// a supplied client keeps its own Transport's TLS
 // configuration governs and this one would be silently ignored. New
 // rejects that combination with ErrInvalidOperation; configure TLS on the
 // supplied client instead.

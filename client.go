@@ -128,6 +128,7 @@ func New(ctx context.Context, uris string, opts ...Option) (*Client, error) {
 	if err := validateTransport(cfg, eps); err != nil {
 		return nil, wrapAs("New", ErrInvalidOperation, err)
 	}
+	warnCleartext(cfg, eps)
 
 	// The caller's Kerberos credentials are loaded once here, not once per
 	// dial: the gokrb5 client behind them runs a session-renewal goroutine

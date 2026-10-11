@@ -344,7 +344,7 @@ func validateAuth(cfg *config, eps []transport.Endpoint) error {
 
 // validateTransport reports a caller mistake in the HTTP transport's TLS
 // configuration: WithTLS and WithHTTPClient both set for an "https://"
-// endpoint. NewHTTP uses a caller-supplied client as-is -- its own
+// endpoint. NewHTTP keeps a caller-supplied client's Transport -- its own
 // Transport's TLS configuration governs -- so WithTLS would be silently
 // ignored there, which is exactly the kind of quiet downgrade (a custom
 // RootCAs or client certificate that never reaches the server) this
@@ -365,6 +365,24 @@ func validateTransport(cfg *config, eps []transport.Endpoint) error {
 		}
 	}
 	return nil
+}
+
+// warnCleartext logs, at slog.LevelWarn, configured credentials that would
+// cross the network without TLS: a WithPlainAuth password over "thrift://"
+// without WithTLS, or a WithBearerToken token over "http://". Both are
+// legitimate inside a trusted network, as they are for the Java client, so
+// New accepts them; the warning makes the choice visible.
+func warnCleartext(cfg *config, eps []transport.Endpoint) {
+	switch eps[0].Scheme {
+	case transport.SchemeThrift:
+		if cfg.plainUser != "" && cfg.tlsConfig == nil {
+			cfg.logger.Warn("WithPlainAuth sends the password without TLS; set WithTLS to encrypt it")
+		}
+	case transport.SchemeHTTP:
+		if cfg.bearerToken != "" {
+			cfg.logger.Warn("WithBearerToken sends the token over http://; use an https:// endpoint to encrypt it")
+		}
+	}
 }
 
 // useLegacy reports whether method previously observed UNKNOWN_METHOD on
