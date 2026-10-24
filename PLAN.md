@@ -252,7 +252,6 @@ The security audit's two deferred units.
 
 ### Open follow-ups (not blocking 1.0)
 - gokrb5's own session-renewal goroutine decrypts KDC replies where the client cannot recover a panic; that path waits on jcmturner/gokrb5#580 (or a fork).
-- CI: actions pinned by tag rather than SHA; `gen-thrift.sh` fetches the IDL without a checksum.
 
 ### Downstream: adoption in `polytable`
 Tracked in the `polytable` repository, not here: replace `github.com/beltran/gohive` with this module in `pkg/catalog/hms.go` and confirm its unit and Docker suites pass. This module reaches 1.0.0 only after that adoption has shipped.
