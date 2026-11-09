@@ -7,7 +7,6 @@ package ha
 import (
 	"crypto/rand"
 	"math/big"
-	"sort"
 	"sync"
 	"time"
 )
@@ -39,13 +38,51 @@ type Cluster struct {
 	posOf []int
 	pos   int
 
-	// coolUntil[idx] is the zero Time when idx is not cooling, otherwise
-	// the time at which its current cooldown ends.
-	coolUntil []time.Time
-	// level[idx] is the backoff ceiling used by idx's most recent
-	// cooldown (0 before any failure or after MarkHealthy), so the next
+	// health[idx] is endpoint idx's place in the health state machine.
+	health []endpointHealth
+}
+
+// healthState is where one endpoint stands. The transitions are:
+//
+//	healthy    --MarkFailed-->        cooling (ceiling minBackoff)
+//	cooling    --cooldown elapses-->  recovering
+//	recovering --MarkFailed-->        cooling (ceiling doubled, capped at maxBackoff)
+//	cooling    --MarkFailed-->        cooling (ceiling doubled, capped at maxBackoff)
+//	cooling    --MarkHealthy-->       healthy
+//	recovering --MarkHealthy-->       healthy
+//
+// Pick skips only cooling endpoints, so a recovering endpoint takes
+// traffic again; it differs from a healthy one only in that its next
+// failure doubles the backoff instead of starting over. Only the
+// cooling-to-healthy edge counts as a transition for logging (SPEC §5.10).
+type healthState int
+
+const (
+	healthy healthState = iota
+	cooling
+	recovering
+)
+
+// endpointHealth holds the data behind one endpoint's healthState.
+type endpointHealth struct {
+	// coolUntil is when the current or most recent cooldown ends; the zero
+	// Time means the endpoint is healthy.
+	coolUntil time.Time
+	// ceiling is the backoff ceiling of that cooldown, so the next
 	// consecutive failure can double it.
-	level []time.Duration
+	ceiling time.Duration
+}
+
+// state reports h's healthState at now.
+func (h endpointHealth) state(now time.Time) healthState {
+	switch {
+	case h.coolUntil.IsZero():
+		return healthy
+	case now.Before(h.coolUntil):
+		return cooling
+	default:
+		return recovering
+	}
 }
 
 // New returns a Cluster over n endpoints (indexed 0..n-1). When random is
@@ -72,11 +109,10 @@ func New(n int, random bool, now func() time.Time) *Cluster {
 		posOf[idx] = p
 	}
 	return &Cluster{
-		now:       now,
-		order:     order,
-		posOf:     posOf,
-		coolUntil: make([]time.Time, n),
-		level:     make([]time.Duration, n),
+		now:    now,
+		order:  order,
+		posOf:  posOf,
+		health: make([]endpointHealth, n),
 	}
 }
 
@@ -93,15 +129,12 @@ func New(n int, random bool, now func() time.Time) *Cluster {
 func (c *Cluster) Pick() (idx int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.now()
-	for i := 0; i < len(c.order); i++ {
-		p := (c.pos + i) % len(c.order)
-		if e := c.order[p]; !c.coolingAt(e, now) {
-			c.pos = p
-			return e, true
-		}
+	p, ok := c.firstAvailable(c.pos, c.now())
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	c.pos = p
+	return c.order[p], true
 }
 
 // MarkFailed records a failure of endpoint idx: its cooldown ceiling
@@ -119,30 +152,20 @@ func (c *Cluster) MarkFailed(idx int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
-	transitioned := !c.coolingAt(idx, now)
+	h := &c.health[idx]
+	transitioned := h.state(now) != cooling
 
-	ceiling := c.level[idx]
-	if ceiling <= 0 {
-		ceiling = minBackoff
+	if h.ceiling <= 0 {
+		h.ceiling = minBackoff
 	} else {
-		ceiling *= 2
-		if ceiling > maxBackoff {
-			ceiling = maxBackoff
-		}
+		h.ceiling = min(2*h.ceiling, maxBackoff)
 	}
-	c.level[idx] = ceiling
-	jitter := time.Duration(cryptoRandInt63n(int64(ceiling)))
-	c.coolUntil[idx] = now.Add(jitter)
+	h.coolUntil = now.Add(time.Duration(cryptoRandInt63n(int64(h.ceiling))))
 
-	pos := c.posOf[idx]
-	for i := 1; i <= len(c.order); i++ {
-		p := (pos + i) % len(c.order)
-		if e := c.order[p]; !c.coolingAt(e, now) {
-			c.pos = p
-			return transitioned
-		}
+	// Every endpoint (including idx itself) cooling leaves pos as is.
+	if p, ok := c.firstAvailable(c.posOf[idx]+1, now); ok {
+		c.pos = p
 	}
-	// Every endpoint (including idx itself) is cooling; leave pos as is.
 	return transitioned
 }
 
@@ -158,9 +181,8 @@ func (c *Cluster) MarkFailed(idx int) bool {
 func (c *Cluster) MarkHealthy(idx int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	transitioned := c.coolingAt(idx, c.now())
-	c.coolUntil[idx] = time.Time{}
-	c.level[idx] = 0
+	transitioned := c.health[idx].state(c.now()) == cooling
+	c.health[idx] = endpointHealth{}
 	return transitioned
 }
 
@@ -172,19 +194,25 @@ func (c *Cluster) Cooling() []int {
 	defer c.mu.Unlock()
 	now := c.now()
 	var out []int
-	for idx := range c.coolUntil {
-		if c.coolingAt(idx, now) {
+	for idx, h := range c.health {
+		if h.state(now) == cooling {
 			out = append(out, idx)
 		}
 	}
-	sort.Ints(out)
 	return out
 }
 
-// coolingAt reports whether idx is still cooling at now. c.mu must be held.
-func (c *Cluster) coolingAt(idx int, now time.Time) bool {
-	u := c.coolUntil[idx]
-	return !u.IsZero() && now.Before(u)
+// firstAvailable returns the first position in pick order, starting at
+// start and wrapping around, whose endpoint is not cooling at now, or
+// ok=false when every endpoint is. c.mu must be held.
+func (c *Cluster) firstAvailable(start int, now time.Time) (pos int, ok bool) {
+	for i := range len(c.order) {
+		p := (start + i) % len(c.order)
+		if c.health[c.order[p]].state(now) != cooling {
+			return p, true
+		}
+	}
+	return 0, false
 }
 
 // cryptoRandInt63n returns a uniform random int64 in [0, n) drawn from
